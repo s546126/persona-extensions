@@ -1,0 +1,50 @@
+{
+  "manifest_version": 1,
+  "id": "spaces",
+  "name": "Muse 空间",
+  "version": "0.1.0",
+  "description": "多空间的本体工作台：像 Muse（Glint）那样按空间组织动态、点子、目标、资源库四个核心视图，再像 EAV（实体-属性-值）本体那样给每个空间注册自己的对象类型（字段、状态、关系），界面按类型的字段自动生成表格、卡片和表单。自带 LifeOS 家庭、薅羊毛、云电脑三个模板空间，点子可以一键孵化为目标并记下关系，每次改动都写进动态流。附带本地 MCP 服务器（spaces mcp），助手可以只读查询，写入要你确认。数据只存在扩展自己的数据目录里，不出网、不要密钥。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/spaces.md",
+  "tags": ["空间", "本体", "知识库", "目标"],
+  "engines": {"extension_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/spaces-linux-amd64",
+      "linux-arm64": "bin/spaces-linux-arm64",
+      "darwin-amd64": "bin/spaces-darwin-amd64",
+      "darwin-arm64": "bin/spaces-darwin-arm64"
+    }
+  },
+  "contributes": {
+    "ui": [
+      {"id": "spaces", "title": "空间", "placement": "nav_page", "icon": "folder"},
+      {"id": "spaces-card", "title": "空间概览", "placement": "overview_card", "opens": "spaces"},
+      {"id": "spaces-widget", "title": "空间目标", "placement": "widget",
+       "families": ["small", "medium", "large", "accessory_rectangular", "accessory_inline"],
+       "refresh_minutes": 30, "opens": "spaces"}
+    ],
+    "shortcuts": [
+      {"id": "spaces-capture", "title": "空间：记个点子", "description": "向当前空间快速记录一条灵感点子并写入动态流",
+       "params": [{"name": "text", "title": "点子内容", "kind": "text", "required": true}], "ui": "spaces"},
+      {"id": "spaces-progress", "title": "空间：更新目标进度", "description": "按名称匹配当前空间的目标并更新进度数值",
+       "params": [
+         {"name": "goal", "title": "目标名称", "kind": "text", "required": true},
+         {"name": "value", "title": "当前进度", "kind": "number", "required": true}
+       ], "ui": "spaces"}
+    ],
+    "skills": [
+      {"id": "spaces", "dir": "skills/spaces"}
+    ],
+    "mcp_servers": [
+      {
+        "id": "spaces",
+        "command": "spaces",
+        "env": "PERSONA_SPACES_BIN",
+        "args": ["mcp"],
+        "requires": ["mcp"],
+        "allow": ["space_list", "space_query", "space_schema_get"]
+      }
+    ]
+  }
+}
