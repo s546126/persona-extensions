@@ -1,0 +1,91 @@
+{
+  "key": "cloud",
+  "name": "主机与手册",
+  "icon": "code",
+  "about": "主机节点、服务分组和运维手册：哪台在哪个区域、月费多少、何时到期、出事照哪本手册做。",
+  "types": [
+    {
+      "key": "group",
+      "name": "节点分组",
+      "props": [
+        {"key": "env", "name": "环境", "kind": "enum", "options": ["生产", "预发", "开发", "备份"]},
+        {"key": "note", "name": "说明", "kind": "text"},
+        {"key": "hosts", "name": "主机数", "kind": "rollup", "via": "host.group", "op": "count"},
+        {"key": "monthly_cost", "name": "月费合计", "kind": "rollup", "via": "host.group", "op": "sum", "of": "monthly_cost", "unit": "元"},
+        {"key": "ready", "name": "运行率", "kind": "rollup", "via": "host.group", "op": "percent_done"}
+      ],
+      "card": {"lead": "note", "pills": ["env", "hosts", "monthly_cost"], "progress": {"of": "ready"}},
+      "views": [
+        {"name": "进度", "kind": "progress"},
+        {"name": "列表", "kind": "list", "group": "env"},
+        {"name": "表格", "kind": "table", "agg": [{"op": "count"}, {"op": "sum", "of": "monthly_cost"}]}
+      ]
+    },
+    {
+      "key": "host",
+      "name": "主机节点",
+      "flow": [
+        {"name": "待开通", "phase": "todo"},
+        {"name": "维护中", "phase": "doing"},
+        {"name": "运行中", "phase": "done"},
+        {"name": "已释放", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "group", "name": "分组", "kind": "relation", "target": "group", "back": "主机节点"},
+        {"key": "provider", "name": "服务商", "kind": "text"},
+        {"key": "region", "name": "区域", "kind": "enum", "options": ["华东", "华南", "华北", "海外"]},
+        {"key": "spec", "name": "规格", "kind": "text"},
+        {"key": "monthly_cost", "name": "月费", "kind": "number", "unit": "元"},
+        {"key": "expires", "name": "到期日", "kind": "date"},
+        {"key": "runbooks", "name": "手册数", "kind": "rollup", "via": "runbook.hosts", "op": "count"}
+      ],
+      "card": {"lead": "spec", "pills": ["region", "monthly_cost", "expires", "group"]},
+      "views": [
+        {"name": "表格", "kind": "table", "sort": [{"by": "expires"}], "agg": [{"op": "count"}, {"op": "sum", "of": "monthly_cost"}]},
+        {"name": "看板", "kind": "board"},
+        {"name": "按区域", "kind": "list", "group": "region"}
+      ]
+    },
+    {
+      "key": "runbook",
+      "name": "运维手册",
+      "flow": [
+        {"name": "草稿", "phase": "todo"},
+        {"name": "演练中", "phase": "doing"},
+        {"name": "可用", "phase": "done"},
+        {"name": "归档", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "summary", "name": "用途", "kind": "text"},
+        {"key": "steps", "name": "步骤", "kind": "text"},
+        {"key": "hosts", "name": "适用主机", "kind": "relation", "target": "host", "many": true, "back": "运维手册"},
+        {"key": "host_count", "name": "适用台数", "kind": "rollup", "via": "hosts", "op": "count"},
+        {"key": "url", "name": "参考链接", "kind": "url"}
+      ],
+      "card": {"lead": "summary", "pills": ["host_count"]},
+      "views": [
+        {"name": "列表", "kind": "list"},
+        {"name": "看板", "kind": "board"},
+        {"name": "动态", "kind": "feed"}
+      ]
+    }
+  ],
+  "samples": [
+    {"ref": "group_dev", "type": "group", "title": "开发与构建组",
+     "values": {"env": "开发", "note": "日常编译、联调与自动化测试节点。"}},
+    {"ref": "group_bak", "type": "group", "title": "冷备与归档组",
+     "values": {"env": "备份", "note": "周期性快照与离线归档节点。"}},
+    {"ref": "host_a", "type": "host", "title": "节点 A", "status": "运行中",
+     "values": {"group": "@group_dev", "provider": "示例云厂商甲", "region": "华东", "spec": "4 核 8 GB", "monthly_cost": 89, "expires": "+25d"}},
+    {"ref": "host_b", "type": "host", "title": "节点 B", "status": "维护中",
+     "values": {"group": "@group_dev", "provider": "示例云厂商甲", "region": "华北", "spec": "2 核 4 GB", "monthly_cost": 45, "expires": "+60d"}},
+    {"ref": "host_c", "type": "host", "title": "节点 C", "status": "运行中",
+     "values": {"group": "@group_bak", "provider": "示例云厂商乙", "region": "华南", "spec": "2 核 4 GB", "monthly_cost": 35, "expires": "+90d"}},
+    {"ref": "rb_init", "type": "runbook", "title": "新节点初始化步骤", "status": "可用",
+     "values": {"summary": "新节点开通后二十分钟内配好基础环境。", "steps": "1. 配置密钥登录与防火墙规则\n2. 安装基础运行环境与常用工具\n3. 拉取代码并执行自检脚本", "hosts": ["@host_a", "@host_b"], "url": "https://example.com/runbooks/node-setup"}},
+    {"ref": "rb_renew", "type": "runbook", "title": "到期前续费与迁移检查", "status": "草稿",
+     "values": {"summary": "到期前一周确认续费、降配或迁出数据。", "steps": "1. 核对账单与资源使用率\n2. 备份数据盘快照\n3. 确认续费或释放节点", "hosts": ["@host_a", "@host_c"]}},
+    {"ref": "rb_backup", "type": "runbook", "title": "每周快照归档校验", "status": "演练中",
+     "values": {"summary": "每周抽查一份备份快照，确认可正常挂载恢复。", "hosts": ["@host_c"], "url": "https://example.com/runbooks/snapshot-verify"}}
+  ]
+}

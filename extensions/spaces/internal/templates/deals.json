@@ -1,0 +1,98 @@
+{
+  "key": "deals",
+  "name": "好价与优惠",
+  "icon": "money",
+  "about": "好价线报、商家渠道和优惠券：记下原价、到手价、省了多少和什么时候失效。",
+  "types": [
+    {
+      "key": "merchant",
+      "name": "商家渠道",
+      "flow": [
+        {"name": "观察", "phase": "todo"},
+        {"name": "常用", "phase": "done"},
+        {"name": "停用", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "platform", "name": "平台", "kind": "enum", "options": ["综合电商", "仓储超市", "生鲜外送", "官方商城", "线下门店"]},
+        {"key": "url", "name": "入口", "kind": "url"},
+        {"key": "note", "name": "备注", "kind": "text"},
+        {"key": "deals", "name": "线报数", "kind": "rollup", "via": "deal.merchant", "op": "count"},
+        {"key": "saved_total", "name": "累计省下", "kind": "rollup", "via": "deal.merchant", "op": "sum", "of": "saved", "unit": "元"},
+        {"key": "coupons", "name": "优惠券数", "kind": "rollup", "via": "coupon.merchant", "op": "count"}
+      ],
+      "card": {"lead": "note", "pills": ["platform", "deals", "saved_total"]},
+      "views": [
+        {"name": "列表", "kind": "list", "group": "platform"},
+        {"name": "表格", "kind": "table", "agg": [{"op": "count"}, {"op": "sum", "of": "saved_total"}]}
+      ]
+    },
+    {
+      "key": "deal",
+      "name": "好价线报",
+      "flow": [
+        {"name": "关注中", "phase": "todo"},
+        {"name": "凑单中", "phase": "doing"},
+        {"name": "已入手", "phase": "done"},
+        {"name": "已失效", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "category", "name": "分类", "kind": "enum", "options": ["数码", "食品", "日用", "服饰", "其他"]},
+        {"key": "merchant", "name": "商家", "kind": "relation", "target": "merchant", "back": "好价线报"},
+        {"key": "original_price", "name": "原价", "kind": "number", "unit": "元"},
+        {"key": "final_price", "name": "到手价", "kind": "number", "unit": "元"},
+        {"key": "saved", "name": "省下", "kind": "number", "unit": "元"},
+        {"key": "expires", "name": "有效期至", "kind": "date"},
+        {"key": "url", "name": "链接", "kind": "url"}
+      ],
+      "card": {"pills": ["category", "merchant", "final_price", "saved"]},
+      "views": [
+        {"name": "看板", "kind": "board"},
+        {"name": "表格", "kind": "table", "sort": [{"by": "expires"}], "agg": [{"op": "count"}, {"op": "sum", "of": "saved"}]},
+        {"name": "最新线报", "kind": "feed"}
+      ]
+    },
+    {
+      "key": "coupon",
+      "name": "优惠券",
+      "flow": [
+        {"name": "可用", "phase": "todo"},
+        {"name": "待核销", "phase": "doing"},
+        {"name": "已使用", "phase": "done"},
+        {"name": "已过期", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "merchant", "name": "商家", "kind": "relation", "target": "merchant", "back": "优惠券"},
+        {"key": "threshold", "name": "门槛", "kind": "number", "unit": "元"},
+        {"key": "discount", "name": "减免", "kind": "number", "unit": "元"},
+        {"key": "expires", "name": "过期日", "kind": "date"},
+        {"key": "code", "name": "券码", "kind": "text"}
+      ],
+      "card": {"lead": "code", "pills": ["merchant", "threshold", "discount", "expires"]},
+      "views": [
+        {"name": "看板", "kind": "board"},
+        {"name": "表格", "kind": "table", "sort": [{"by": "expires"}], "agg": [{"op": "count"}, {"op": "sum", "of": "discount"}]},
+        {"name": "可用券", "kind": "list", "where": [{"field": "phase", "op": "eq", "value": "todo"}], "sort": [{"by": "expires"}]}
+      ]
+    }
+  ],
+  "samples": [
+    {"ref": "merchant_digital", "type": "merchant", "title": "示例数码店", "status": "常用",
+     "values": {"platform": "综合电商", "url": "https://example.com/shop/digital", "note": "发货快，支持三十天价保。"}},
+    {"ref": "merchant_club", "type": "merchant", "title": "示例仓储超市", "status": "常用",
+     "values": {"platform": "仓储超市", "url": "https://example.com/shop/club", "note": "适合整箱采购家庭常备消耗品。"}},
+    {"ref": "merchant_drink", "type": "merchant", "title": "示例饮品店", "status": "观察",
+     "values": {"platform": "生鲜外送", "note": "周二常有免配送费活动。"}},
+    {"ref": "deal_headphones", "type": "deal", "title": "无线降噪耳机特惠", "status": "关注中",
+     "values": {"category": "数码", "merchant": "@merchant_digital", "original_price": 1299, "final_price": 899, "saved": 400, "expires": "+3d", "url": "https://example.com/deals/headphones"}},
+    {"ref": "deal_drive", "type": "deal", "title": "移动固态硬盘满减", "status": "已入手",
+     "values": {"category": "数码", "merchant": "@merchant_digital", "original_price": 599, "final_price": 449, "saved": 150, "expires": "+5d", "url": "https://example.com/deals/drive"}},
+    {"ref": "deal_nuts", "type": "deal", "title": "混合坚果礼盒两件折", "status": "已入手",
+     "values": {"category": "食品", "merchant": "@merchant_club", "original_price": 238, "final_price": 179, "saved": 59, "expires": "+1d"}},
+    {"ref": "deal_coffee", "type": "deal", "title": "饮品十次卡券包", "status": "凑单中",
+     "values": {"category": "食品", "merchant": "@merchant_drink", "original_price": 180, "final_price": 99, "saved": 81, "expires": "+7d"}},
+    {"ref": "coupon_digital", "type": "coupon", "title": "数码满 500 减 40 券", "status": "可用",
+     "values": {"merchant": "@merchant_digital", "threshold": 500, "discount": 40, "expires": "+5d", "code": "优惠码甲"}},
+    {"ref": "coupon_club", "type": "coupon", "title": "超市满 200 减 20 券", "status": "已使用",
+     "values": {"merchant": "@merchant_club", "threshold": 200, "discount": 20, "expires": "-2d", "code": "优惠码乙"}}
+  ]
+}

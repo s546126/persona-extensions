@@ -1,0 +1,117 @@
+{
+  "key": "household",
+  "name": "家庭与家务",
+  "icon": "check",
+  "about": "东西放在哪、什么快用完、这周吃什么、谁做什么家务。",
+  "types": [
+    {
+      "key": "location",
+      "name": "收纳位置",
+      "props": [
+        {"key": "room", "name": "房间", "kind": "enum", "options": ["厨房", "客厅", "阳台", "卧室", "卫生间"]},
+        {"key": "note", "name": "备注", "kind": "text"},
+        {"key": "items", "name": "物品数", "kind": "rollup", "via": "stock.location", "op": "count"}
+      ],
+      "card": {"lead": "note", "pills": ["room", "items"]},
+      "views": [
+        {"name": "列表", "kind": "list", "group": "room"},
+        {"name": "表格", "kind": "table", "agg": [{"op": "count"}, {"op": "sum", "of": "items"}]}
+      ]
+    },
+    {
+      "key": "stock",
+      "name": "家庭库存",
+      "flow": [
+        {"name": "待补货", "phase": "todo"},
+        {"name": "快用完", "phase": "doing"},
+        {"name": "在库", "phase": "done"},
+        {"name": "停用", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "category", "name": "分类", "kind": "enum", "options": ["食品", "日用", "药品", "清洁", "其他"]},
+        {"key": "location", "name": "位置", "kind": "relation", "target": "location", "back": "库存物品"},
+        {"key": "qty", "name": "数量", "kind": "number"},
+        {"key": "unit", "name": "单位", "kind": "text"},
+        {"key": "expires", "name": "过期日", "kind": "date"},
+        {"key": "restock", "name": "需补货", "kind": "boolean"}
+      ],
+      "card": {"pills": ["category", "location", "qty", "expires"]},
+      "views": [
+        {"name": "看板", "kind": "board"},
+        {"name": "表格", "kind": "table", "sort": [{"by": "expires"}], "agg": [{"op": "count"}]},
+        {"name": "按位置", "kind": "list", "group": "location"}
+      ]
+    },
+    {
+      "key": "meal",
+      "name": "餐食计划",
+      "flow": [
+        {"name": "计划中", "phase": "todo"},
+        {"name": "备菜中", "phase": "doing"},
+        {"name": "已完成", "phase": "done"},
+        {"name": "取消", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "date", "name": "日期", "kind": "date"},
+        {"key": "slot", "name": "餐次", "kind": "enum", "options": ["早餐", "午餐", "晚餐", "加餐"]},
+        {"key": "dishes", "name": "菜品", "kind": "text"},
+        {"key": "ingredients", "name": "食材", "kind": "relation", "target": "stock", "many": true, "back": "用于餐食"},
+        {"key": "ready", "name": "食材备齐", "kind": "rollup", "via": "ingredients", "op": "percent_done"},
+        {"key": "servings", "name": "份数", "kind": "number", "unit": "人份"}
+      ],
+      "card": {"lead": "dishes", "pills": ["date", "slot", "servings"], "progress": {"of": "ready"}},
+      "views": [
+        {"name": "列表", "kind": "list", "sort": [{"by": "date"}]},
+        {"name": "看板", "kind": "board"},
+        {"name": "进度", "kind": "progress", "sort": [{"by": "date"}]}
+      ]
+    },
+    {
+      "key": "chore",
+      "name": "家务事项",
+      "flow": [
+        {"name": "待办", "phase": "todo"},
+        {"name": "进行中", "phase": "doing"},
+        {"name": "已完成", "phase": "done"},
+        {"name": "跳过", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "assignee", "name": "负责人", "kind": "text"},
+        {"key": "frequency", "name": "频率", "kind": "enum", "options": ["每天", "每周", "每月", "按需"]},
+        {"key": "due", "name": "下次日期", "kind": "date"},
+        {"key": "location", "name": "位置", "kind": "relation", "target": "location", "back": "相关家务"},
+        {"key": "minutes", "name": "用时", "kind": "number", "unit": "分钟"}
+      ],
+      "card": {"pills": ["assignee", "frequency", "due", "minutes"]},
+      "views": [
+        {"name": "看板", "kind": "board"},
+        {"name": "表格", "kind": "table", "sort": [{"by": "due"}], "agg": [{"op": "count"}, {"op": "sum", "of": "minutes"}]},
+        {"name": "按频率", "kind": "list", "group": "frequency"}
+      ]
+    }
+  ],
+  "samples": [
+    {"ref": "loc_fridge", "type": "location", "title": "厨房冰箱",
+     "values": {"room": "厨房", "note": "上层冷藏日常食材，下层冷冻肉类。"}},
+    {"ref": "loc_cabinet", "type": "location", "title": "阳台储物柜",
+     "values": {"room": "阳台", "note": "清洁用品与备用纸品。"}},
+    {"ref": "loc_medbox", "type": "location", "title": "客厅药箱",
+     "values": {"room": "客厅", "note": "每季度检查一次有效期。"}},
+    {"ref": "stock_milk", "type": "stock", "title": "纯牛奶", "status": "快用完",
+     "values": {"category": "食品", "location": "@loc_fridge", "qty": 2, "unit": "盒", "expires": "+5d", "restock": true}},
+    {"ref": "stock_eggs", "type": "stock", "title": "鸡蛋", "status": "在库",
+     "values": {"category": "食品", "location": "@loc_fridge", "qty": 12, "unit": "个", "expires": "+14d", "restock": false}},
+    {"ref": "stock_detergent", "type": "stock", "title": "洗衣液", "status": "在库",
+     "values": {"category": "清洁", "location": "@loc_cabinet", "qty": 1, "unit": "瓶", "restock": false}},
+    {"ref": "stock_swab", "type": "stock", "title": "消毒棉签", "status": "在库",
+     "values": {"category": "药品", "location": "@loc_medbox", "qty": 2, "unit": "包", "expires": "+180d"}},
+    {"ref": "meal_wed", "type": "meal", "title": "周三晚餐", "status": "计划中",
+     "values": {"date": "+1d", "slot": "晚餐", "dishes": "番茄炒蛋、清炒时蔬", "ingredients": ["@stock_eggs"], "servings": 3}},
+    {"ref": "meal_wknd", "type": "meal", "title": "周末早午餐", "status": "计划中",
+     "values": {"date": "+4d", "slot": "午餐", "dishes": "牛奶燕麦粥、煎蛋三明治", "ingredients": ["@stock_milk", "@stock_eggs"], "servings": 2}},
+    {"ref": "chore_water", "type": "chore", "title": "给绿植浇水", "status": "待办",
+     "values": {"assignee": "家人甲", "frequency": "每周", "due": "+2d", "location": "@loc_cabinet", "minutes": 10}},
+    {"ref": "chore_fridge", "type": "chore", "title": "清理冰箱临期食品", "status": "进行中",
+     "values": {"assignee": "家人乙", "frequency": "每月", "due": "+0d", "location": "@loc_fridge", "minutes": 30}}
+  ]
+}

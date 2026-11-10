@@ -51,7 +51,7 @@ func TestTemplatesInOrder(t *testing.T) {
 	for _, tpl := range All() {
 		keys = append(keys, tpl.Key)
 	}
-	if want := []string{"project", "reading", "inventory", "blank"}; !slices.Equal(keys, want) {
+	if want := []string{"project", "reading", "inventory", "household", "deals", "cloud", "blank"}; !slices.Equal(keys, want) {
 		t.Fatalf("All() keys = %v, want %v", keys, want)
 	}
 	for _, key := range keys {
@@ -77,6 +77,15 @@ func TestAllReturnsACopy(t *testing.T) {
 }
 
 func TestEveryTemplateAppliesWithAndWithoutSamples(t *testing.T) {
+	wantTypes := map[string]int{
+		"project":   4,
+		"reading":   4,
+		"inventory": 4,
+		"household": 4,
+		"deals":     3,
+		"cloud":     3,
+		"blank":     0,
+	}
 	for _, tpl := range All() {
 		for _, samples := range []bool{false, true} {
 			b, sp, _ := applied(t, tpl.Key, samples)
@@ -86,8 +95,8 @@ func TestEveryTemplateAppliesWithAndWithoutSamples(t *testing.T) {
 			if sp.Name != tpl.Name || sp.Icon != tpl.Icon || sp.About != tpl.About {
 				t.Errorf("%s: space = %q %q %q, want the template's name, icon and about", tpl.Key, sp.Name, sp.Icon, sp.About)
 			}
-			if len(sp.Types) != len(tpl.Types) {
-				t.Errorf("%s: %d types, want %d", tpl.Key, len(sp.Types), len(tpl.Types))
+			if len(sp.Types) != len(tpl.Types) || len(sp.Types) != wantTypes[tpl.Key] {
+				t.Errorf("%s: %d types, want %d", tpl.Key, len(sp.Types), wantTypes[tpl.Key])
 			}
 			want := 0
 			if samples {
@@ -164,6 +173,16 @@ func TestRollupValues(t *testing.T) {
 		{"inventory", "储物柜", "items", 4},
 		{"inventory", "储物柜", "worth", 209},
 		{"inventory", "书桌", "worth", 129},
+		{"household", "厨房冰箱", "items", 2},
+		{"household", "周末早午餐", "ready", 0.5},
+		{"deals", "示例数码店", "deals", 2},
+		{"deals", "示例数码店", "saved_total", 550},
+		{"deals", "示例数码店", "coupons", 1},
+		{"cloud", "开发与构建组", "hosts", 2},
+		{"cloud", "开发与构建组", "monthly_cost", 134},
+		{"cloud", "开发与构建组", "ready", 0.5},
+		{"cloud", "节点 A", "runbooks", 2},
+		{"cloud", "新节点初始化步骤", "host_count", 2},
 	}
 	for _, c := range cases {
 		_, sp, w := applied(t, c.key, true)

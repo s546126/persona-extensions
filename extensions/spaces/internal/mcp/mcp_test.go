@@ -328,7 +328,7 @@ func TestScriptedSession(t *testing.T) {
 
 	// With no space left, the schema tool lists the templates and the vocabulary.
 	empty := asMap(t, s.done("schema", `{}`))
-	if len(asList(t, empty["spaces"])) != 0 || len(asList(t, empty["templates"])) != 4 {
+	if len(asList(t, empty["spaces"])) != 0 || len(asList(t, empty["templates"])) != len(templates.All()) {
 		t.Errorf("empty overview = %v", empty)
 	}
 	if _, ok := asMap(t, empty["vocabulary"])["templates"]; !ok {

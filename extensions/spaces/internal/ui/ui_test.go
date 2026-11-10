@@ -223,7 +223,7 @@ func TestEveryScreenAtEveryVersion(t *testing.T) {
 		{"reading", storeWith(t, true, "reading")},
 		{"inventory", storeWith(t, true, "inventory")},
 		{"project without samples", storeWith(t, false, "project")},
-		{"all templates", storeWith(t, true, "project", "reading", "inventory", "blank")},
+		{"all templates", storeWith(t, true, "project", "reading", "inventory", "household", "deals", "cloud", "blank")},
 		{"crowded", crowded(t, 25, true)},
 	}
 	for _, tc := range cases {

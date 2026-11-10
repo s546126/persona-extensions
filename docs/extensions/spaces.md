@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Source](../../extensions/spaces/)
 
-Spaces manages any kind of thing with **types**, **properties** and **relations**. You define the structure: a type has its own properties, an optional lifecycle, a card that summarises each record, and views. The navigation page, the overview card, boards, progress bars, rollups and the assistant's tools are all generated from that structure, so changing the structure changes every screen that uses it. Four templates give a starting point: project and goals, reading and knowledge, inventory, and a blank space.
+Spaces manages any kind of thing with **types**, **properties** and **relations**. You define the structure: a type has its own properties, an optional lifecycle, a card that summarises each record, and views. The navigation page, the overview card, boards, progress bars, rollups and the assistant's tools are all generated from that structure, so changing the structure changes every screen that uses it. Seven templates give a starting point: project and goals, reading and knowledge, inventory, household and chores, deals and coupons, hosts and runbooks, and a blank space.
 
 | Extension point | Contribution | Behavior |
 | --- | --- | --- |
@@ -104,6 +104,9 @@ Templates create a space with its types and, optionally, example records. They a
 | `project` | 项目与目标 | ideas, goals, tasks and notes, with derive, backlink rollups and five view kinds. |
 | `reading` | 阅读与知识 | books, notes, clippings and topics, with rollups in both directions. |
 | `inventory` | 清单与物品 | places, items, wishes and kits, with a wish that becomes an item by derive. |
+| `household` | 家庭与家务 | storage locations, household stock, meal plans and chores, with item counts and ingredient readiness. |
+| `deals` | 好价与优惠 | merchants, deal tips and coupons, with deal counts and total savings per merchant. |
+| `cloud` | 主机与手册 | node groups, hosts and runbooks, with monthly cost sums and applicable host counts. |
 | `blank` | 空白空间 | no types; start with 新建类型. |
 
 The example records are invented and use only `example.com` addresses. Dates in examples are relative to the day they are created.
