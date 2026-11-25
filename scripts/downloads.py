@@ -110,12 +110,20 @@ class Pacer:
         self.next_at = 0.0
 
     def wait(self):
-        with self.lock:
-            now = self.clock()
-            target = max(now, self.next_at)
-            delay = target - now
-            self.next_at = target + self.min_interval
-        if delay > 0:
+        # Claim a slot only when it is due. A worker that slept toward a slot
+        # checks again on waking, so a 429 cooldown that a peer set meanwhile
+        # still holds it back instead of letting it fire inside the cooldown.
+        slept_until = None
+        while True:
+            with self.lock:
+                now = self.clock()
+                if slept_until is not None and slept_until > now:
+                    now = slept_until
+                if self.next_at <= now:
+                    self.next_at = now + self.min_interval
+                    return
+                slept_until = self.next_at
+                delay = slept_until - now
             self.sleeper(delay)
 
     def backoff(self, delay):
@@ -143,6 +151,8 @@ def read_downloads(extension_id, pacer=None, sleeper=time.sleep):
                     raise ValueError("GitHub package statistics page exceeds size limit")
                 return parse_downloads(data.decode("utf-8"))
         except urllib.error.HTTPError as error:
+            # The error carries the open response; its code and headers stay readable after close.
+            error.close()
             if error.code not in (429, 500, 502, 503, 504) or attempt == MAX_ATTEMPTS - 1:
                 raise ValueError("GitHub package downloads unavailable for " + extension_id) from None
             delay = retry_delay(error, attempt)
@@ -152,9 +162,9 @@ def read_downloads(extension_id, pacer=None, sleeper=time.sleep):
                 file=sys.stderr,
             )
             if pacer is not None and error.code == 429:
+                # Hold every peer back for the cooldown, and wait it out here as well.
                 pacer.backoff(delay)
-            else:
-                sleeper(delay)
+            sleeper(delay)
         except (urllib.error.URLError, TimeoutError, OSError):
             if attempt == MAX_ATTEMPTS - 1:
                 raise ValueError("GitHub package downloads unavailable for " + extension_id) from None
