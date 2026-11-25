@@ -1,0 +1,61 @@
+{
+  "manifest_version": 1,
+  "id": "code-nav",
+  "name": "代码导航",
+  "version": "0.1.0",
+  "icon": "assets/icon.png",
+  "description": "在 Persona 里看你电脑上的代码，像 JetBrains 一样跳转：在你选的电脑上按仓库启动语言服务器（Go 用 gopls），查定义、查引用、看文件大纲、按名字搜符号。代码只在那台电脑上读，经 hub 显示到你的设备上，不写任何文件。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/code-nav.md",
+  "tags": ["代码", "开发", "go", "lsp"],
+  "engines": {"persona": ">=202611092100", "extension_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/code-nav-linux-amd64",
+      "linux-arm64": "bin/code-nav-linux-arm64",
+      "darwin-arm64": "bin/code-nav-darwin-arm64",
+      "darwin-amd64": "bin/code-nav-darwin-amd64"
+    },
+    "args": ["hub"]
+  },
+  "node": {
+    "command": {
+      "linux-amd64": "bin/code-nav-linux-amd64",
+      "linux-arm64": "bin/code-nav-linux-arm64",
+      "darwin-arm64": "bin/code-nav-darwin-arm64",
+      "darwin-amd64": "bin/code-nav-darwin-amd64"
+    },
+    "args": ["node"],
+    "machines": "machines",
+    "permissions": {"files": true}
+  },
+  "contributes": {
+    "ui": [{"id": "code", "title": "代码", "placement": "nav_page", "icon": "code"}]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "machines": {
+        "type": "array",
+        "title": "在哪些电脑上看代码",
+        "description": "打开的电脑上会运行一个只读程序：列出下面这些文件夹里的文件、读文件内容，并按需启动语言服务器（Go 用 gopls）。",
+        "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]},
+        "x-confirm": "这台电脑上会运行代码导航程序：读取你在设置里列出的文件夹里的代码（只读），按需启动 gopls 等语言服务器。"
+      },
+      "roots": {
+        "type": "array",
+        "title": "代码文件夹",
+        "description": "仓库所在的文件夹，~ 是那台电脑的家目录。一个文件夹本身不是仓库时，列出它下面两层以内的 Git 仓库。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+        "maxItems": 32,
+        "default": ["~/code"]
+      },
+      "gopls": {
+        "type": "string",
+        "title": "gopls 的路径",
+        "description": "留空就在 PATH、$GOBIN、$GOPATH/bin 和 ~/go/bin 里找。",
+        "maxLength": 512
+      }
+    }
+  }
+}
