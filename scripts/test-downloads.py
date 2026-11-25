@@ -125,6 +125,77 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(len(direct_sleeps), downloads.MAX_ATTEMPTS - 1)
         self.assertTrue(all(d == 3.0 for d in direct_sleeps))
 
+    def test_sustained_429_waits_full_retry_after_every_time_and_closes_errors(self):
+        import email.message
+        import io
+        import urllib.error
+
+        clock_now = [100.0]
+        sleeps = []
+        requests = []
+        errors = []
+
+        def fake_clock():
+            return clock_now[0]
+
+        def fake_sleep(delay):
+            sleeps.append(delay)
+            clock_now[0] += delay
+
+        class Closing429(urllib.error.HTTPError):
+            closed = False
+
+            def close(self):
+                self.closed = True
+                super().close()
+
+        def always_429(*_args, **_kwargs):
+            requests.append(clock_now[0])
+            hdrs = email.message.Message()
+            hdrs["Retry-After"] = "60"
+            error = Closing429("https://github.com/", 429, "Too Many Requests", hdrs, io.BytesIO(b""))
+            errors.append(error)
+            raise error
+
+        pacer = downloads.Pacer(min_interval=0.45, clock=fake_clock, sleeper=fake_sleep)
+        with mock.patch.object(downloads.urllib.request, "urlopen", side_effect=always_429), \
+                mock.patch.object(downloads.sys, "stderr", io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                downloads.read_downloads("demo", pacer=pacer, sleeper=fake_sleep)
+        self.assertEqual(len(requests), downloads.MAX_ATTEMPTS)
+        gaps = [later - earlier for earlier, later in zip(requests, requests[1:])]
+        self.assertTrue(all(gap >= 60.0 for gap in gaps), gaps)
+        self.assertTrue(all(error.closed for error in errors))
+
+        # A frozen clock, as in the reviewed scenario, still sleeps the full Retry-After on every 429.
+        frozen_sleeps = []
+        frozen = downloads.Pacer(min_interval=0.45, clock=lambda: 100.0, sleeper=frozen_sleeps.append)
+        own_sleeps = []
+        with mock.patch.object(downloads.urllib.request, "urlopen", side_effect=always_429), \
+                mock.patch.object(downloads.sys, "stderr", io.StringIO()):
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                downloads.read_downloads("demo", pacer=frozen, sleeper=own_sleeps.append)
+        self.assertEqual(own_sleeps, [60.0] * (downloads.MAX_ATTEMPTS - 1))
+
+    def test_pacer_holds_a_waiting_peer_through_a_cooldown_set_while_it_sleeps(self):
+        clock_now = [100.0]
+        sleeps = []
+        pacer = None
+
+        def fake_sleep(delay):
+            sleeps.append(delay)
+            clock_now[0] += delay
+            if len(sleeps) == 1:
+                # Another worker gets a 429 while this one sleeps toward its slot.
+                pacer.backoff(60.0)
+
+        pacer = downloads.Pacer(min_interval=0.5, clock=lambda: clock_now[0], sleeper=fake_sleep)
+        pacer.wait()
+        pacer.wait()
+        self.assertEqual(sleeps[0], 0.5)
+        self.assertGreaterEqual(clock_now[0], 160.5)
+        self.assertEqual(pacer.next_at, clock_now[0] + 0.5)
+
     def test_sorting_is_numeric_descending_with_deterministic_ties(self):
         body = {"extensions": [{"manifest": {"id": name}} for name in ["a", "c", "b"]]}
         downloads.apply(body, {"downloads_updated_at": "2026-01-02T03:04:05Z", "downloads": {"a": 9, "b": 100, "c": 100}})
