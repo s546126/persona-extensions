@@ -1,0 +1,98 @@
+{
+  "manifest_version": 1,
+  "id": "english-by-default",
+  "name": "English by Default",
+  "version": "0.1.0",
+  "icon": "assets/icon.png",
+  "description": "逼自己用英文给 Agent 写提示：在你选的电脑上给 Claude Code 装一个 UserPromptSubmit hook，发现非英文提示时按你选的强度处理。拦截：挡下这条，让你用英文重写，本机的 claude 判断意思对上了才放行，输入 giveup 就给出英文说法并继续；提醒：照常发出，同时把英文译文给你和模型；只记录：照常发出、什么都不说。中英对照记在那台电脑上扩展自己的数据目录里，扩展页能看到。命中紧急词、斜杠命令和 Persona 助手自己的对话不拦。关掉、停用或卸载扩展时去掉 hook。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/english-by-default.md",
+  "tags": ["英语", "学习", "claude-code", "agents"],
+  "engines": {"persona": ">=202611041602", "extension_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/english-by-default-linux-amd64",
+      "linux-arm64": "bin/english-by-default-linux-arm64",
+      "darwin-arm64": "bin/english-by-default-darwin-arm64",
+      "darwin-amd64": "bin/english-by-default-darwin-amd64"
+    },
+    "args": ["hub"]
+  },
+  "node": {
+    "command": {
+      "linux-amd64": "bin/english-by-default-linux-amd64",
+      "linux-arm64": "bin/english-by-default-linux-arm64",
+      "darwin-arm64": "bin/english-by-default-darwin-arm64",
+      "darwin-amd64": "bin/english-by-default-darwin-amd64"
+    },
+    "args": ["node"],
+    "machines": "machines",
+    "permissions": {"files": true}
+  },
+  "contributes": {
+    "ui": [{"id": "log", "title": "中英对照", "placement": "extension_page"}]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "machines": {
+        "type": "array",
+        "title": "在哪些电脑上生效",
+        "description": "打开的电脑上，Claude Code 的 settings.json 里会多一个 UserPromptSubmit hook；关掉、停用或卸载扩展时去掉。",
+        "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]}
+      },
+      "mode": {
+        "type": "string",
+        "title": "强度",
+        "description": "拦截：挡下非英文提示，用英文重写、意思对上才放行。提醒：照常发出，附上英文译文。只记录：照常发出，不调用模型，只记下原文。",
+        "default": "warn",
+        "oneOf": [
+          {"const": "block", "title": "拦截"},
+          {"const": "warn", "title": "提醒"},
+          {"const": "log", "title": "只记录"}
+        ]
+      },
+      "judge_threshold": {
+        "type": "integer",
+        "title": "放行分数",
+        "description": "拦截模式下，英文重写和原文意思的相似度达到这个分数（0 到 100）就放行。",
+        "minimum": 0,
+        "maximum": 100,
+        "default": 70
+      },
+      "stopwords": {
+        "type": "array",
+        "title": "紧急词",
+        "description": "提示里出现其中任何一个词（不分大小写），这条不拦，只记下。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 40},
+        "maxItems": 32,
+        "default": ["紧急", "加急", "urgent", "asap", "立刻", "马上", "线上事故", "hotfix", "incident"]
+      },
+      "giveup_words": {
+        "type": "array",
+        "title": "放弃词",
+        "description": "被拦下后整条只输入其中一个，就给出英文说法并放行原文。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 40},
+        "maxItems": 16,
+        "default": ["giveup", "give up", "放弃", "算了"]
+      },
+      "llm_command": {
+        "type": "array",
+        "title": "判断和翻译用的命令",
+        "description": "在那台电脑上运行的命令，提示从标准输入传进去，回答从标准输出读。默认用本机的 claude 和 haiku 模型。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 256},
+        "minItems": 1,
+        "maxItems": 16,
+        "default": ["claude", "-p", "--model", "haiku"]
+      },
+      "config_dirs": {
+        "type": "array",
+        "title": "Claude Code 配置目录",
+        "description": "装 hook 的目录，~ 是那台电脑的家目录。用了 CLAUDE_CONFIG_DIR 的把那个目录也加上。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+        "maxItems": 8,
+        "default": ["~/.claude"]
+      }
+    }
+  }
+}
