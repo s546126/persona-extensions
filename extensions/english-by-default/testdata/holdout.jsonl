@@ -1,0 +1,71 @@
+{"cat":"en","want":false,"text":"Why is the Android build slower than yesterday?"}
+{"cat":"en","want":false,"text":"Merge main into this branch and resolve the conflicts in go.sum."}
+{"cat":"en","want":false,"text":"Nope, revert that."}
+{"cat":"en","want":false,"text":"Let's go with option 2."}
+{"cat":"en","want":false,"text":"Generate a PNG icon at 1024x1024 with a transparent background."}
+{"cat":"en","want":false,"text":"Write the SQL to count users per country, grouped by month."}
+{"cat":"en","want":false,"text":"Add tests for edge cases: empty input, nil map, and a 4 MB payload."}
+{"cat":"en","want":false,"text":"Does iOS 26 still support UIWebView?"}
+{"cat":"en","want":false,"text":"Pin the action to actions/checkout@v4 and re-run."}
+{"cat":"en","want":false,"text":"go"}
+{"cat":"en","want":false,"text":"Do it."}
+{"cat":"en","want":false,"text":"Same as before but for the watch app."}
+{"cat":"en","want":false,"text":"Grep for TODO(alice) and list the files."}
+{"cat":"en","want":false,"text":"Is the São Tomé timezone handled by time.LoadLocation?"}
+{"cat":"en","want":false,"text":"Our docs say \"Persona est un assistant\" in the French readme; is that grammatical?"}
+{"cat":"en","want":false,"text":"Update the Dockerfile to use golang:1.27-alpine."}
+{"cat":"en","want":false,"text":"Stop the server on port 8080."}
+{"cat":"en","want":false,"text":"Add a dark mode screenshot to the PR."}
+{"cat":"en-quoted","want":false,"text":"Users in Taiwan see 載入中… forever on the home tab. What could cause that?"}
+{"cat":"en-quoted","want":false,"text":"Make the zh-Hans string for Sign out read 退出登录 instead of 登出."}
+{"cat":"en-quoted","want":false,"text":"Here's the crash log from the tester:\n\n应用崩溃了，点了设置就闪退\nThread 0 Crashed: EXC_BAD_ACCESS"}
+{"cat":"en-quoted","want":false,"text":"Reply to this issue politely in English. The issue says:\n\n为什么安卓版本不能登录？我已经试了三次了。"}
+{"cat":"en-quoted","want":false,"text":"The Persona tab title should be 助手 in Chinese and アシスタント in Japanese."}
+{"cat":"en-quoted","want":false,"text":"<context>上周的周报：完成了推送功能，修复了三个崩溃。</context>\nDraft this week's report in the same format."}
+{"cat":"en-quoted","want":false,"text":"The commit message 修复登录问题 is not English; reword it."}
+{"cat":"en-quoted","want":false,"text":"Find the file named 设计稿-v2.fig in the repo."}
+{"cat":"en-quoted","want":false,"text":"Write a regex that matches both 年 and 月 in dates like 2026年11月."}
+{"cat":"en-quoted","want":false,"text":"Is \"謝謝\" traditional or simplified?"}
+{"cat":"en-quoted","want":false,"text":"Add the Arabic label مرحبا to the welcome screen and make it right-to-left."}
+{"cat":"en-quoted","want":false,"text":"Explain this Japanese comment in the code: // ここでキャッシュを更新する"}
+{"cat":"en-quoted","want":false,"text":"Check the spelling of the Spanish strings: \"Iniciar sesión\", \"Cerrar sesión\", \"Configuración\"."}
+{"cat":"zh","want":true,"text":"安卓那边编译为什么比昨天慢"}
+{"cat":"zh","want":true,"text":"把 main 合进来，go.sum 冲突你处理一下"}
+{"cat":"zh","want":true,"text":"不行，回滚"}
+{"cat":"zh","want":true,"text":"就用方案二"}
+{"cat":"zh","want":true,"text":"生成一个 1024x1024 透明背景的 PNG 图标"}
+{"cat":"zh","want":true,"text":"写个 SQL 按月统计每个国家的用户数"}
+{"cat":"zh","want":true,"text":"iOS 26 还支持 UIWebView 吗"}
+{"cat":"zh","want":true,"text":"把 action 固定到 actions/checkout@v4 然后重跑"}
+{"cat":"zh","want":true,"text":"冲"}
+{"cat":"zh","want":true,"text":"手表 app 也照这样弄"}
+{"cat":"zh","want":true,"text":"Dockerfile 改用 golang:1.27-alpine"}
+{"cat":"zh","want":true,"text":"把 8080 端口上的服务停掉"}
+{"cat":"zh","want":true,"text":"PR 里补一张深色模式的截图"}
+{"cat":"zh","want":true,"text":"上面那个 error 是什么意思？\nfatal: refusing to merge unrelated histories"}
+{"cat":"zh","want":true,"text":"这个 API 的 rate limit 是多少，docs 里有写吗"}
+{"cat":"zh","want":true,"text":"try 一下 option B 看看 performance 怎么样"}
+{"cat":"zh","want":true,"text":"please 把这个 function 重构一下"}
+{"cat":"zh","want":true,"text":"Claude，帮我把这个 bug 修了"}
+{"cat":"zh","want":true,"text":"这个 test case 为什么 flaky？是不是 race condition"}
+{"cat":"zh","want":true,"text":"看下 CI"}
+{"cat":"zh","want":true,"text":"<selection>func load() error { return nil }</selection>\n这里为什么不处理错误"}
+{"cat":"zh","want":true,"text":"把\"退出登录\"改成\"登出\""}
+{"cat":"zh","want":true,"text":"謝謝，先這樣"}
+{"cat":"ja","want":true,"text":"ありがとう、次に進んで"}
+{"cat":"ja","want":true,"text":"CI が落ちている理由を調べて"}
+{"cat":"ko","want":true,"text":"CI 왜 실패했는지 봐줘"}
+{"cat":"ru","want":true,"text":"Почему CI упал?"}
+{"cat":"other","want":true,"text":"ok تمام"}
+{"cat":"latin","want":true,"text":"¿Puedes revisar el PR y decirme qué falta?"}
+{"cat":"latin","want":true,"text":"Merci, c'est parfait. Maintenant fais la même chose pour Android."}
+{"cat":"latin","want":true,"text":"Kannst du mir erklären, warum der Build fehlschlägt?"}
+{"cat":"latin","want":true,"text":"Pode criar um PR com essas mudanças?"}
+{"cat":"latin","want":true,"text":"Puoi aggiungere un test per questo caso?"}
+{"cat":"latin","want":true,"text":"Kun je de README bijwerken?"}
+{"cat":"latin","want":true,"text":"Gracias"}
+{"cat":"latin","want":true,"text":"Có thể giải thích đoạn code này không?"}
+{"cat":"latin-en","want":false,"text":"Add a \"Gracias\" button to the Spanish version of the thank-you page."}
+{"cat":"latin-en","want":false,"text":"The variable is called fecha_de_inicio; rename it to start_date."}
+{"cat":"latin-en","want":false,"text":"Our German customer wrote \"Das funktioniert nicht\" in the ticket. Ask them for logs, in English."}
+{"cat":"latin-en","want":false,"text":"Use the font Avenir Next for the café menu."}

@@ -27,6 +27,7 @@ type config struct {
 	GiveupWords    []string `json:"giveup_words"`
 	LLMCommand     []string `json:"llm_command"`
 	ConfigDirs     []string `json:"config_dirs"`
+	EchoInReply    *bool    `json:"echo_in_reply"`
 }
 
 func (c config) dirs() []string {
@@ -38,7 +39,7 @@ func (c config) dirs() []string {
 
 func (c config) options() options {
 	return options{Mode: c.Mode, JudgeThreshold: c.JudgeThreshold, Stopwords: c.Stopwords, GiveupWords: c.GiveupWords,
-		LLMCommand: c.LLMCommand}.withDefaults()
+		LLMCommand: c.LLMCommand, EchoInReply: c.EchoInReply}.withDefaults()
 }
 
 type node struct {

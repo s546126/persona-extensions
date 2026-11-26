@@ -1,0 +1,18 @@
+{"want":true,"original":"把 main 合进来，go.sum 冲突你处理一下","attempt":"Merge main in and resolve the go.sum conflicts."}
+{"want":true,"original":"生成一个 1024x1024 透明背景的 PNG 图标","attempt":"Generate a 1024x1024 PNG icon with a transparent background."}
+{"want":true,"original":"不行，回滚","attempt":"No, roll it back."}
+{"want":true,"original":"手表 app 也照这样弄","attempt":"Do the same for the watch app."}
+{"want":true,"original":"这个 test case 为什么 flaky？是不是 race condition","attempt":"Why is this test flaky? Could it be a race condition?"}
+{"want":true,"original":"PR 里补一张深色模式的截图","attempt":"add a dark mode screenshot to the PR"}
+{"want":true,"original":"能不能帮我看看这个函数有没有内存泄漏","attempt":"Check this function for memory leaks."}
+{"want":true,"original":"好的，就这么办","attempt":"OK, let's do that."}
+{"want":true,"original":"把日志级别调成 debug，然后重启服务","attempt":"Set the log level to debug and restart the service."}
+{"want":true,"original":"别改公共 API，内部实现随便改","attempt":"Don't change the public API; feel free to change the internals."}
+{"want":false,"original":"把 main 合进来，go.sum 冲突你处理一下","attempt":"Rebase onto main."}
+{"want":false,"original":"生成一个 1024x1024 透明背景的 PNG 图标","attempt":"Generate a 512x512 PNG icon with a white background."}
+{"want":false,"original":"不行，回滚","attempt":"Yes, keep it."}
+{"want":false,"original":"把日志级别调成 debug，然后重启服务","attempt":"Set the log level to debug."}
+{"want":false,"original":"别改公共 API，内部实现随便改","attempt":"Change the public API however you want."}
+{"want":false,"original":"能不能帮我看看这个函数有没有内存泄漏","attempt":"Check this function for performance problems."}
+{"want":false,"original":"这个 test case 为什么 flaky？是不是 race condition","attempt":"Delete the flaky test."}
+{"want":false,"original":"手表 app 也照这样弄","attempt":"Do the same for the iPad app."}

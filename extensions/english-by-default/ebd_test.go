@@ -78,9 +78,10 @@ func TestDetect(t *testing.T) {
 		{"このバグを直して", true, "ja"},
 		{"이 버그를 고쳐줘", true, "ko"},
 		{"Исправь эту ошибку", true, "ru"},
-		{"Arregla este error, por favor", false, ""},
+		{"Arregla este error, por favor", true, "es"},
+		{"Add a \"Gracias\" button", false, ""},
 		{"Fix the flaky test in the scheduler", false, ""},
-		{"中", false, "zh"},
+		{"中", true, "zh"},
 	} {
 		if got := isNonEnglish(c.text); got != c.non {
 			t.Errorf("isNonEnglish(%q) = %v, want %v (%+v)", c.text, got, c.non, analyze(c.text))
@@ -89,7 +90,8 @@ func TestDetect(t *testing.T) {
 			t.Errorf("detectLanguage(%q) = %q, want %q", c.text, got, c.lang)
 		}
 	}
-	if !hasStopword("这是 HOTFIX 快点", defaultOptions.Stopwords) || hasStopword("普通的请求", defaultOptions.Stopwords) {
+	if !hasStopword("这是 HOTFIX 快点", defaultOptions.Stopwords) || hasStopword("普通的请求", defaultOptions.Stopwords) ||
+		hasStopword("看看 wasapi 的文档", defaultOptions.Stopwords) || !hasStopword("asap 修一下", defaultOptions.Stopwords) {
 		t.Error("stopwords")
 	}
 	if !isGiveup("  GiveUp ", []string{"giveup"}) || isGiveup("giveup now", []string{"giveup"}) {
@@ -140,7 +142,8 @@ func (f *fakeModel) ask(_ context.Context, prompt string) (string, error) {
 		return "", errors.New("model down")
 	}
 	if strings.HasPrefix(prompt, "Translate") {
-		return "EN:" + prompt[strings.LastIndex(prompt, "\n")+1:], nil
+		text := prompt[strings.Index(prompt, "<text>\n")+len("<text>\n") : strings.LastIndex(prompt, "\n</text>")]
+		return "EN:" + text, nil
 	}
 	return f.verdict, nil
 }
@@ -492,5 +495,59 @@ func TestPage(t *testing.T) {
 	raw, _ := json.Marshal(v)
 	if err := exttest.CheckView(raw, false); err != nil || v.Sections[0].Items[0].Type != wire.ComponentEmpty {
 		t.Fatalf("%v %s", err, raw)
+	}
+}
+
+// In a session Persona's node started, a first prompt is not held back (the node would type it again), later ones
+// are, and the model is asked to start its reply with the English, which Persona's apps would not show otherwise.
+func TestPersonaSession(t *testing.T) {
+	data := computer(t, options{Mode: "block"})
+	m := &fakeModel{}
+	env := map[string]string{"PERSONA_HOME": "/home/me/.persona"}
+	transcript := filepath.Join(t.TempDir(), "s.jsonl")
+	persona := func(session, prompt string) hookOut {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": prompt,
+			"transcript_path": transcript})
+		var out bytes.Buffer
+		runHook(hookArgs{Data: data, ask: m.ask, getenv: func(k string) string { return env[k] }}, bytes.NewReader(b), &out, time.Now())
+		var o hookOut
+		if out.Len() > 0 {
+			if err := json.Unmarshal(out.Bytes(), &o); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return o
+	}
+	// the first prompt: the transcript has none of the user's yet
+	if err := os.WriteFile(transcript, []byte(`{"type":"queue-operation"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := persona("s", "把日志级别调成 debug")
+	if o.Decision != "" || !strings.Contains(o.Specific.Context, "Begin your reply with one line, exactly: English: EN:把日志级别调成 debug") {
+		t.Fatalf("a first prompt in a Persona session: %+v", o)
+	}
+	// a later one is held back as anywhere else
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","message":{"content":"hi"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if o = persona("s", "继续"); o.Decision != "block" {
+		t.Fatalf("a later prompt in a Persona session: %+v", o)
+	}
+	// outside Persona even a first prompt is held back
+	if o, _ = send(t, data, m, nil, "s3", "继续"); o.Decision != "block" {
+		t.Fatalf("outside Persona: %+v", o)
+	}
+
+	no := false
+	data = computer(t, options{Mode: "warn", EchoInReply: &no})
+	if o = persona("s4", "解释一下"); strings.Contains(o.Specific.Context, "Begin your reply") ||
+		!strings.Contains(o.Specific.Context, "EN:解释一下") {
+		t.Fatalf("echo switched off: %+v", o)
+	}
+	// outside Persona the terminal shows the system message: no echo
+	data = computer(t, options{Mode: "warn"})
+	if o, _ = send(t, data, m, map[string]string{}, "s", "解释一下"); strings.Contains(o.Specific.Context, "Begin your reply") {
+		t.Fatalf("echo outside Persona: %+v", o)
 	}
 }

@@ -18,6 +18,9 @@ type options struct {
 	GiveupWords    []string `json:"giveup_words"`
 	LLMCommand     []string `json:"llm_command"`
 	LLMTimeoutSecs int      `json:"llm_timeout_seconds"`
+	// EchoInReply: in a session Persona runs, ask the model to start its reply with the English, since Persona's
+	// apps show neither the hook's message nor its context.
+	EchoInReply *bool `json:"echo_in_reply,omitempty"`
 }
 
 var defaultOptions = options{
@@ -25,9 +28,12 @@ var defaultOptions = options{
 	JudgeThreshold: 70,
 	Stopwords:      []string{"紧急", "加急", "urgent", "asap", "立刻", "马上", "线上事故", "hotfix", "incident"},
 	GiveupWords:    []string{"giveup", "give up", "放弃", "算了"},
-	LLMCommand:     []string{"claude", "-p", "--model", "haiku"},
+	LLMCommand:     []string{"claude", "-p", "--model", "haiku", "--no-session-persistence"},
 	LLMTimeoutSecs: 90,
+	EchoInReply:    &yes,
 }
+
+var yes = true
 
 // withDefaults fills what the settings left out.
 func (o options) withDefaults() options {
@@ -52,6 +58,9 @@ func (o options) withDefaults() options {
 	if o.LLMTimeoutSecs <= 0 {
 		o.LLMTimeoutSecs = d.LLMTimeoutSecs
 	}
+	if o.EchoInReply == nil {
+		o.EchoInReply = d.EchoInReply
+	}
 	return o
 }
 
@@ -68,7 +77,22 @@ type gate struct {
 	store store
 	ask   llm
 	now   time.Time
+	// persona: the session is one that Persona's node started (hook.go). Persona's apps show a block's reason
+	// (Claude Code writes it to the transcript as a notice) but not the hook's other messages (echo); and the node
+	// types a session's first prompt again when it does not reach the transcript, so a first prompt (firstPrompt)
+	// held back would be sent three times and the session reported as stuck: there block works as warn.
+	persona, firstPrompt bool
 }
+
+// mode is the mode this prompt is handled by.
+func (g *gate) mode() string {
+	if g.persona && g.firstPrompt && g.opts.Mode == "block" {
+		return "warn"
+	}
+	return g.opts.Mode
+}
+
+func (g *gate) echo() bool { return g.persona && g.opts.EchoInReply != nil && *g.opts.EchoInReply }
 
 func (g *gate) context() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), time.Duration(g.opts.LLMTimeoutSecs)*time.Second)
@@ -101,7 +125,7 @@ func (g *gate) decide(session, prompt string) result {
 		return result{SystemMessage: m.stopword}
 	}
 
-	switch g.opts.Mode {
+	switch g.mode() {
 	case "block":
 		if err := g.store.setPending(session, text, lang, g.now); err != nil {
 			return result{} // without the pending record the rewrite could not be matched: let it through
@@ -123,11 +147,7 @@ func (g *gate) decide(session, prompt string) result {
 		return result{SystemMessage: fill(m.warn, "english", m.translationFailed)}
 	}
 	g.save(entry{Original: text, English: english, Mode: "warn", Language: lang, Session: session})
-	return result{
-		AdditionalContext: "english-by-default: The user's message translated to English:\n" + english +
-			"\nPlease treat this English version as the user's request.",
-		SystemMessage: fill(m.warn, "english", english),
-	}
+	return result{AdditionalContext: warnContext(english, g.echo()), SystemMessage: fill(m.warn, "english", english)}
 }
 
 // rewrite answers a prompt of a session whose last prompt was blocked.
@@ -173,6 +193,18 @@ func (g *gate) rewrite(session, text string, p pending) result {
 		hint = m.hintFallback
 	}
 	return result{Block: true, Reason: fill(m.mismatch, "score", strconv.Itoa(score), "hint", hint)}
+}
+
+// warnContext gives the model the English of the user's prompt. The prompt stays the request: a translation can
+// be wrong. With echo, the model is asked to show the English at the top of its reply, where a Persona app shows it.
+func warnContext(english string, echo bool) string {
+	s := "english-by-default: The user is practicing writing prompts in English. Their message in English, for " +
+		"reference (their own words above remain the request):\n" + english
+	if echo {
+		s += "\nThe user reads this conversation in an app that does not show this note. Begin your reply with one " +
+			"line, exactly: English: " + oneLine(english) + "\nThen answer the request as usual."
+	}
+	return s
 }
 
 // giveupContext tells the model what the user meant: their "giveup" replaced the request they wrote before.

@@ -44,7 +44,7 @@
       "mode": {
         "type": "string",
         "title": "强度",
-        "description": "拦截：挡下非英文提示，用英文重写、意思对上才放行。提醒：照常发出，附上英文译文。只记录：照常发出，不调用模型，只记下原文。",
+        "description": "拦截：挡下非英文提示，用英文重写、意思对上才放行。提醒：照常发出，附上英文译文。只记录：照常发出，不调用模型，只记下原文。Persona 启动的会话里，会话的第一条提示按提醒处理（拦下会让 Persona 重发三次），之后的照常拦截，拦截原因在 Persona App 里显示为一条通知。",
         "default": "warn",
         "oneOf": [
           {"const": "block", "title": "拦截"},
@@ -83,7 +83,13 @@
         "items": {"type": "string", "minLength": 1, "maxLength": 256},
         "minItems": 1,
         "maxItems": 16,
-        "default": ["claude", "-p", "--model", "haiku"]
+        "default": ["claude", "-p", "--model", "haiku", "--no-session-persistence"]
+      },
+      "echo_in_reply": {
+        "type": "boolean",
+        "title": "在 Persona 会话的回复开头给出英文",
+        "description": "Persona App 不显示 hook 的提示。打开时，Persona 启动的会话里，Claude 会在回复第一行写出这条提示的英文说法。",
+        "default": true
       },
       "config_dirs": {
         "type": "array",
