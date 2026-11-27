@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// The hook: what Claude Code runs on UserPromptSubmit (settings.go writes the entry). It reads the prompt on stdin
-// and answers in Claude Code's terms: {"decision":"block","reason":…} to hold the prompt back, or additional
+// The hook: what Claude Code (and Codex, codex.go) runs on UserPromptSubmit (settings.go writes the entry). It
+// reads the prompt on stdin and answers in Claude Code's terms, which Codex takes as they are: {"decision":"block","reason":…} to hold the prompt back, or additional
 // context and a system message to let it through with them. It prints nothing, and so changes nothing, when:
 //
 //   - the node program is not running (its heartbeat file is stale): an extension switched off, stopped or
@@ -35,7 +35,8 @@ var assistantEnvs = []string{"PERSONA_ASSISTANT", "JARVIS_ASSISTANT"}
 var personaEnvs = []string{"PERSONA_HOME", "JARVIS_HOME"}
 
 type hookArgs struct {
-	Data string // the node program's data directory: heartbeat, options and the store
+	Data  string // the node program's data directory: heartbeat, options and the store
+	Agent string // who runs the hook: agentClaude (also "") or agentCodex
 
 	getenv func(string) string // nil is os.Getenv
 	ask    llm                 // nil is the configured command
@@ -104,7 +105,11 @@ func runHook(a hookArgs, in io.Reader, out io.Writer, now time.Time) {
 		}
 	}
 	if g.persona {
-		g.firstPrompt = !hasUserTurn(req.Transcript)
+		if a.Agent == agentCodex {
+			g.firstPrompt = !hasCodexUserTurn(req.Transcript)
+		} else {
+			g.firstPrompt = !hasUserTurn(req.Transcript)
+		}
 	}
 	writeResult(out, g.decide(session, req.Prompt))
 }

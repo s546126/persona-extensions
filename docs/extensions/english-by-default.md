@@ -1,8 +1,8 @@
-# English by Default (Claude Code)
+# English by Default (Claude Code and Codex)
 
 [Documentation](../README.md) · [Source](../../extensions/english-by-default/)
 
-A habit tool for people who want to write to their coding agents in English. On the computers you choose, the extension adds a Claude Code `UserPromptSubmit` hook. When a prompt is written in another language, the hook handles it by the mode you set, and keeps the original with its English as a pair for later review.
+A habit tool for people who want to write to their coding agents in English. On the computers you choose, the extension adds a `UserPromptSubmit` hook to Claude Code and, where it is installed, to Codex CLI ([Codex](#codex)). When a prompt is written in another language, the hook handles it by the mode you set, and keeps the original with its English as a pair for later review.
 
 ## Modes
 
@@ -12,7 +12,7 @@ A habit tool for people who want to write to their coding agents in English. On 
 | Warn (`warn`, default) | Goes through; the English translation is shown and given to the model as context (the original stays the request) | One per prompt |
 | Log only (`log`) | Goes through silently; only the original is saved | None |
 
-A blocked prompt waits 30 minutes for its rewrite, per Claude Code session. Prompts that start with `/` or `!` (slash commands, shell escapes) go through unless a rewrite is awaited, and so do prompts containing one of the urgent words (`紧急`, `urgent`, `hotfix`, `incident` and others; editable; a Latin word must stand alone), which are saved for later.
+A blocked prompt waits 30 minutes for its rewrite, per Claude Code or Codex session. Prompts that start with `/` or `!` (slash commands, shell escapes) go through unless a rewrite is awaited, and so do prompts containing one of the urgent words (`紧急`, `urgent`, `hotfix`, `incident` and others; editable; a Latin word must stand alone), which are saved for later.
 
 ## Detection
 
@@ -57,8 +57,21 @@ In the node program's data directory on each computer: `queue.jsonl` (the pairs,
 
 The node program adds one `UserPromptSubmit` group with the hook alone in it to each configured Claude config directory's `settings.json` (`~/.claude` by default; add the directories you use with `CLAUDE_CONFIG_DIR`). Other keys and hooks keep their order and values, the file's indent is kept, a copy is saved as `settings.json.english-by-default.bak` before each change, and a file that is not a JSON object is left alone. The entry is removed when the extension is switched off for that computer, disabled, upgraded or uninstalled. If the program is killed before it can do that, the heartbeat goes stale within five minutes and the hook does nothing.
 
+## Codex
+
+The node program also adds the hook to each Codex home in `codex_dirs` (`~/.codex` by default, passed over on a computer without it; an empty list turns Codex off), in its `hooks.json`, with the same care as `settings.json`: the group is added at the end of the `UserPromptSubmit` list beside other tools' hooks, a copy is saved as `hooks.json.english-by-default.bak`, putting it in again changes nothing, and it is taken out on the same occasions. `config.toml` is never written.
+
+Checked with codex-cli 0.171.0-alpha.13.2 in a scratch `CODEX_HOME` (`codex exec`):
+
+- Codex reads Claude Code's hook layout from `<CODEX_HOME>/hooks.json`; the `hooks` feature is stable and on by default in this version (older versions need it switched on in `[features]`; the extension does not do that).
+- The hook gets the same input as from Claude Code (`hook_event_name`, `session_id`, `prompt`, `transcript_path`, `cwd`, plus `model`, `permission_mode` and `turn_id`) and Codex takes the same answer: `{"decision":"block","reason":…}` holds the prompt back (the model is not called; `codex exec` prints `hook: UserPromptSubmit Blocked`), and `hookSpecificOutput.additionalContext` and `systemMessage` let it through with them. Codex's output schema allows no other field; the tests hold the hook to it.
+- **Codex runs a hook only after you have reviewed it.** Until then it skips the hook without a word, so the prompt goes through. Type `/hooks` in Codex and approve the entry; a changed entry needs approving again, and since each version of the extension runs from its own path, so does each upgrade. Codex keeps the approval in `config.toml` (`[hooks.state."<hooks.json>:user_prompt_submit:<group>:<handler>"]`); the extension never writes it, because approving its own hook would skip the review Codex asks of you. The page reads whether the entry's slot has an approval on record and says **Review in Codex** when it has none. The record is keyed by the group's place in the list, so another tool's group after ours is moved when ours is taken out and Codex asks to review it again.
+- A Codex transcript (its rollout) starts with Codex's own `<environment_context>` message; a user turn is a user message that is not such a block. This is how a session's first prompt is told apart in sessions Persona runs.
+
+Not checked: the interactive TUI (how the block reason and the system message look there, and the `/hooks` approval screen), Codex sessions that Persona's node starts and how Persona's apps show them, and a Codex-only computer. The default model command is `claude`; on a computer without it, set `llm_command` to a command that reads a prompt on standard input and prints the answer (until then block mode cannot judge rewrites and lets them through, and warn mode has no translation).
+
 ## Limits
 
-- Claude Code only. Codex has a `UserPromptSubmit` hook of the same shape; its input fields and session ids have not been verified, so it is not installed yet.
+- Codex: see [Codex](#codex) for what has and has not been checked.
 - A prompt that mixes languages evenly is a judgment call; the thresholds lean towards letting it through.
 - Review (quiz, spaced repetition, Feynman) is not part of this version; the pairs keep a review date for it.

@@ -4,10 +4,10 @@
   "name": "English by Default",
   "version": "0.1.0",
   "icon": "assets/icon.png",
-  "description": "逼自己用英文给 Agent 写提示：在你选的电脑上给 Claude Code 装一个 UserPromptSubmit hook，发现非英文提示时按你选的强度处理。拦截：挡下这条，让你用英文重写，本机的 claude 判断意思对上了才放行，输入 giveup 就给出英文说法并继续；提醒：照常发出，同时把英文译文给你和模型；只记录：照常发出、什么都不说。中英对照记在那台电脑上扩展自己的数据目录里，扩展页能看到。命中紧急词、斜杠命令和 Persona 助手自己的对话不拦。关掉、停用或卸载扩展时去掉 hook。",
+  "description": "逼自己用英文给 Agent 写提示：在你选的电脑上给 Claude Code 和 Codex CLI 装一个 UserPromptSubmit hook（Codex 要你在 /hooks 里批准后才生效），发现非英文提示时按你选的强度处理。拦截：挡下这条，让你用英文重写，本机的 claude 判断意思对上了才放行，输入 giveup 就给出英文说法并继续；提醒：照常发出，同时把英文译文给你和模型；只记录：照常发出、什么都不说。中英对照记在那台电脑上扩展自己的数据目录里，扩展页能看到。命中紧急词、斜杠命令和 Persona 助手自己的对话不拦。关掉、停用或卸载扩展时去掉 hook。",
   "publisher": "nwverse",
   "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/english-by-default.md",
-  "tags": ["英语", "学习", "claude-code", "agents"],
+  "tags": ["英语", "学习", "claude-code", "codex", "agents"],
   "engines": {"persona": ">=202611041602", "extension_protocol": 1},
   "runtime": {
     "command": {
@@ -38,7 +38,7 @@
       "machines": {
         "type": "array",
         "title": "在哪些电脑上生效",
-        "description": "打开的电脑上，Claude Code 的 settings.json 里会多一个 UserPromptSubmit hook；关掉、停用或卸载扩展时去掉。",
+        "description": "打开的电脑上，Claude Code 的 settings.json 和 Codex 的 hooks.json 里会多一个 UserPromptSubmit hook；关掉、停用或卸载扩展时去掉。",
         "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]}
       },
       "mode": {
@@ -88,7 +88,7 @@
       "echo_in_reply": {
         "type": "boolean",
         "title": "在 Persona 会话的回复开头给出英文",
-        "description": "Persona App 不显示 hook 的提示。打开时，Persona 启动的会话里，Claude 会在回复第一行写出这条提示的英文说法。",
+        "description": "Persona App 不显示 hook 的提示。打开时，Persona 启动的会话里，Agent 会在回复第一行写出这条提示的英文说法。",
         "default": true
       },
       "config_dirs": {
@@ -98,6 +98,14 @@
         "items": {"type": "string", "minLength": 1, "maxLength": 512},
         "maxItems": 8,
         "default": ["~/.claude"]
+      },
+      "codex_dirs": {
+        "type": "array",
+        "title": "Codex 配置目录",
+        "description": "装 Codex hook 的目录（写入其中的 hooks.json），~ 是那台电脑的家目录；默认的 ~/.codex 不存在时跳过，清空就不给 Codex 装。用了 CODEX_HOME 的把那个目录也加上。Codex 只运行你审核过的 hook：装上或升级扩展后，在 Codex 里输入 /hooks 批准一次才会生效（在 codex-cli 0.171 上实测）。扩展不会改 config.toml。",
+        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+        "maxItems": 8,
+        "default": ["~/.codex"]
       }
     }
   }

@@ -116,10 +116,14 @@ func machineSection(t text, loc *time.Location, machine string, st status, err e
 		return s
 	}
 	for _, d := range st.Dirs {
-		row := wire.Component{Type: wire.ComponentRow, Title: oneLine(d.Dir)}
+		row := wire.Component{Type: wire.ComponentRow, Title: oneLine(t.agentName(d.Agent) + " · " + d.Dir)}
 		switch {
 		case d.Error != "":
 			row.Subtitle, row.Badge = oneLine(d.Error), &wire.Badge{Text: t.notInstalled, Tone: wire.ToneCaution}
+		case d.Installed && d.Agent == agentCodex && !d.Reviewed:
+			row.Subtitle, row.Badge = t.reviewHint, &wire.Badge{Text: t.needsReview, Tone: wire.ToneCaution}
+		case d.Installed && d.Agent == agentCodex:
+			row.Subtitle, row.Badge = t.modeName(st.Mode)+" · "+t.reviewedHint, &wire.Badge{Text: t.installed, Tone: wire.TonePositive}
 		case d.Installed:
 			row.Subtitle, row.Badge = t.modeName(st.Mode), &wire.Badge{Text: t.installed, Tone: wire.TonePositive}
 		default:
@@ -161,13 +165,20 @@ func machineSection(t text, loc *time.Location, machine string, st status, err e
 // text is the page's words in one language.
 type text struct {
 	title, noMachines, noMachinesHint, unreachable, offline, installed, notInstalled, none, total, due, noEnglish,
-	score, better, recent, footer string
+	score, better, recent, footer, needsReview, reviewHint, reviewedHint string
 	modes, entryModes map[string]string
 }
 
 func (t text) modeName(m string) string { return or(t.modes[m], m) }
 
 func (t text) entryMode(m string) string { return or(t.entryModes[m], m) }
+
+func (t text) agentName(a string) string {
+	if a == agentCodex {
+		return "Codex"
+	}
+	return "Claude Code"
+}
 
 func or(a, b string) string {
 	if a != "" {
@@ -185,9 +196,12 @@ func texts(locale string) text {
 			unreachable:    "Can't reach this computer's program", offline: "Unreachable",
 			installed: "Hook installed", notInstalled: "No hook", none: "No pairs yet.", total: "Pairs saved", due: "Due for review",
 			noEnglish: "(no English yet)", score: "score %d", better: "more natural: ", recent: "Newest %d, newest first",
-			footer:     "What you quote (code, quoted text, links, paths, pasted text after an English line ending in a colon) does not count; only your own words do. Slash commands, urgent words and Persona's own assistant conversations go through as they are. Pairs stay on each computer.",
-			modes:      map[string]string{"block": "Block", "warn": "Warn", "log": "Log only"},
-			entryModes: map[string]string{"rewrite": "rewritten", "unverified": "unchecked", "giveup": "gave up", "warn": "warned", "log": "logged", "stopword": "urgent"},
+			needsReview:  "Review in Codex",
+			reviewHint:   "Codex runs the hook only once you approve it: type /hooks in Codex (again after each upgrade).",
+			reviewedHint: "reviewed in Codex; after an upgrade Codex asks again",
+			footer:       "What you quote (code, quoted text, links, paths, pasted text after an English line ending in a colon) does not count; only your own words do. Slash commands, urgent words and Persona's own assistant conversations go through as they are. Pairs stay on each computer.",
+			modes:        map[string]string{"block": "Block", "warn": "Warn", "log": "Log only"},
+			entryModes:   map[string]string{"rewrite": "rewritten", "unverified": "unchecked", "giveup": "gave up", "warn": "warned", "log": "logged", "stopword": "urgent"},
 		}
 	case strings.HasPrefix(locale, "ja"):
 		return text{
@@ -196,9 +210,12 @@ func texts(locale string) text {
 			unreachable:    "このコンピュータのプログラムに接続できません", offline: "接続できません",
 			installed: "hook あり", notInstalled: "hook なし", none: "まだ対訳はありません。", total: "記録した対訳", due: "復習の時期",
 			noEnglish: "（英語はまだありません）", score: "スコア %d", better: "より自然に：", recent: "新しい順に %d 件",
-			footer:     "引用したもの（コード、かぎかっこや引用符の中、リンク、パス、コロンで終わる英語の行の後に貼った文章）は数えず、自分で書いた部分だけで判断します。スラッシュコマンド、緊急ワード、Persona のアシスタント自身の会話はそのまま通します。対訳は各コンピュータに残ります。",
-			modes:      map[string]string{"block": "ブロック", "warn": "注意", "log": "記録のみ"},
-			entryModes: map[string]string{"rewrite": "書き直し", "unverified": "未判定", "giveup": "諦めた", "warn": "注意", "log": "記録", "stopword": "緊急"},
+			needsReview:  "Codex で確認",
+			reviewHint:   "Codex は確認するまで hook を動かしません。Codex で /hooks と入力して承認してください（更新のたびに再度）。",
+			reviewedHint: "Codex で確認済み。更新後は再確認を求められます",
+			footer:       "引用したもの（コード、かぎかっこや引用符の中、リンク、パス、コロンで終わる英語の行の後に貼った文章）は数えず、自分で書いた部分だけで判断します。スラッシュコマンド、緊急ワード、Persona のアシスタント自身の会話はそのまま通します。対訳は各コンピュータに残ります。",
+			modes:        map[string]string{"block": "ブロック", "warn": "注意", "log": "記録のみ"},
+			entryModes:   map[string]string{"rewrite": "書き直し", "unverified": "未判定", "giveup": "諦めた", "warn": "注意", "log": "記録", "stopword": "緊急"},
 		}
 	}
 	return text{
@@ -207,8 +224,11 @@ func texts(locale string) text {
 		unreachable:    "连不上这台电脑上的程序", offline: "连不上",
 		installed: "已装 hook", notInstalled: "没有 hook", none: "还没有对照。", total: "记下的对照", due: "该复习了",
 		noEnglish: "（还没有英文）", score: "得分 %d", better: "更地道：", recent: "最近 %d 条，新的在前",
-		footer:     "只看你自己写的部分：代码、引号里的文字、链接、路径，以及英文句子以冒号结尾后贴上的内容都不算。斜杠命令、带紧急词的提示和 Persona 助手自己的对话照常发出。对照记在各自的电脑上。",
-		modes:      map[string]string{"block": "拦截", "warn": "提醒", "log": "只记录"},
-		entryModes: map[string]string{"rewrite": "自己改写", "unverified": "未判断", "giveup": "放弃", "warn": "提醒", "log": "记录", "stopword": "紧急"},
+		needsReview:  "待在 Codex 审核",
+		reviewHint:   "Codex 要你审核过才会运行这个 hook：在 Codex 里输入 /hooks 批准（每次升级扩展后要再批一次）。",
+		reviewedHint: "Codex 里已审核；升级后 Codex 会要求再审核",
+		footer:       "只看你自己写的部分：代码、引号里的文字、链接、路径，以及英文句子以冒号结尾后贴上的内容都不算。斜杠命令、带紧急词的提示和 Persona 助手自己的对话照常发出。对照记在各自的电脑上。",
+		modes:        map[string]string{"block": "拦截", "warn": "提醒", "log": "只记录"},
+		entryModes:   map[string]string{"rewrite": "自己改写", "unverified": "未判断", "giveup": "放弃", "warn": "提醒", "log": "记录", "stopword": "紧急"},
 	}
 }

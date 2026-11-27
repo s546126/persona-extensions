@@ -35,6 +35,11 @@ func hookCommand(bin, data string) string {
 	return shellQuote(bin) + " hook --data " + shellQuote(data) + " " + tagFlag
 }
 
+// codexHookCommand is hookCommand for Codex's hooks.json: the hook reads Codex's transcript.
+func codexHookCommand(bin, data string) string {
+	return shellQuote(bin) + " hook --data " + shellQuote(data) + " --agent " + agentCodex + " " + tagFlag
+}
+
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // settingsPath is dir's settings.json, through a symlink (as dotfile managers make).

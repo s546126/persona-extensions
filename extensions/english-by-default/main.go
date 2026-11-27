@@ -1,5 +1,5 @@
 // English by Default (docs/extensions/english-by-default.md): practice writing to coding Agents in English. On the
-// computers you pick, this extension installs a UserPromptSubmit hook in Claude Code that catches prompts written in
+// computers you pick, this extension installs a UserPromptSubmit hook in Claude Code (and Codex CLI) that catches prompts written in
 // another language and, by the mode you pick, holds them back until they are rewritten in English (block), lets
 // them through with an English translation (warn), or only records them (log). The pairs stay on that computer.
 //
@@ -7,7 +7,7 @@
 //
 //	english-by-default hub     the hub's: the extension's page (hub.go)
 //	english-by-default node    each computer's: installs and removes the hook, keeps its heartbeat (node.go)
-//	english-by-default hook …  what Claude Code runs on each prompt (hook.go)
+//	english-by-default hook …  what Claude Code and Codex run on each prompt (hook.go, codex.go)
 package main
 
 import (
@@ -53,6 +53,7 @@ func main() {
 		fs := flag.NewFlagSet("hook", flag.ContinueOnError)
 		var a hookArgs
 		fs.StringVar(&a.Data, "data", "", "the node program's data directory")
+		fs.StringVar(&a.Agent, "agent", agentClaude, "who runs the hook: claude or codex")
 		fs.String("persona-extension", "", "the entry's tag")
 		fs.SetOutput(os.Stderr)
 		if fs.Parse(os.Args[2:]) != nil {

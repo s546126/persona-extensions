@@ -14,7 +14,7 @@ import (
 )
 
 // The program on a computer (the manifest's node section): while it runs, the hook's entry is in each configured
-// Claude config directory, its options are written and its heartbeat is fresh; when it stops (switched off for this
+// Claude config directory and Codex home (codex.go), its options are written and its heartbeat is fresh; when it stops (switched off for this
 // computer, extension disabled, upgraded, uninstalled, the hub gone past its lease) it takes the entries out again.
 // If it is killed before it can, the heartbeat goes stale and the hook does nothing (hook.go).
 
@@ -27,6 +27,7 @@ type config struct {
 	GiveupWords    []string `json:"giveup_words"`
 	LLMCommand     []string `json:"llm_command"`
 	ConfigDirs     []string `json:"config_dirs"`
+	CodexDirs      []string `json:"codex_dirs"`
 	EchoInReply    *bool    `json:"echo_in_reply"`
 }
 
@@ -35,6 +36,15 @@ func (c config) dirs() []string {
 		return []string{"~/.claude"}
 	}
 	return c.ConfigDirs
+}
+
+// codexDirs are the Codex homes to put the hook in; ~/.codex by default, which is passed over when missing (no
+// Codex on that computer). An empty list in the settings turns Codex off.
+func (c config) codexDirs() []string {
+	if c.CodexDirs == nil {
+		return []string{defaultCodexDir}
+	}
+	return c.CodexDirs
 }
 
 func (c config) options() options {
@@ -55,11 +65,15 @@ type node struct {
 	beatWG sync.WaitGroup
 }
 
-// dirState is one config directory: where its settings are, and whether the entry is in.
+// dirState is one config directory: where its settings are, and whether the entry is in. Agent is agentClaude
+// (also "", as an older program answers) or agentCodex; Reviewed is Codex's: whether the entry has a review on record
+// (codex.go), without which Codex does not run it.
 type dirState struct {
+	Agent     string `json:"agent,omitempty"`
 	Dir       string `json:"dir"`
 	Settings  string `json:"settings,omitempty"`
 	Installed bool   `json:"installed"`
+	Reviewed  bool   `json:"reviewed,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -147,6 +161,7 @@ func (n *node) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]a
 	n.mu.Lock()
 	n.mode = opts.Mode
 	n.install(c.dirs())
+	n.installCodex(c.codexDirs())
 	n.mu.Unlock()
 	n.beatWG.Add(1)
 	go func() {
@@ -178,7 +193,7 @@ func (n *node) beat() {
 func (n *node) install(dirs []string) {
 	n.dirs = n.dirs[:0]
 	for _, d := range dirs {
-		s := dirState{Dir: d}
+		s := dirState{Agent: agentClaude, Dir: d}
 		abs, err := expand(d)
 		switch {
 		case err != nil:
@@ -200,12 +215,49 @@ func (n *node) install(dirs []string) {
 	}
 }
 
-// check reads again whether each entry is still in (someone may have edited the file).
+// installCodex puts the entry into each Codex home's hooks.json, after install (it adds to n.dirs). The default
+// home is passed over when it does not exist.
+func (n *node) installCodex(dirs []string) {
+	for _, d := range dirs {
+		s := dirState{Agent: agentCodex, Dir: d}
+		abs, err := expand(d)
+		switch {
+		case err != nil:
+			s.Error = err.Error()
+		case !isDir(abs):
+			if strings.TrimSpace(d) == defaultCodexDir {
+				continue
+			}
+			s.Error = "no such directory"
+		default:
+			s.Settings = codexHooksPath(abs)
+			if _, err := installHook(s.Settings, codexHookCommand(n.bin, n.data)); err != nil {
+				s.Error = err.Error()
+			} else {
+				s.Installed = true
+				s.Reviewed = codexReviewed(abs, s.Settings)
+			}
+		}
+		if s.Error != "" {
+			fmt.Fprintf(os.Stderr, "%s: codex %s: %s\n", extensionID, d, s.Error)
+		}
+		n.dirs = append(n.dirs, s)
+	}
+}
+
+// check reads again whether each entry is still in (someone may have edited the file), and for Codex whether it
+// has been reviewed.
 func (n *node) check() []dirState {
 	out := make([]dirState, len(n.dirs))
 	for i, s := range n.dirs {
 		if s.Settings != "" && s.Error == "" {
 			s.Installed = hasHook(s.Settings)
+			if s.Agent == agentCodex {
+				s.Reviewed = false
+				if abs, err := expand(s.Dir); err == nil && s.Installed {
+					s.Reviewed = codexReviewed(abs, s.Settings)
+				}
+			}
 		}
 		out[i] = s
 	}
