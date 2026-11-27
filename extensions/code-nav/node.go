@@ -10,6 +10,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,14 +19,44 @@ import (
 	"github.com/nwverse/persona/sdk/go/ext"
 )
 
-// The program on each computer you pick: it lists the repositories under the configured folders, lists and reads
-// their files, and asks a language server about them. It reads only: no file is written, no command but the language
+// The program on each computer you pick: it lists the repositories under the configured folders, lists, reads and
+// searches their files, and asks a language server about them. It reads only: no file is written, no command but the language
 // servers (and git ls-files, go env) is run. Every path is checked against the folders it may read.
 
 type config struct {
-	Machines []string `json:"machines"`
-	Roots    []string `json:"roots"`
-	Gopls    string   `json:"gopls"`
+	Machines    []string `json:"machines"`
+	Roots       []string `json:"roots"`
+	Gopls       string   `json:"gopls"`
+	TypeScript  string   `json:"typescript_server"`
+	Python      string   `json:"python_server"`
+	Rust        string   `json:"rust_server"`
+	Swift       string   `json:"swift_server"`
+	IdleMinutes int      `json:"idle_minutes"`
+}
+
+// customServer is the server path the settings give for a language, or "".
+func (c config) customServer(lang string) string {
+	switch lang {
+	case "go":
+		return c.Gopls
+	case "typescript", "javascript":
+		return c.TypeScript
+	case "python":
+		return c.Python
+	case "rust":
+		return c.Rust
+	case "swift":
+		return c.Swift
+	}
+	return ""
+}
+
+// idle is how long a language server nobody asks anything is kept running.
+func (c config) idle() time.Duration {
+	if c.IdleMinutes > 0 {
+		return time.Duration(min(c.IdleMinutes, 24*60)) * time.Minute
+	}
+	return idleStop
 }
 
 type node struct {
@@ -136,22 +167,35 @@ func (n *node) reap() {
 			return
 		case <-t.C:
 		}
-		n.mu.Lock()
-		var idle []*lspServer
-		for k, s := range n.servers {
-			s.mu.Lock()
-			if s.srv != nil && (!s.srv.alive() || time.Since(s.srv.idleSince()) > idleStop) {
-				idle = append(idle, s.srv)
-				s.srv = nil
-				delete(n.servers, k)
-			}
-			s.mu.Unlock()
-		}
-		n.mu.Unlock()
-		for _, s := range idle {
-			s.stop()
-		}
+		n.reapIdle(time.Now())
 	}
+}
+
+// reapIdle stops the servers idle longer than the settings allow, or dead. The slot stays in the map: a request may
+// hold it already, and starts the next server in it.
+func (n *node) reapIdle(now time.Time) int {
+	n.mu.Lock()
+	limit := n.cfg.idle()
+	slots := make([]*serverSlot, 0, len(n.servers))
+	for _, s := range n.servers {
+		slots = append(slots, s)
+	}
+	n.mu.Unlock()
+	var idle []*lspServer
+	for _, s := range slots {
+		if !s.mu.TryLock() { // starting or in use right now: not idle
+			continue
+		}
+		if s.srv != nil && (!s.srv.alive() || now.Sub(s.srv.idleSince()) > limit) {
+			idle = append(idle, s.srv)
+			s.srv = nil
+		}
+		s.mu.Unlock()
+	}
+	for _, s := range idle {
+		s.stop()
+	}
+	return len(idle)
 }
 
 // handle answers the hub's nodes.call for nav.<method>.
@@ -174,8 +218,16 @@ func (n *node) handle(ctx context.Context, method string, raw json.RawMessage) (
 		return listResult{Files: files, Truncated: truncated}, nil
 	case "read":
 		return n.read(p)
-	case "definition", "references":
+	case "definition", "references", "implementation":
 		return n.locations(ctx, method, p)
+	case "hover":
+		return n.hover(ctx, p)
+	case "grep":
+		r, err := n.repoAt(p.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return n.grep(ctx, r, p.Query)
 	case "symbols":
 		return n.symbols(ctx, p)
 	case "search":
@@ -198,6 +250,13 @@ type reposResult struct {
 	Repos []repo   `json:"repos"`
 	Roots []string `json:"roots"` // the configured folders as written
 	Lsp   []string `json:"lsp"`   // languages whose server was found
+}
+
+type hoverResult struct {
+	Text     string `json:"text,omitempty"`
+	Markdown bool   `json:"markdown,omitempty"`
+	Word     string `json:"word,omitempty"`
+	NoServer string `json:"no_server,omitempty"`
 }
 
 type listResult struct {
@@ -257,7 +316,7 @@ func (n *node) reposResult() reposResult {
 	}
 	var found []string
 	for _, l := range languages {
-		if n.serverBinLocked(l) != "" {
+		if _, ok := n.serverLocked(l); ok {
 			found = append(found, l.name)
 		}
 	}
@@ -311,13 +370,13 @@ func findRepos(roots []string, home string) []repo {
 	return out
 }
 
+// isRepo says whether dir is a repository: a Git work tree, or a project of a language the page knows (its marker
+// file at the top).
 func isRepo(dir string) bool {
-	for _, m := range []string{".git", "go.mod"} {
-		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
-			return true
-		}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return true
 	}
-	return false
+	return len(workspaceLanguages(dir)) > 0
 }
 
 func subdirs(dir string) []string {
@@ -347,12 +406,14 @@ func (n *node) list(ctx context.Context, r repo) ([]string, bool) {
 		n.mu.Unlock()
 		return l.files, l.truncated
 	}
-	env := n.env
+	env, home := n.env, n.home
 	n.mu.Unlock()
 	files, truncated := gitFiles(ctx, r.Path, env)
 	if files == nil {
 		files, truncated = walkFiles(r.Path)
 	}
+	// files that hold secrets are not listed at all, as they are never read
+	files = slices.DeleteFunc(files, func(f string) bool { return secretPath(filepath.Join(r.Path, filepath.FromSlash(f)), home) })
 	n.mu.Lock()
 	n.lists[r.Path] = fileList{at: time.Now(), files: files, truncated: truncated}
 	n.mu.Unlock()
@@ -589,7 +650,7 @@ func (n *node) server(ctx context.Context, repoPath, path string) (*lspServer, l
 		return nil, language{}, errNoLanguage
 	}
 	n.mu.Lock()
-	bin := n.serverBinLocked(lang)
+	cmd, found := n.serverLocked(lang)
 	env := n.env
 	key := lang.name + "\x00" + repoPath
 	slot := n.servers[key]
@@ -598,7 +659,7 @@ func (n *node) server(ctx context.Context, repoPath, path string) (*lspServer, l
 		n.servers[key] = slot
 	}
 	n.mu.Unlock()
-	if bin == "" {
+	if !found {
 		return nil, lang, errNoServer
 	}
 	slot.mu.Lock()
@@ -609,9 +670,9 @@ func (n *node) server(ctx context.Context, repoPath, path string) (*lspServer, l
 	if slot.err != nil && time.Since(slot.at) < retryStart {
 		return nil, lang, slot.err
 	}
-	srv, err := startLSP(ctx, bin, lang.args, repoPath, env)
+	srv, err := startLSP(ctx, cmd.bin, cmd.args, repoPath, env)
 	if err != nil {
-		slot.err, slot.at = fmt.Errorf("could not start %s: %w", filepath.Base(bin), err), time.Now()
+		slot.err, slot.at = fmt.Errorf("could not start %s: %w", filepath.Base(cmd.bin), err), time.Now()
 		return nil, lang, slot.err
 	}
 	slot.srv, slot.err = srv, nil
@@ -623,21 +684,33 @@ var (
 	errNoServer   = errors.New("language server not found")
 )
 
-// serverBinLocked finds a language's server: the configured gopls, else the first of its names on the program's PATH.
-func (n *node) serverBinLocked(l language) string {
-	if l.name == "go" && strings.TrimSpace(n.cfg.Gopls) != "" {
-		p := expandHome(strings.TrimSpace(n.cfg.Gopls), n.home)
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
-			return p
+// serverLocked finds a language's server: the path the settings give, else the first of its programs on the
+// program's PATH. A path from the settings speaks the way its program is known to (pyright-langserver --stdio, pylsp
+// as it is), else as the language's first server does.
+func (n *node) serverLocked(l language) (serverCmd, bool) {
+	if custom := strings.TrimSpace(n.cfg.customServer(l.name)); custom != "" {
+		p := expandHome(custom, n.home)
+		if !filepath.IsAbs(p) {
+			p = lookPath(p, n.env)
 		}
-		return ""
+		st, err := os.Stat(p)
+		if p == "" || err != nil || !st.Mode().IsRegular() || st.Mode()&0o111 == 0 {
+			return serverCmd{}, false
+		}
+		cmd := serverCmd{bin: p, args: l.servers[0].args}
+		for _, s := range l.servers {
+			if filepath.Base(p) == s.bin {
+				cmd.args = s.args
+			}
+		}
+		return cmd, true
 	}
-	for _, b := range l.bins {
-		if p := lookPath(b, n.env); p != "" {
-			return p
+	for _, s := range l.servers {
+		if p := lookPath(s.bin, n.env); p != "" {
+			return serverCmd{bin: p, args: s.args}, true
 		}
 	}
-	return ""
+	return serverCmd{}, false
 }
 
 // position checks path, finds its repository (or uses the one the page is in, for Go's own sources) and its server,
@@ -690,9 +763,10 @@ func (n *node) locations(ctx context.Context, method string, p navParams) (locat
 	defer cancel()
 	doc := map[string]any{"textDocument": map[string]string{"uri": fileURI(real)}, "position": pos}
 	var raw json.RawMessage
-	if method == "definition" {
-		err = srv.call(cctx, "textDocument/definition", doc, &raw)
-	} else {
+	switch method {
+	case "definition", "implementation":
+		err = srv.call(cctx, "textDocument/"+method, doc, &raw)
+	default:
 		doc["context"] = map[string]bool{"includeDeclaration": false}
 		err = srv.call(cctx, "textDocument/references", doc, &raw)
 	}
@@ -792,17 +866,26 @@ func (n *node) search(ctx context.Context, p navParams) (symbolsResult, error) {
 	if q == "" {
 		return symbolsResult{}, nil
 	}
-	// The workspace's language: Go when the repository has a go.mod (the only one searched for now).
-	probe := filepath.Join(r.Path, "workspace.go") // only its extension matters: it picks the Go server
-	if _, err := os.Stat(filepath.Join(r.Path, "go.mod")); err != nil {
-		return symbolsResult{NoServer: "go"}, nil
+	// The workspace's language: the first one its marker files name whose server is installed.
+	langs := workspaceLanguages(r.Path)
+	if len(langs) == 0 {
+		return symbolsResult{NoServer: "?"}, nil
 	}
-	srv, _, err := n.server(ctx, r.Path, probe)
-	if errors.Is(err, errNoServer) {
-		return symbolsResult{NoServer: "go"}, nil
+	var srv *lspServer
+	for _, l := range langs {
+		probe := filepath.Join(r.Path, "workspace"+l.exts[0]) // only its extension matters: it picks the server
+		s, _, err := n.server(ctx, r.Path, probe)
+		if errors.Is(err, errNoServer) {
+			continue
+		}
+		if err != nil {
+			return symbolsResult{}, err
+		}
+		srv = s
+		break
 	}
-	if err != nil {
-		return symbolsResult{}, err
+	if srv == nil {
+		return symbolsResult{NoServer: langs[0].name}, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -850,22 +933,40 @@ func wordAt(line string, col int) string {
 
 // language is a language server the program knows how to start.
 type language struct {
-	name string   // what the page shows
-	id   string   // LSP languageId
-	exts []string // file name endings
-	bins []string // server programs, first found wins
+	name    string      // what the page shows
+	id      string      // LSP languageId
+	exts    []string    // file name endings
+	servers []serverCmd // server programs, first found wins
+	markers []string    // files at a repository's top that make it a workspace of this language
+}
+
+// serverCmd is a server program and the arguments that make it speak over stdin and stdout.
+type serverCmd struct {
+	bin  string
 	args []string
 }
 
-// languages: Go is the one tested; the others start the usual server for the language when it is installed.
+var (
+	goplsCmd   = serverCmd{bin: "gopls"}
+	tsCmd      = serverCmd{bin: "typescript-language-server", args: []string{"--stdio"}}
+	pyrightCmd = serverCmd{bin: "pyright-langserver", args: []string{"--stdio"}}
+	pylspCmd   = serverCmd{bin: "pylsp"}
+	rustCmd    = serverCmd{bin: "rust-analyzer"}
+	swiftCmd   = serverCmd{bin: "sourcekit-lsp"}
+	clangdCmd  = serverCmd{bin: "clangd"}
+)
+
+// languages are found by a file's ending. Go, TypeScript and JavaScript, Python, Rust and Swift are the ones the page
+// names; C and C++ start clangd when it is installed.
 var languages = []language{
-	{name: "go", id: "go", exts: []string{".go"}, bins: []string{"gopls"}},
-	{name: "typescript", id: "typescript", exts: []string{".ts", ".tsx", ".mts", ".cts"}, bins: []string{"typescript-language-server"}, args: []string{"--stdio"}},
-	{name: "javascript", id: "javascript", exts: []string{".js", ".jsx", ".mjs", ".cjs"}, bins: []string{"typescript-language-server"}, args: []string{"--stdio"}},
-	{name: "python", id: "python", exts: []string{".py"}, bins: []string{"pyright-langserver", "pylsp"}, args: []string{"--stdio"}},
-	{name: "rust", id: "rust", exts: []string{".rs"}, bins: []string{"rust-analyzer"}},
-	{name: "c", id: "c", exts: []string{".c", ".h"}, bins: []string{"clangd"}},
-	{name: "cpp", id: "cpp", exts: []string{".cc", ".cpp", ".cxx", ".hpp", ".hh"}, bins: []string{"clangd"}},
+	{name: "go", id: "go", exts: []string{".go"}, servers: []serverCmd{goplsCmd}, markers: []string{"go.mod", "go.work"}},
+	{name: "typescript", id: "typescript", exts: []string{".ts", ".tsx", ".mts", ".cts"}, servers: []serverCmd{tsCmd}, markers: []string{"tsconfig.json"}},
+	{name: "javascript", id: "javascript", exts: []string{".js", ".jsx", ".mjs", ".cjs"}, servers: []serverCmd{tsCmd}, markers: []string{"package.json", "jsconfig.json"}},
+	{name: "python", id: "python", exts: []string{".py", ".pyi"}, servers: []serverCmd{pyrightCmd, pylspCmd}, markers: []string{"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "pyrightconfig.json"}},
+	{name: "rust", id: "rust", exts: []string{".rs"}, servers: []serverCmd{rustCmd}, markers: []string{"Cargo.toml"}},
+	{name: "swift", id: "swift", exts: []string{".swift"}, servers: []serverCmd{swiftCmd}, markers: []string{"Package.swift"}},
+	{name: "c", id: "c", exts: []string{".c", ".h"}, servers: []serverCmd{clangdCmd}, markers: []string{"compile_commands.json"}},
+	{name: "cpp", id: "cpp", exts: []string{".cc", ".cpp", ".cxx", ".hpp", ".hh"}, servers: []serverCmd{clangdCmd}, markers: []string{"CMakeLists.txt"}},
 }
 
 func languageOf(path string) (language, bool) {
@@ -878,6 +979,29 @@ func languageOf(path string) (language, bool) {
 		}
 	}
 	return language{}, false
+}
+
+func languageNamed(name string) (language, bool) {
+	for _, l := range languages {
+		if l.name == name {
+			return l, true
+		}
+	}
+	return language{}, false
+}
+
+// workspaceLanguages are the languages a repository's top-level marker files name, in the table's order.
+func workspaceLanguages(dir string) []language {
+	var out []language
+	for _, l := range languages {
+		for _, m := range l.markers {
+			if st, err := os.Stat(filepath.Join(dir, m)); err == nil && st.Mode().IsRegular() {
+				out = append(out, l)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // homeDir is the user's home, from HOME or the account (the node may start the program with a clean environment).

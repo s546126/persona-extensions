@@ -4,11 +4,23 @@
   "name": "代码导航",
   "version": "0.1.0",
   "icon": "assets/icon.png",
-  "description": "在 Persona 里看你电脑上的代码，像 JetBrains 一样跳转：在你选的电脑上按仓库启动语言服务器（Go 用 gopls），查定义、查引用、看文件大纲、按名字搜符号。代码只在那台电脑上读，经 hub 显示到你的设备上，不写任何文件。",
+  "description": "在 Persona 里像 JetBrains 一样看你电脑上的代码：文件树、面包屑、大纲、按名字搜符号、全文搜索，跳到定义、跳到实现、查找引用、查看说明，还能后退和前进。按文件自动找对应语言的语言服务（Go、TypeScript / JavaScript、Python、Rust、Swift），没装的语言也能看代码和全文搜索。代码只在那台电脑上读，经 hub 显示到你的设备上，不写任何文件。",
   "publisher": "nwverse",
   "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/code-nav.md",
-  "tags": ["代码", "开发", "go", "lsp"],
-  "engines": {"persona": ">=202611092100", "extension_protocol": 1},
+  "tags": [
+    "代码",
+    "开发",
+    "go",
+    "lsp",
+    "typescript",
+    "python",
+    "rust",
+    "swift"
+  ],
+  "engines": {
+    "persona": ">=202611092100",
+    "extension_protocol": 1
+  },
   "runtime": {
     "command": {
       "linux-amd64": "bin/code-nav-linux-amd64",
@@ -16,7 +28,9 @@
       "darwin-arm64": "bin/code-nav-darwin-arm64",
       "darwin-amd64": "bin/code-nav-darwin-amd64"
     },
-    "args": ["hub"]
+    "args": [
+      "hub"
+    ]
   },
   "node": {
     "command": {
@@ -25,12 +39,23 @@
       "darwin-arm64": "bin/code-nav-darwin-arm64",
       "darwin-amd64": "bin/code-nav-darwin-amd64"
     },
-    "args": ["node"],
+    "args": [
+      "node"
+    ],
     "machines": "machines",
-    "permissions": {"files": true}
+    "permissions": {
+      "files": true
+    }
   },
   "contributes": {
-    "ui": [{"id": "code", "title": "代码", "placement": "nav_page", "icon": "code"}]
+    "ui": [
+      {
+        "id": "code",
+        "title": "代码",
+        "placement": "nav_page",
+        "icon": "code"
+      }
+    ]
   },
   "configuration": {
     "type": "object",
@@ -38,23 +63,68 @@
       "machines": {
         "type": "array",
         "title": "在哪些电脑上看代码",
-        "description": "打开的电脑上会运行一个只读程序：列出下面这些文件夹里的文件、读文件内容，并按需启动语言服务器（Go 用 gopls）。",
-        "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]},
-        "x-confirm": "这台电脑上会运行代码导航程序：读取你在设置里列出的文件夹里的代码（只读），按需启动 gopls 等语言服务器。"
+        "description": "选中的电脑上会运行一个只读程序：列出下面这些文件夹里的文件、读文件内容、在里面搜索，并按需启动对应语言的语言服务。",
+        "items": {
+          "type": "string",
+          "format": "machine",
+          "x-os": [
+            "darwin",
+            "linux"
+          ]
+        },
+        "x-confirm": "这台电脑上会运行代码导航程序：只读地读取你在设置里列出的文件夹里的代码，按需启动 gopls、typescript-language-server、pyright 等语言服务。不会改动任何文件。"
       },
       "roots": {
         "type": "array",
         "title": "代码文件夹",
         "description": "仓库所在的文件夹，~ 是那台电脑的家目录。一个文件夹本身不是仓库时，列出它下面两层以内的 Git 仓库。",
-        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
         "maxItems": 32,
-        "default": ["~/code"]
+        "default": [
+          "~/code"
+        ]
       },
       "gopls": {
         "type": "string",
-        "title": "gopls 的路径",
-        "description": "留空就在 PATH、$GOBIN、$GOPATH/bin 和 ~/go/bin 里找。",
+        "title": "Go 语言服务（gopls）的路径",
+        "description": "留空就在 PATH、$GOBIN、$GOPATH/bin 和 ~/go/bin 里找 gopls。",
         "maxLength": 512
+      },
+      "typescript_server": {
+        "type": "string",
+        "title": "TypeScript / JavaScript 语言服务的路径",
+        "description": "留空就在 PATH 里找 typescript-language-server。",
+        "maxLength": 512
+      },
+      "python_server": {
+        "type": "string",
+        "title": "Python 语言服务的路径",
+        "description": "留空就在 PATH 里依次找 pyright-langserver 和 pylsp。",
+        "maxLength": 512
+      },
+      "rust_server": {
+        "type": "string",
+        "title": "Rust 语言服务的路径",
+        "description": "留空就在 PATH 和 ~/.cargo/bin 里找 rust-analyzer。",
+        "maxLength": 512
+      },
+      "swift_server": {
+        "type": "string",
+        "title": "Swift 语言服务的路径",
+        "description": "留空就在 PATH 里找 sourcekit-lsp（随 Xcode 或 Swift 工具链安装）。",
+        "maxLength": 512
+      },
+      "idle_minutes": {
+        "type": "integer",
+        "title": "语言服务空闲多久后关掉（分钟）",
+        "description": "一段时间没人用的语言服务会被关掉以省内存，下次用时再启动。默认 10 分钟。",
+        "minimum": 1,
+        "maximum": 1440,
+        "default": 10
       }
     }
   }
