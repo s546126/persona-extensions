@@ -538,3 +538,23 @@ func TestNavigateFollowsTheSDK(t *testing.T) {
 		}
 	}
 }
+
+// Review regressions on the page: crafted folder paths, symbols without a name and an empty computer id draw pages
+// the hub takes.
+func TestViewReviewRegressions(t *testing.T) {
+	f := goodNode()
+	f.syms = symbolsResult{Symbols: []symbol{{Name: "", Kind: 12, Line: 1}, {Name: "  ", Line: 2}}}
+	app := &hubApp{machines: []string{"", "m1", "m2"}, call: f.call}
+	v := viewOf(t, app, state{}, 12, "zh-Hans")
+	if v.Filter == nil || v.Filter.Value != "m1" || len(v.Filter.Choices) != 2 {
+		t.Fatalf("an empty computer id is left out: %+v", v.Filter)
+	}
+	viewOf(t, app, state{M: "m1", R: repoPath, P: repoPath + "/main.go"}, 12, "zh-Hans")
+	for _, p := range []string{"a//b", "a/./b", "a/", "./a"} {
+		res, err := app.action(context.Background(), uiReq(ext.EncodeState(state{M: "m1", R: repoPath}), "dir", map[string]string{"path": p}, 12))
+		if err != nil || res.View == nil {
+			t.Fatalf("dir %q: %v", p, err)
+		}
+		mustCheck(t, res.View)
+	}
+}

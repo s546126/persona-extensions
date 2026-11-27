@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -168,13 +169,18 @@ func (s *state) sanitize() {
 
 // relOK says whether rel is a path inside the repository as the tree writes it.
 func relOK(rel string) bool {
-	return rel == "" || (!strings.HasPrefix(rel, "/") && !strings.Contains("/"+rel+"/", "/../") && !strings.Contains(rel, "\\"))
+	return rel == "" || (!strings.HasPrefix(rel, "/") && !strings.HasSuffix(rel, "/") && !strings.Contains(rel, "//") &&
+		!strings.Contains("/"+rel+"/", "/../") && !strings.Contains("/"+rel+"/", "/./") && !strings.Contains(rel, "\\"))
 }
 
 // view draws the page for s; note, when set, is a line above the code (a definition that was not found).
 func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note string) *wire.View {
 	t := texts(r.Locale)
-	machines, call := a.snapshot()
+	all, call := a.snapshot()
+	var machines []string
+	for _, c := range machineChoices(all) {
+		machines = append(machines, c.Value)
+	}
 	v := &wire.View{Title: t.title}
 	if len(machines) == 0 {
 		v.Sections = []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Key: "setup", Title: t.noMachines, Detail: t.noMachinesHint, Icon: wire.NavIconCode}}}}
@@ -650,7 +656,7 @@ func (a *hubApp) file(t text, r *ext.UIRequest, s *state, nc func(string, any, a
 			}
 			at := map[string]string{"line": strconv.Itoa(sym.Line), "col": strconv.Itoa(sym.Col)}
 			row := wire.Component{
-				Type: wire.ComponentRow, Key: fmt.Sprintf("sym:%d", i), Title: clip(strings.Repeat("· ", min(sym.Depth, 4))+sym.Name, 200),
+				Type: wire.ComponentRow, Key: fmt.Sprintf("sym:%d", i), Title: clip(strings.Repeat("· ", min(sym.Depth, 4))+cmp.Or(strings.TrimSpace(sym.Name), kindName(t, sym.Kind)), 200),
 				Subtitle: clip(kindName(t, sym.Kind)+detail(sym.Detail), 200), Value: strconv.Itoa(sym.Line),
 				Action: &wire.Action{ID: "goto", Values: at},
 			}
@@ -838,7 +844,7 @@ func (a *hubApp) searchResults(t text, s *state, nc func(string, any, any) error
 			where = sym.Container + " · " + where
 		}
 		out = append(out, wire.Component{
-			Type: wire.ComponentRow, Key: fmt.Sprintf("hit:%d", i), Title: clip(sym.Name, 200), Subtitle: clip(kindName(t, sym.Kind)+" · "+where, 300),
+			Type: wire.ComponentRow, Key: fmt.Sprintf("hit:%d", i), Title: clip(cmp.Or(strings.TrimSpace(sym.Name), kindName(t, sym.Kind)), 200), Subtitle: clip(kindName(t, sym.Kind)+" · "+where, 300),
 			Action: &wire.Action{ID: "jump", Values: map[string]string{"path": sym.Path, "line": strconv.Itoa(sym.Line), "col": strconv.Itoa(sym.Col)}},
 		})
 	}
@@ -965,7 +971,10 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 			s.moveTo(s.P, line, col)
 		}
 	case "jump":
-		s.moveTo(vals["path"], num("line"), num("col"))
+		if s.W != nil && s.W.P == s.P && (s.V == "defs" || s.V == "impls" || s.V == "refs") {
+			s.L, s.C = s.W.L, s.W.C // the way back returns to the name the list was asked for
+		}
+		s.moveTo(clip(vals["path"], 4096), num("line"), num("col"))
 	case "back":
 		s.back()
 	case "forward":
@@ -1049,6 +1058,8 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 			switch {
 			case err != nil:
 				return &wire.ActionResult{Toast: clip(t.noDef+errText(err), 300)}, nil
+			case n == 0 && method == "implementation":
+				note = t.noImplHere
 			case n == 0:
 				note = t.noDefHere
 			}

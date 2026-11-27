@@ -98,11 +98,7 @@ func (n *node) grep(ctx context.Context, r repo, query string) (grepResult, erro
 			continue
 		}
 		res.Scanned++
-		hay := data
-		if fold {
-			hay = bytes.ToLower(data)
-		}
-		if !bytes.Contains(hay, needle) {
+		if !containsFold(data, needle, fold) {
 			continue
 		}
 		res.Files++
@@ -110,11 +106,17 @@ func (n *node) grep(ctx context.Context, r repo, query string) (grepResult, erro
 		for len(data) > 0 {
 			lineNo++
 			i := bytes.IndexByte(data, '\n')
-			var line, low []byte
+			var line []byte
 			if i < 0 {
-				line, low, data, hay = data, hay, nil, nil
+				line, data = data, nil
 			} else {
-				line, low, data, hay = data[:i], hay[:i], data[i+1:], hay[i+1:]
+				line, data = data[:i], data[i+1:]
+			}
+			// each line is lowered on its own: lowering can change a text's length in bytes (İ, the Kelvin sign,
+			// invalid UTF-8), never its length in characters, so the column is counted in the lowered line
+			low := line
+			if fold {
+				low = bytes.ToLower(line)
 			}
 			at := bytes.Index(low, needle)
 			if at < 0 {
@@ -125,7 +127,7 @@ func (n *node) grep(ctx context.Context, r repo, query string) (grepResult, erro
 				return res, nil
 			}
 			text := strings.TrimRight(string(line), "\r")
-			col := utf8.RuneCount(line[:at]) + 1
+			col := utf8.RuneCount(low[:at]) + 1
 			res.Hits = append(res.Hits, grepHit{Path: real, Rel: rel, Line: lineNo, Col: col, Preview: previewAround(text, col)})
 			if inFile++; inFile >= maxGrepPerF {
 				break
@@ -133,6 +135,26 @@ func (n *node) grep(ctx context.Context, r repo, query string) (grepResult, erro
 		}
 	}
 	return res, nil
+}
+
+// containsFold says whether data holds needle (already lowered when fold), line by line when folding.
+func containsFold(data, needle []byte, fold bool) bool {
+	if !fold {
+		return bytes.Contains(data, needle)
+	}
+	for len(data) > 0 {
+		i := bytes.IndexByte(data, '\n')
+		line := data
+		if i >= 0 {
+			line, data = data[:i], data[i+1:]
+		} else {
+			data = nil
+		}
+		if bytes.Contains(bytes.ToLower(line), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // grepRead reads a file to search: a regular file of at most maxGrepFile bytes, not binary.

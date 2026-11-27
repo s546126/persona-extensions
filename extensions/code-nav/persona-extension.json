@@ -77,7 +77,7 @@
       "roots": {
         "type": "array",
         "title": "代码文件夹",
-        "description": "仓库所在的文件夹，~ 是那台电脑的家目录。一个文件夹本身不是仓库时，列出它下面两层以内的 Git 仓库。",
+        "description": "仓库所在的文件夹，~ 是那台电脑的家目录。一个文件夹本身不是仓库时，列出它下面两层以内的仓库（Git 仓库，或带 go.mod、package.json、pyproject.toml、Cargo.toml、Package.swift 等项目文件的文件夹）。家目录本身不会被当成一个仓库。",
         "items": {
           "type": "string",
           "minLength": 1,
@@ -91,19 +91,19 @@
       "gopls": {
         "type": "string",
         "title": "Go 语言服务（gopls）的路径",
-        "description": "留空就在 PATH、$GOBIN、$GOPATH/bin 和 ~/go/bin 里找 gopls。",
+        "description": "留空就在登录 shell 的 PATH 和 ~/go/bin 里找 gopls。",
         "maxLength": 512
       },
       "typescript_server": {
         "type": "string",
         "title": "TypeScript / JavaScript 语言服务的路径",
-        "description": "留空就在 PATH 里找 typescript-language-server。",
+        "description": "留空就在登录 shell 的 PATH 里找 typescript-language-server。",
         "maxLength": 512
       },
       "python_server": {
         "type": "string",
         "title": "Python 语言服务的路径",
-        "description": "留空就在 PATH 里依次找 pyright-langserver 和 pylsp。",
+        "description": "留空就在登录 shell 的 PATH 里依次找 pyright-langserver 和 pylsp。",
         "maxLength": 512
       },
       "rust_server": {

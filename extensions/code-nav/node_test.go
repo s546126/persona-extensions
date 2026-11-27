@@ -405,3 +405,62 @@ func TestReadEdges(t *testing.T) {
 		t.Error("a folder is not read")
 	}
 }
+
+// Review regressions: lowering that changes a line's length in bytes (İ, the Kelvin sign, Latin-1 bytes) must not
+// break Find in Files; JSX goes to the TypeScript server as its own language; the home folder is never a repository;
+// credential files inside a repository are secrets too.
+func TestReviewRegressions(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, "r")
+	writeFiles(t, proj, map[string]string{
+		"go.mod":     "module r\n",
+		"tr.txt":     "İİ x\nfoo here\nKK\nbar foo\n",
+		"latin1.txt": "caf\xe9 \xe9\xe9 foo\n",
+	})
+	n := &node{}
+	n.setup(config{Roots: []string{root}, Gopls: "/nonexistent/gopls"})
+	r, err := n.repoAt(realDir(t, proj))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := n.grep(context.Background(), r, "foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, h := range res.Hits {
+		got = append(got, fmt.Sprintf("%s:%d:%d", h.Rel, h.Line, h.Col))
+	}
+	if want := "latin1.txt:1:9 tr.txt:2:1 tr.txt:4:5"; strings.Join(got, " ") != want {
+		t.Errorf("hits %q, want %q", strings.Join(got, " "), want)
+	}
+
+	for path, id := range map[string]string{"a.tsx": "typescriptreact", "a.jsx": "javascriptreact", "a.ts": "typescript", "a.js": "javascript"} {
+		if l, _ := languageOf(path); l.id != id {
+			t.Errorf("languageOf(%s).id = %q, want %q", path, l.id, id)
+		}
+	}
+
+	home := t.TempDir()
+	writeFiles(t, home, map[string]string{"package.json": "{}", "code/app/go.mod": "module app\n"})
+	repos := findRepos([]string{home, "~", filepath.Join(home, "code")}, home)
+	if len(repos) != 1 || repos[0].Name != "app" {
+		t.Errorf("the home folder is not a repository: %+v", repos)
+	}
+
+	for p, secret := range map[string]bool{
+		"/w/app/.npmrc": true, "/w/app/sub/.pypirc": true, "/w/app/.netrc": true, "/w/app/.git-credentials": true,
+		"/w/app/.envrc": true, "/w/app/.env-prod": true, "/w/app/.env_local": true, "/w/app/.env.example": false,
+		"/w/app/npmrc.md": false,
+	} {
+		if got := secretPath(p, "/home/me"); got != secret {
+			t.Errorf("secretPath(%s) = %v, want %v", p, got, secret)
+		}
+	}
+	if initOptions("/x/rust-analyzer") == nil || initOptions("/x/sourcekit-lsp") == nil || initOptions("/x/gopls") != nil {
+		t.Error("read-only settings for rust-analyzer and sourcekit-lsp only")
+	}
+	if clangdCmd.args[0] != "--background-index=false" {
+		t.Error("clangd without its background index")
+	}
+}
