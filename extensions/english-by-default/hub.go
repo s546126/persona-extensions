@@ -77,29 +77,53 @@ func (a *hubApp) render(ctx context.Context, r *ext.UIRequest) (*wire.View, erro
 		}()
 	}
 	wg.Wait()
+	shown := pairsShown(states, errs)
 	for i, m := range machines {
-		v.Sections = append(v.Sections, machineSection(t, loc, m, states[i], errs[i]))
+		v.Sections = append(v.Sections, machineSection(t, loc, m, states[i], errs[i], shown))
 	}
 	v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{{Type: wire.ComponentText, Style: wire.TextStyleCaption, Text: t.footer}}})
 	return v, nil
 }
 
-func machineSection(t text, loc *time.Location, machine string, st status, err error) wire.Section {
-	s := wire.Section{Title: machine}
+// pairsShown is how many pairs each computer's section lists, so that the whole page keeps to wire.ItemsMost
+// components: the rows every section has (one for a computer that can't be reached; its directories and the two
+// counts otherwise) and the footer come first, and what is left is shared out evenly, at most recentShown each.
+func pairsShown(states []status, errs []error) int {
+	fixed, listing := 1, 0
+	for i, st := range states {
+		if errs[i] != nil {
+			fixed++
+			continue
+		}
+		fixed += len(st.Dirs) + 2
+		if len(st.Recent) > 0 {
+			listing++
+		} else {
+			fixed++ // "no pairs yet"
+		}
+	}
+	if listing == 0 {
+		return recentShown
+	}
+	return max(0, min(recentShown, (wire.ItemsMost-fixed)/listing))
+}
+
+func machineSection(t text, loc *time.Location, machine string, st status, err error, shown int) wire.Section {
+	s := wire.Section{Title: oneLine(machine)}
 	if err != nil {
 		s.Items = append(s.Items, wire.Component{Type: wire.ComponentRow, Title: t.unreachable, Subtitle: oneLine(err.Error()),
 			Badge: &wire.Badge{Text: t.offline, Tone: wire.ToneCaution}})
 		return s
 	}
 	for _, d := range st.Dirs {
-		row := wire.Component{Type: wire.ComponentRow, Title: d.Dir}
+		row := wire.Component{Type: wire.ComponentRow, Title: oneLine(d.Dir)}
 		switch {
 		case d.Error != "":
 			row.Subtitle, row.Badge = oneLine(d.Error), &wire.Badge{Text: t.notInstalled, Tone: wire.ToneCaution}
 		case d.Installed:
 			row.Subtitle, row.Badge = t.modeName(st.Mode), &wire.Badge{Text: t.installed, Tone: wire.TonePositive}
 		default:
-			row.Subtitle, row.Badge = d.Settings, &wire.Badge{Text: t.notInstalled, Tone: wire.ToneCaution}
+			row.Subtitle, row.Badge = oneLine(d.Settings), &wire.Badge{Text: t.notInstalled, Tone: wire.ToneCaution}
 		}
 		s.Items = append(s.Items, row)
 	}
@@ -110,8 +134,9 @@ func machineSection(t text, loc *time.Location, machine string, st status, err e
 		s.Items = append(s.Items, wire.Component{Type: wire.ComponentText, Style: wire.TextStyleSecondary, Text: t.none})
 		return s
 	}
-	for _, e := range st.Recent {
-		when := e.At
+	recent := st.Recent[:min(len(st.Recent), shown)]
+	for _, e := range recent {
+		when := oneLine(e.At)
 		if at, err := time.Parse(time.RFC3339, e.At); err == nil {
 			when = at.In(loc).Format("01-02 15:04")
 		}
@@ -119,17 +144,17 @@ func machineSection(t text, loc *time.Location, machine string, st status, err e
 		if english == "" {
 			english = t.noEnglish
 		}
-		meta := []string{when, t.entryMode(e.Mode)}
+		meta := []string{when, oneLine(t.entryMode(e.Mode))}
 		if e.Score != nil {
 			meta = append(meta, fmt.Sprintf(t.score, *e.Score))
 		}
 		if e.Natural != nil && !*e.Natural && e.NaturalHint != "" {
-			meta = append(meta, t.better+e.NaturalHint)
+			meta = append(meta, t.better+oneLine(e.NaturalHint))
 		}
 		s.Items = append(s.Items, wire.Component{Type: wire.ComponentRow, Title: oneLine(e.Original),
 			Subtitle: oneLine(english) + "\n" + strings.Join(meta, " · ")})
 	}
-	s.Footer = fmt.Sprintf(t.recent, len(st.Recent))
+	s.Footer = fmt.Sprintf(t.recent, len(recent))
 	return s
 }
 
