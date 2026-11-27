@@ -122,39 +122,32 @@ func TestBackKeepsTheStateSmall(t *testing.T) {
 	}
 }
 
-// The page against a real computer's program: repositories, the tree, a file and its outline, a jump to a
-// definition in another package and back, the usages of a function, a symbol search.
+// The page against a real computer's program and a real gopls: repositories, the folder rows, a file and its
+// outline, the names of a marked line, a jump to a definition in another package, quick info, an implementation,
+// usages, back and forward, a symbol search and Find in Files, and the UI version 13 navigate. With
+// CODE_NAV_REQUIRE_GOPLS=1 a missing gopls fails the test instead of skipping its language-server part.
 func TestThePageOnARepository(t *testing.T) {
 	root := t.TempDir()
 	proj := writeRepo(t, root)
 	n := newNode(t, root)
 	t.Cleanup(n.cleanup)
-	app := &hubApp{machines: []string{"m1"}, call: func(ctx context.Context, machine, method string, params, out any) error {
-		raw, _ := json.Marshal(params)
-		res, err := n.handle(ctx, method, raw)
-		if err != nil {
-			return err
-		}
-		b, _ := json.Marshal(res)
-		return json.Unmarshal(b, out)
-	}}
+	app := &hubApp{machines: []string{"m1"}, call: direct(n)}
 	ctx := context.Background()
-	req := func(st string, action string, values map[string]string) *ext.UIRequest {
-		r := &ext.UIRequest{}
-		r.Contribution, r.Size, r.UIVersion, r.Locale, r.State, r.Action, r.Values = codeUI, wire.SizeFull, 12, "zh-Hans", st, action, values
-		return r
-	}
 	check := func(v *wire.View) string {
 		t.Helper()
+		if err := wire.CheckView(v); err != nil {
+			raw, _ := json.Marshal(v)
+			t.Fatalf("CheckView: %v: %s", err, raw)
+		}
 		raw, _ := json.Marshal(v)
 		if err := exttest.CheckView(raw, false); err != nil {
-			t.Fatalf("%v: %s", err, raw)
+			t.Fatalf("exttest.CheckView: %v: %s", err, raw)
 		}
 		return string(raw)
 	}
 	act := func(v *wire.View, action string, values map[string]string) *wire.View {
 		t.Helper()
-		res, err := app.action(ctx, req(v.State, action, values))
+		res, err := app.action(ctx, uiReq(v.State, action, values, 12))
 		if err != nil {
 			t.Fatalf("%s: %v", action, err)
 		}
@@ -163,8 +156,13 @@ func TestThePageOnARepository(t *testing.T) {
 		}
 		return res.View
 	}
+	at := func(v *wire.View) state {
+		var s state
+		_ = json.Unmarshal([]byte(v.State), &s)
+		return s
+	}
 
-	v, err := app.render(ctx, req("", "", nil))
+	v, err := app.render(ctx, uiReq("", "", nil, 12))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,57 +170,132 @@ func TestThePageOnARepository(t *testing.T) {
 		t.Fatalf("the repository is listed: %s", raw)
 	}
 	v = act(v, "repo", map[string]string{"repo": proj})
-	if raw := check(v); !strings.Contains(raw, `"file_tree"`) || !strings.Contains(raw, "# demo") {
-		t.Fatalf("the tree and the README: %s", raw)
+	if raw := check(v); !strings.Contains(raw, `"file_tree"`) || !strings.Contains(raw, "# demo") || !strings.Contains(raw, `"title":"util","subtitle":"文件夹"`) || strings.Contains(raw, ".env") {
+		t.Fatalf("the tree, the folder rows and the README: %s", raw)
+	}
+	v = act(v, "dir", map[string]string{"path": "util"})
+	if raw := check(v); !strings.Contains(raw, `"title":"util.go"`) || !strings.Contains(raw, `"breadcrumb"`) {
+		t.Fatalf("the util folder: %s", raw)
 	}
 	v = act(v, "open", map[string]string{"path": "main.go"})
 	raw := check(v)
-	if !strings.Contains(raw, `"path":"main.go"`) || !strings.Contains(raw, "util.Greet") {
+	if !strings.Contains(raw, `"path":"main.go"`) || !strings.Contains(raw, "util.Greet") || !strings.Contains(raw, `"language":"go"`) {
 		t.Fatalf("main.go: %s", raw)
 	}
 
-	if _, err := exec.LookPath(goplsPath()); err != nil {
+	gopls := goplsPath()
+	if _, err := exec.LookPath(gopls); err != nil {
+		if os.Getenv("CODE_NAV_REQUIRE_GOPLS") == "1" {
+			t.Fatalf("gopls is required (CODE_NAV_REQUIRE_GOPLS=1) and not installed at %s", gopls)
+		}
 		t.Skip("gopls is not installed; the rest needs it")
+	}
+	if out, err := exec.Command(gopls, "version").Output(); err == nil {
+		t.Logf("real language server: %s", strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0]))
 	}
 	if !strings.Contains(raw, `"sym:`) {
 		t.Fatalf("the outline: %s", raw)
 	}
-	// main.go line 7 is `	fmt.Println(util.Greet("you"))`: Greet starts at column 19.
-	v = act(v, "nav", map[string]string{"line": "7", "column": "20", "intent": "definition"})
-	var s state
-	_ = json.Unmarshal([]byte(v.State), &s)
-	if raw := check(v); s.P != filepath.Join(proj, "util", "util.go") || s.L != 4 || len(s.H) != 1 || !strings.Contains(raw, `"highlight":{"start":4,"end":4}`) {
+	// main.go line 7 is `	fmt.Println(util.Greet("you"))`: go to it (a jump the way back remembers), then follow Greet
+	// from the line's names (UI 12).
+	v = act(v, "goto_line", map[string]string{"goto": "7"})
+	raw = check(v)
+	if s := at(v); s.L != 7 || !strings.Contains(raw, `"key":"line"`) || !strings.Contains(raw, `"title":"Greet"`) {
+		t.Fatalf("the names of line 7: %+v %s", s, raw)
+	}
+	greet := strconv.Itoa(strings.Index("\tfmt.Println(util.Greet(\"you\"))", "Greet") + 1)
+	v = act(v, "def_at", map[string]string{"line": "7", "col": greet})
+	s := at(v)
+	if raw := check(v); s.P != filepath.Join(proj, "util", "util.go") || s.L != 4 || len(s.H) != 2 || !strings.Contains(raw, `"highlight":{"start":4,"end":4}`) {
 		t.Fatalf("the definition of Greet: %+v %s", s, raw)
 	}
-	v = act(v, "refs_at", map[string]string{"line": "4", "column": "6", "col": "6"})
+	v = act(v, "hover_at", map[string]string{"line": "4", "col": "6"})
+	if raw := check(v); !strings.Contains(raw, `"key":"hover"`) || !strings.Contains(raw, "func Greet(name string) string") || !strings.Contains(raw, "Greet says hello") {
+		t.Fatalf("quick info on Greet: %s", raw)
+	}
+	v = act(v, "close_hover", nil)
+	// util.go line 9 is `type Speaker interface {`: its implementation is Dog, line 14.
+	v = act(v, "impl_at", map[string]string{"line": "9", "col": "6"})
+	s = at(v)
+	if raw := check(v); s.P != filepath.Join(proj, "util", "util.go") || s.L != 14 || len(s.H) != 3 {
+		t.Fatalf("the implementation of Speaker: %+v %s", s, raw)
+	}
+	v = act(v, "refs_at", map[string]string{"line": "4", "col": "6"})
 	if raw := check(v); !strings.Contains(raw, "main.go:7") {
 		t.Fatalf("the usages of Greet: %s", raw)
 	}
 	v = act(v, "back", nil)
-	s = state{}
-	_ = json.Unmarshal([]byte(v.State), &s)
-	if s.P != filepath.Join(proj, "main.go") || s.L != 7 || len(s.H) != 0 {
+	if s = at(v); s.P != filepath.Join(proj, "util", "util.go") || s.L != 9 || len(s.N) != 1 {
+		t.Fatalf("back to Speaker: %+v", s)
+	}
+	v = act(v, "back", nil)
+	if s = at(v); s.P != filepath.Join(proj, "main.go") || s.L != 7 || len(s.H) != 1 || len(s.N) != 2 {
 		t.Fatalf("back to main.go: %+v", s)
 	}
+	if raw := check(v); !strings.Contains(raw, `"key":"forward"`) || !strings.Contains(raw, `"key":"back"`) {
+		t.Fatalf("back and forward: %s", raw)
+	}
+	v = act(v, "forward", nil)
+	if s = at(v); s.P != filepath.Join(proj, "util", "util.go") || s.L != 9 {
+		t.Fatalf("forward to Speaker: %+v", s)
+	}
+	v = act(v, "forward", nil)
+	if s = at(v); s.L != 14 || len(s.N) != 0 || len(s.H) != 3 {
+		t.Fatalf("forward to Dog: %+v", s)
+	}
 	v = act(v, "search", map[string]string{"q": "Greet"})
-	if raw := check(v); !strings.Contains(raw, `"hit:0"`) || !strings.Contains(raw, "util.go:4") {
+	if raw := check(v); !strings.Contains(raw, `"hit:0"`) || !strings.Contains(raw, "util.go:4") || !strings.Contains(raw, `"segmented"`) {
 		t.Fatalf("the symbol search: %s", raw)
 	}
+	v = act(v, "scope", map[string]string{"scope": "text"})
+	if raw := check(v); !strings.Contains(raw, `"g:0"`) || !strings.Contains(raw, "main.go:7") || !strings.Contains(raw, "util/util.go:4") {
+		t.Fatalf("Find in Files: %s", raw)
+	}
+	v = act(v, "jump", map[string]string{"path": filepath.Join(proj, "main.go"), "line": "1", "col": "1"})
 	v = act(v, "nav", map[string]string{"line": "1", "column": "1", "intent": "definition"})
 	if raw := check(v); !strings.Contains(raw, `"note"`) {
 		t.Fatalf("no definition on `package`: %s", raw)
 	}
+	// the UI version 13 way: a name chosen in the code
+	v = act(v, "nav", map[string]string{"line": "7", "column": greet, "word": "Greet", "intent": "definition"})
+	if s = at(v); s.P != filepath.Join(proj, "util", "util.go") || s.L != 4 {
+		t.Fatalf("navigate to Greet: %+v", s)
+	}
+	v = act(v, "nav", map[string]string{"intent": "back"})
+	if s = at(v); s.P != filepath.Join(proj, "main.go") || s.L != 7 {
+		t.Fatalf("navigate back: %+v", s)
+	}
+}
+
+// direct is a node caller that answers from n, through JSON as the hub's nodes.call does.
+func direct(n *node) nodeCaller {
+	return func(ctx context.Context, machine, method string, params, out any) error {
+		raw, _ := json.Marshal(params)
+		res, err := n.handle(ctx, method, raw)
+		if err != nil {
+			return err
+		}
+		b, _ := json.Marshal(res)
+		return json.Unmarshal(b, out)
+	}
+}
+
+func uiReq(st, action string, values map[string]string, version int) *ext.UIRequest {
+	r := &ext.UIRequest{}
+	r.Contribution, r.Size, r.UIVersion, r.Locale, r.State, r.Action, r.Values = codeUI, wire.SizeFull, version, "zh-Hans", st, action, values
+	return r
 }
 
 func writeRepo(t *testing.T, root string) string {
 	t.Helper()
 	proj := filepath.Join(root, "demo")
 	files := map[string]string{
-		"go.mod":       "module example.com/demo\n\ngo 1.22\n",
-		"README.md":    "# demo\n",
-		"main.go":      "package main\n\nimport \"example.com/demo/util\"\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(util.Greet(\"you\"))\n}\n",
-		"util/util.go": "package util\n\n// Greet says hello.\nfunc Greet(name string) string {\n\treturn \"hello \" + name\n}\n",
-		".env":         "TOKEN=x\n",
+		"go.mod":    "module example.com/demo\n\ngo 1.22\n",
+		"README.md": "# demo\n",
+		"main.go":   "package main\n\nimport \"example.com/demo/util\"\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(util.Greet(\"you\"))\n}\n",
+		"util/util.go": "package util\n\n// Greet says hello.\nfunc Greet(name string) string {\n\treturn \"hello \" + name\n}\n\n" +
+			"// Speaker says something.\ntype Speaker interface {\n\tSay() string\n}\n\n// Dog is a Speaker.\ntype Dog struct{}\n\n// Say barks.\nfunc (Dog) Say() string { return \"woof\" }\n",
+		".env": "TOKEN=x\n",
 	}
 	for name, body := range files {
 		p := filepath.Join(proj, filepath.FromSlash(name))

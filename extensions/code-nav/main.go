@@ -1,11 +1,13 @@
 // Code navigation (docs/extensions/code-nav.md): read the code on your computers in Persona and jump around it the
-// way an IDE does: go to a definition, find references, a file's outline, symbols by name. The computer's program
-// asks a language server (gopls for Go) and only ever reads.
+// way a JetBrains IDE does: go to a definition or an implementation, find usages, quick info, a file's outline,
+// symbols by name, Find in Files, back and forward. The computer's program asks the language server of each file's
+// language (gopls, typescript-language-server, pyright or pylsp, rust-analyzer, sourcekit-lsp) and only ever reads.
 //
 // One program, two roles:
 //
 //	code-nav hub     the hub's: the 代码 page (hub.go)
-//	code-nav node    each computer's: repositories, files and the language servers (node.go, lsp.go)
+//	code-nav node    each computer's: repositories, files, Find in Files and the language servers (node.go,
+//	                 search.go, lsp.go)
 package main
 
 import (

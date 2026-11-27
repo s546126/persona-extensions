@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,7 @@ import (
 
 // A minimal Language Server Protocol client: one language server process per repository root, spoken to over its
 // stdin and stdout (JSON-RPC 2.0 with Content-Length framing). It asks only what the page needs: definitions,
-// references, a file's symbols and a search over the workspace's symbols. It never sends an edit.
+// implementations, references, hover, a file's symbols and a search over the workspace's symbols. It never sends an edit.
 
 // lspPos is a position as LSP writes it: a 0-based line and a 0-based character in the negotiated encoding.
 type lspPos struct {
@@ -93,11 +94,17 @@ type lspServer struct {
 	mu      sync.Mutex
 	nextID  int
 	pending map[int]chan rpcMessage
-	opened  map[string]int // uri → version, the files told to the server
-	order   []string       // opened uris, oldest first
+	opened  map[string]openDoc // the files told to the server
+	order   []string           // opened uris, oldest first
 	last    time.Time
 	dead    chan struct{}
 	err     error
+}
+
+// openDoc is a file the server was told about: the version it has and a digest of the text it got.
+type openDoc struct {
+	version int
+	sum     [32]byte
 }
 
 // maxOpen bounds the files a server is told about at once; the oldest are closed first.
@@ -121,7 +128,7 @@ func startLSP(ctx context.Context, bin string, args []string, root string, env [
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	s := &lspServer{root: root, cmd: cmd, in: in, pending: map[int]chan rpcMessage{}, opened: map[string]int{}, last: time.Now(), dead: make(chan struct{})}
+	s := &lspServer{root: root, cmd: cmd, in: in, pending: map[int]chan rpcMessage{}, opened: map[string]openDoc{}, last: time.Now(), dead: make(chan struct{})}
 	go s.read(bufio.NewReaderSize(out, 1<<16))
 	go func() {
 		err := cmd.Wait()
@@ -142,6 +149,8 @@ func startLSP(ctx context.Context, bin string, args []string, root string, env [
 			"general": map[string]any{"positionEncodings": []string{"utf-8", "utf-16"}},
 			"textDocument": map[string]any{
 				"definition":     map[string]any{"linkSupport": true},
+				"implementation": map[string]any{"linkSupport": true},
+				"hover":          map[string]any{"contentFormat": []string{"markdown", "plaintext"}},
 				"references":     map[string]any{},
 				"documentSymbol": map[string]any{"hierarchicalDocumentSymbolSupport": true},
 				"synchronization": map[string]any{
@@ -337,12 +346,24 @@ func (s *lspServer) forget(id int) {
 // open tells the server about a file before asking about it (once per file, until it is pushed out by newer ones).
 func (s *lspServer) open(path, languageID, text string) error {
 	uri := fileURI(path)
+	sum := sha256.Sum256([]byte(text))
 	s.mu.Lock()
-	if _, ok := s.opened[uri]; ok {
+	if o, ok := s.opened[uri]; ok {
+		if o.sum == sum {
+			s.mu.Unlock()
+			return nil
+		}
+		// the file changed on disk since the server was told: give it the text as it is now
+		o.version++
+		o.sum = sum
+		s.opened[uri] = o
 		s.mu.Unlock()
-		return nil
+		return s.notify("textDocument/didChange", map[string]any{
+			"textDocument":   map[string]any{"uri": uri, "version": o.version},
+			"contentChanges": []map[string]string{{"text": text}},
+		})
 	}
-	s.opened[uri] = 1
+	s.opened[uri] = openDoc{version: 1, sum: sum}
 	s.order = append(s.order, uri)
 	var drop []string
 	for len(s.order) > maxOpen {
