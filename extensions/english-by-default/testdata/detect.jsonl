@@ -1,0 +1,133 @@
+{"cat":"en","want":false,"text":"Fix the failing test in server/internal/node and run go vet."}
+{"cat":"en","want":false,"text":"ok"}
+{"cat":"en","want":false,"text":"y"}
+{"cat":"en","want":false,"text":"continue"}
+{"cat":"en","want":false,"text":"Looks good, ship it."}
+{"cat":"en","want":false,"text":"Can you explain why this goroutine leaks when the context is cancelled?"}
+{"cat":"en","want":false,"text":"Refactor handleRequest to use the new retry helper and add a table-driven test."}
+{"cat":"en","want":false,"text":"Please review https://github.com/example/repo/pull/123/files and leave notes."}
+{"cat":"en","want":false,"text":"Run `npm test` and tell me what fails."}
+{"cat":"en","want":false,"text":"Use the café icon for the coffee category."}
+{"cat":"en","want":false,"text":"Add a résumé upload field to the profile form."}
+{"cat":"en","want":false,"text":"The naïve approach is O(n^2); find something better."}
+{"cat":"en","want":false,"text":"Write a commit message for these changes."}
+{"cat":"en","want":false,"text":"What does the --plugin-dir flag do?"}
+{"cat":"en","want":false,"text":"Delete the branch feature/old-login after merging."}
+{"cat":"en","want":false,"text":"Is there a race between Close and Write here?"}
+{"cat":"en","want":false,"text":"Set the default timeout to 30s and the retry count to 3."}
+{"cat":"en","want":false,"text":"Rename the package from util to strutil and update imports."}
+{"cat":"en","want":false,"text":"We need a migration that adds a nullable column de_id to the users table."}
+{"cat":"en","want":false,"text":"The test named TestLaPlaza fails on CI only."}
+{"cat":"en","want":false,"text":"Translate the README into Spanish and save it as README.es.md."}
+{"cat":"en","want":false,"text":"Can you add Portuguese and German locales to the i18n config?"}
+{"cat":"en","want":false,"text":"Our client in Montréal says the São Paulo office can't log in."}
+{"cat":"en","want":false,"text":"thanks!"}
+{"cat":"en","want":false,"text":"/review"}
+{"cat":"en","want":false,"text":"Add a deja vu easter egg to the about page."}
+{"cat":"en","want":false,"text":"Explain the difference between a mutex and a semaphore in two sentences."}
+{"cat":"en","want":false,"text":"Bump the version to 0.2.0 and update the changelog."}
+{"cat":"en","want":false,"text":"Check whether the La Liga API still returns standings for 2026."}
+{"cat":"en","want":false,"text":"Make the button say Sign in instead of Log in."}
+{"cat":"en-quoted","want":false,"text":"Change the label \"登录\" to \"登录 / 注册\" on the login page."}
+{"cat":"en-quoted","want":false,"text":"The app shows 网络错误，请稍后再试 when the request times out. Find where that string comes from."}
+{"cat":"en-quoted","want":false,"text":"Rename the file 会议记录.md to meeting-notes.md and fix the links to it."}
+{"cat":"en-quoted","want":false,"text":"Add zh-Hans translations: Settings = 设置, Cancel = 取消, Done = 完成."}
+{"cat":"en-quoted","want":false,"text":"Translate this into English:\n\n今天下午三点开会，讨论下个季度的产品规划，请大家提前准备好材料。"}
+{"cat":"en-quoted","want":false,"text":"Summarize this customer feedback in English:\n\n这个应用很好用，但是同步太慢了，有时候要等好几分钟才能看到电脑上的改动。希望能尽快改进。"}
+{"cat":"en-quoted","want":false,"text":"Here is the error:\n错误：无法连接到数据库 (dial tcp 127.0.0.1:5432: connect: connection refused)\nWhat should I check first?"}
+{"cat":"en-quoted","want":false,"text":"<selection>我们的产品可以帮助用户更快地完成工作，并且节省时间。</selection>\nMake this more concise."}
+{"cat":"en-quoted","want":false,"text":"> 这个按钮点了没反应\nA user reported this. Can you reproduce it?"}
+{"cat":"en-quoted","want":false,"text":"Why does `fmt.Println(\"你好\")` print garbage on Windows?"}
+{"cat":"en-quoted","want":false,"text":"Write a test where the input is 张三 and the expected greeting is 你好，张三！"}
+{"cat":"en-quoted","want":false,"text":"The Japanese string ログインに失敗しました is too long for the button. Shorten the layout or the text."}
+{"cat":"en-quoted","want":false,"text":"Add the Korean word 확인 as the OK button label."}
+{"cat":"en-quoted","want":false,"text":"Fix the typo in the Russian error message: «Ошибка соединения» should be «Ошибка подключения»."}
+{"cat":"en-quoted","want":false,"text":"Search the codebase for 待办 and list every file."}
+{"cat":"en-quoted","want":false,"text":"```\n2026-11-25 10:00:01 错误 连接超时\n2026-11-25 10:00:02 重试 第 1 次\n```\nWhy does it retry only once?"}
+{"cat":"en-quoted","want":false,"text":"Check the page at https://example.com/文档/安装 and tell me if the steps still work."}
+{"cat":"en-quoted","want":false,"text":"Our users write things like 「帮我订明天的会议室」. Make the parser handle that."}
+{"cat":"en-quoted","want":false,"text":"Proofread this paragraph and translate it to English:\n\n本项目是一个自托管的个人助理。它运行在一台常开的电脑上，手机和网页都只和它通信。"}
+{"cat":"en-quoted","want":false,"text":"Add a fixture with the title “周报” and the body “本周完成了登录页面”."}
+{"cat":"zh","want":true,"text":"帮我修一下这个测试"}
+{"cat":"zh","want":true,"text":"继续"}
+{"cat":"zh","want":true,"text":"好的"}
+{"cat":"zh","want":true,"text":"好"}
+{"cat":"zh","want":true,"text":"可以，按你说的改"}
+{"cat":"zh","want":true,"text":"为什么这个 goroutine 在 context 取消以后还在跑？"}
+{"cat":"zh","want":true,"text":"把 handleRequest 的 timeout 改成 30s，再加个 retry"}
+{"cat":"zh","want":true,"text":"用 golangci-lint 跑一下 ./... 然后 fix 掉 errcheck 和 staticcheck 的 warning"}
+{"cat":"zh","want":true,"text":"看看 https://github.com/example/repo/pull/1234/files 这个 PR"}
+{"cat":"zh","want":true,"text":"帮我 review 一下 https://github.com/example/persona-extensions/pull/1127 和 https://github.com/example/persona/pull/2513"}
+{"cat":"zh","want":true,"text":"跑 scripts/ci.sh"}
+{"cat":"zh","want":true,"text":"在 server/internal/node/hooks.go 里加个 log"}
+{"cat":"zh","want":true,"text":"把 extensions/english-by-default/detect.go 里的 foreignShare 调成 0.25 试试"}
+{"cat":"zh","want":true,"text":"这个 PR 的 CI 挂了，看一下 log"}
+{"cat":"zh","want":true,"text":"推吧"}
+{"cat":"zh","want":true,"text":"不对，我说的是 web 端，不是 iOS"}
+{"cat":"zh","want":true,"text":"我们需要一个 migration，给 users 表加一个可以为空的 de_id 字段"}
+{"cat":"zh","want":true,"text":"写个 commit message"}
+{"cat":"zh","want":true,"text":"把 README.md 翻译成英文"}
+{"cat":"zh","want":true,"text":"这个错误怎么解决：\n```\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x4a2b3c]\n```"}
+{"cat":"zh","want":true,"text":"error: failed to push some refs to origin 这个怎么办"}
+{"cat":"zh","want":true,"text":"给 `parseConfig` 加单测"}
+{"cat":"zh","want":true,"text":"deploy 到 staging 看看效果"}
+{"cat":"zh","want":true,"text":"把 TODO 都列出来"}
+{"cat":"zh","want":true,"text":"开 PR"}
+{"cat":"zh","want":true,"text":"ok 继续"}
+{"cat":"zh","want":true,"text":"LGTM，merge 吧"}
+{"cat":"zh","want":true,"text":"检查一下 docs/extensions/english-by-default.md、docs/README.md 和 icon-sources.json 有没有漏掉的"}
+{"cat":"zh","want":true,"text":"这段代码有什么问题？\n\nfunc add(a, b int) int {\n    return a - b\n}"}
+{"cat":"zh","want":true,"text":"我感觉这个设计太复杂了，能不能简化一下，只保留核心的功能，其他的先不做。"}
+{"cat":"zh","want":true,"text":"把这段翻译成英文：今天下午三点开会"}
+{"cat":"zh","want":true,"text":"<selection>We help users finish work faster.</selection>\n改得更简洁一点"}
+{"cat":"zh","want":true,"text":"把按钮上的 \"Sign in\" 改成 \"Log in\""}
+{"cat":"zh","want":true,"text":"npm test 跑不过，帮我看下"}
+{"cat":"zh","want":true,"text":"用 Swift 重写这个函数"}
+{"cat":"zh","want":true,"text":"README 写得不错，再加一节 FAQ"}
+{"cat":"zh","want":true,"text":"把 go.mod 里的 go 1.27.1 改回 1.24"}
+{"cat":"zh","want":true,"text":"是的"}
+{"cat":"zh","want":true,"text":"不用了"}
+{"cat":"zh","want":true,"text":"第二个方案"}
+{"cat":"ja","want":true,"text":"このテストを直してください"}
+{"cat":"ja","want":true,"text":"handleRequest のタイムアウトを 30 秒にして"}
+{"cat":"ja","want":true,"text":"続けて"}
+{"cat":"ja","want":true,"text":"変更点を説明してください"}
+{"cat":"ko","want":true,"text":"이 테스트 좀 고쳐줘"}
+{"cat":"ko","want":true,"text":"PR 열어줘"}
+{"cat":"ko","want":true,"text":"계속해"}
+{"cat":"ru","want":true,"text":"Почини, пожалуйста, этот тест"}
+{"cat":"ru","want":true,"text":"Запусти go test и покажи ошибки"}
+{"cat":"ru","want":true,"text":"Продолжай"}
+{"cat":"other","want":true,"text":"أصلح هذا الاختبار من فضلك"}
+{"cat":"other","want":true,"text":"תתקן את הבדיקה הזאת בבקשה"}
+{"cat":"other","want":true,"text":"कृपया इस टेस्ट को ठीक करो"}
+{"cat":"other","want":true,"text":"ช่วยแก้เทสต์นี้หน่อย"}
+{"cat":"other","want":true,"text":"Διόρθωσε αυτό το τεστ παρακαλώ"}
+{"cat":"other","want":true,"text":"Будь ласка, виправ цей тест"}
+{"cat":"latin","want":true,"text":"Arregla este test, por favor, y luego ejecuta go vet."}
+{"cat":"latin","want":true,"text":"¿Por qué falla la prueba cuando se cancela el contexto?"}
+{"cat":"latin","want":true,"text":"Cambia el timeout a 30 segundos y añade un reintento."}
+{"cat":"latin","want":true,"text":"Corrige ce test et lance go vet ensuite."}
+{"cat":"latin","want":true,"text":"Pourquoi est-ce que la goroutine continue après l'annulation du contexte ?"}
+{"cat":"latin","want":true,"text":"Peux-tu ajouter un test pour cette fonction ?"}
+{"cat":"latin","want":true,"text":"Bitte repariere diesen Test und führe danach go vet aus."}
+{"cat":"latin","want":true,"text":"Warum läuft die Goroutine weiter, wenn der Kontext abgebrochen wird?"}
+{"cat":"latin","want":true,"text":"Kannst du die Fehlermeldung verbessern?"}
+{"cat":"latin","want":true,"text":"Corrija este teste e depois rode o go vet."}
+{"cat":"latin","want":true,"text":"Por que a goroutine continua rodando depois que o contexto é cancelado?"}
+{"cat":"latin","want":true,"text":"Sistema questo test e poi esegui go vet."}
+{"cat":"latin","want":true,"text":"Perché la goroutine continua a girare dopo che il contesto è stato cancellato?"}
+{"cat":"latin","want":true,"text":"Repareer deze test en draai daarna go vet."}
+{"cat":"latin","want":true,"text":"Sửa giúp tôi bài kiểm tra này rồi chạy go vet."}
+{"cat":"latin","want":true,"text":"Tại sao goroutine vẫn chạy sau khi context bị hủy?"}
+{"cat":"latin","want":true,"text":"Bu testi düzelt ve sonra go vet çalıştır."}
+{"cat":"latin","want":true,"text":"Napraw ten test i potem uruchom go vet."}
+{"cat":"latin","want":true,"text":"Tolong perbaiki tes ini lalu jalankan go vet."}
+{"cat":"latin","want":true,"text":"Sí, continúa."}
+{"cat":"latin","want":true,"text":"Oui, vas-y."}
+{"cat":"latin","want":true,"text":"Ja, mach weiter."}
+{"cat":"latin-en","want":false,"text":"Add a Spanish greeting \"Hola, ¿qué tal?\" to the onboarding screen."}
+{"cat":"latin-en","want":false,"text":"The French string \"Connexion échouée\" overflows the button."}
+{"cat":"latin-en","want":false,"text":"Rename the German locale file from de_DE.json to de.json."}
+{"cat":"latin-en","want":false,"text":"Our tagline is c'est la vie, keep it lowercase."}
+{"cat":"latin-en","want":false,"text":"Translate this to English:\n\nPor favor, revisa el documento antes de la reunión de mañana y envíame tus comentarios."}

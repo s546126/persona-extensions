@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -29,6 +30,10 @@ const (
 // name); Claude Code passes its environment to the hook.
 var assistantEnvs = []string{"PERSONA_ASSISTANT", "JARVIS_ASSISTANT"}
 
+// personaEnvs mark a session that Persona's node started for an Agent: it puts the node's data directory in front
+// of the command it types into the pane (the current and the old name).
+var personaEnvs = []string{"PERSONA_HOME", "JARVIS_HOME"}
+
 type hookArgs struct {
 	Data string // the node program's data directory: heartbeat, options and the store
 
@@ -40,6 +45,7 @@ type hookInput struct {
 	HookEventName string `json:"hook_event_name"`
 	SessionID     string `json:"session_id"`
 	Prompt        string `json:"prompt"`
+	Transcript    string `json:"transcript_path"`
 }
 
 func runHook(a hookArgs, in io.Reader, out io.Writer, now time.Time) {
@@ -92,7 +98,38 @@ func runHook(a hookArgs, in io.Reader, out io.Writer, now time.Time) {
 		ask = commandLLM(opts.LLMCommand)
 	}
 	g := &gate{opts: opts, store: store{dir: a.Data}, ask: ask, now: now}
+	for _, k := range personaEnvs {
+		if getenv(k) != "" {
+			g.persona = true
+		}
+	}
+	if g.persona {
+		g.firstPrompt = !hasUserTurn(req.Transcript)
+	}
 	writeResult(out, g.decide(session, req.Prompt))
+}
+
+// hasUserTurn says whether the session's transcript already holds a prompt of the user's: a missing or unreadable
+// transcript holds none. Only its start is read: the first prompt is near the top.
+func hasUserTurn(path string) bool {
+	if path == "" {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, 1<<20))
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		var e struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &e) == nil && e.Type == "user" {
+			return true
+		}
+	}
+	return false
 }
 
 // writeResult writes the gate's answer as Claude Code's hook output; nothing when there is nothing to say.
