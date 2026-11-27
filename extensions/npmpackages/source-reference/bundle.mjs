@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "npmpackages", name: "npm Packages", version: "0.1.5", icon: "assets/icon.png", description: "Search public npm packages, compare latest versions, release dates, licenses, download activity and canonical repository links. Get an exact-version install command without executing it. Anonymous, read-only official registry access.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/npmpackages/README.md", tags: ["Development", "JavaScript", "npm", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/npmpackages.mjs", sha256: "" } }, contributes: { connectors: [{ id: "npmpackages", name: "npm Packages", capabilities: ["status", "tools"], hosts: ["registry.npmjs.org", "api.npmjs.org"], agent_tools: ["npmpackages_*"] }], ui: [{ id: "packages", title: "npm Packages", placement: "nav_page", icon: "code" }] }, permissions: { network: ["registry.npmjs.org", "api.npmjs.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "npmpackages", name: "npm Packages", version: "0.1.6", icon: "assets/icon.png", description: "Search public npm packages, compare latest versions, release dates, licenses, download activity and canonical repository links. Get an exact-version install command without executing it. Anonymous, read-only official registry access.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/npmpackages/README.md", tags: ["Development", "JavaScript", "npm", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/npmpackages.mjs", sha256: "" } }, contributes: { connectors: [{ id: "npmpackages", name: "npm Packages", capabilities: ["status", "tools"], hosts: ["registry.npmjs.org", "api.npmjs.org"], agent_tools: ["npmpackages_*"] }], ui: [{ id: "packages", title: "npm Packages", placement: "nav_page", icon: "code" }] }, permissions: { network: ["registry.npmjs.org", "api.npmjs.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 1 << 20, fresh: 15 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 250 });
@@ -779,7 +779,14 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
 function packageName(value) {
   if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
@@ -788,7 +795,7 @@ function packageName(value) {
   return name;
 }
 function queryText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 200) throw new ReadError("invalid");
   return query;
@@ -833,13 +840,13 @@ function httpsURL(value, hosts) {
   } catch {
     throw new ReadError("bad_answer");
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.port || url.pathname.includes("..") || hosts && !hosts.has(url.hostname)) throw new ReadError("bad_answer");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.pathname.includes("..") || url.href.length > 4096 || hosts && !hosts.has(url.hostname)) throw new ReadError("bad_answer");
   return url.href;
 }
 function license(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) value = value.type;
   const license2 = clip(oneLine(string(value, "Unspecified")), 120);
-  if (!license2 || /[\u0000-\u001f\u007f]/u.test(license2)) throw new ReadError("bad_answer");
+  if (!license2 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(license2)) throw new ReadError("bad_answer");
   return license2;
 }
 function optionalLink(value) {
@@ -862,7 +869,9 @@ function summary(value) {
   if (!url) throw new ReadError("bad_answer");
   const published = item.date == null ? void 0 : item.date;
   if (published !== void 0 && (typeof published !== "string" || !Number.isFinite(Date.parse(published)))) throw new ReadError("bad_answer");
-  return { name, version, description: clip(oneLine(string(item.description, "")), 500), license: license(item.license), url, ...repository(item.repository ?? links.repository) ? { repository: repository(item.repository ?? links.repository) } : {}, ...optionalLink(item.homepage ?? links.homepage) ? { homepage: optionalLink(item.homepage ?? links.homepage) } : {}, ...published ? { published } : {} };
+  const repoURL = repository(item.repository ?? links.repository);
+  const homeURL = optionalLink(item.homepage ?? links.homepage);
+  return { name, version, description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), license: license(item.license), url, ...repoURL ? { repository: repoURL } : {}, ...homeURL ? { homepage: homeURL } : {}, ...published ? { published } : {} };
 }
 function parseSearch(raw, at) {
   const root2 = object(raw), objects = array(root2.objects), total = integer(root2.total, 1e12), seen = /* @__PURE__ */ new Set();
@@ -878,7 +887,7 @@ function parseSearch(raw, at) {
 function parsePackage(raw, at) {
   const item = object(raw), summaryValue = summary({ ...item, links: { npm: `https://www.npmjs.com/package/${packageName(item.name)}`, repository: item.repository, homepage: item.homepage } });
   const engines = item.engines == null ? {} : object(item.engines), parts = [];
-  for (const key of ["node", "npm", "pnpm", "yarn", "bun"].filter((key2) => engines[key2] != null).slice(0, 5)) parts.push(`${key} ${clip(oneLine(string(engines[key])), 100)}`);
+  for (const key of ["node", "npm", "pnpm", "yarn", "bun"].filter((key2) => engines[key2] != null).slice(0, 5)) parts.push(`${key} ${clip(oneLine(string(engines[key]).replace(/[\ud800-\udfff]/gu, "")), 100)}`);
   const dependencies = item.dependencies == null ? {} : object(item.dependencies), dist = item.dist == null ? {} : object(item.dist);
   const unpackedSize = dist.unpackedSize == null ? void 0 : integer(dist.unpackedSize, 2e12);
   return { ...summaryValue, install: `npm install ${summaryValue.name}@${summaryValue.version}`, engines: parts.join(" \xB7 "), dependencies: Object.keys(dependencies).length, ...unpackedSize === void 0 ? {} : { unpackedSize }, types: typeof item.types === "string" || typeof item.typings === "string" };
@@ -1034,7 +1043,16 @@ var textsFor = (locale = "") => locale.toLowerCase().startsWith("ja") ? ja_defau
 var fmt = (text, values) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ""));
 var number = (value) => new Intl.NumberFormat("en-US").format(value);
 var bytes = (value) => value >= 1e6 ? `${(value / 1e6).toFixed(1)} MB` : value >= 1e3 ? `${(value / 1e3).toFixed(1)} kB` : `${value} B`;
-var dateText = (value) => value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "";
+function dateText(value) {
+  if (!value) return "";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "";
+  try {
+    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(parsed);
+  } catch {
+    return "";
+  }
+}
 function errorText(error, locale = "") {
   const t = textsFor(locale);
   if (!(error instanceof ReadError)) return t.network;
@@ -1079,7 +1097,7 @@ var NpmPackages = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    if (item && this.monotonic() - item.used < fresh) {
+    if (item && this.monotonic() - item.saved < fresh) {
       item.used = this.monotonic();
       return item;
     }
@@ -1087,10 +1105,14 @@ var NpmPackages = class {
   }
   save(path, raw, at) {
     const bytes2 = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes2 > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes: bytes2 });
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes2 > this.limits.cacheBytes) return;
+    const stamp = this.monotonic();
+    this.cache.set(path, { raw, at, saved: stamp, used: stamp, bytes: bytes2 });
     this.bytes += bytes2;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       let oldest;
@@ -1108,6 +1130,21 @@ var NpmPackages = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1115,7 +1152,8 @@ var NpmPackages = class {
       void reader.cancel().catch(() => {
       });
     };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -1124,11 +1162,15 @@ var NpmPackages = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally {
       signal.removeEventListener("abort", cancel);
       reader.releaseLock();
@@ -1145,22 +1187,20 @@ var NpmPackages = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(origin, path, fresh, signal, validate) {
+  async read(origin, path, fresh, signal, parse) {
     checkSignal(signal);
     const key = origin + path, cached = this.cached(key, fresh);
-    if (cached) return cached;
+    if (cached) return { value: parse(cached.raw, cached.at), at: cached.at };
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(key, fresh);
-      if (again) return again;
+      if (again) return { value: parse(again.raw, again.at), at: again.at };
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
       if (pause) await new Promise((resolve, reject) => {
         const cancel = () => {
@@ -1179,15 +1219,19 @@ var NpmPackages = class {
       try {
         const raw = await this.response(origin, path, request.signal);
         const at = this.now();
-        validate(raw, at);
+        const value = parse(raw, at);
         this.save(key, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
-        return { raw, at };
+        return { value, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) {
+          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        }
+        const failure = error instanceof ReadError ? error : signal?.aborted && signal.reason instanceof ReadError ? signal.reason : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1204,7 +1248,7 @@ var NpmPackages = class {
       const old = this.cache.get(key);
       if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
         old.used = this.monotonic();
-        return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+        return { value: parse(old.raw, old.at), at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
       }
       throw error;
     }
@@ -1215,28 +1259,22 @@ var NpmPackages = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 12, refresh = false, signal) {
-    const rd = await this.read("https://registry.npmjs.org", searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
-      parseSearch(raw, at);
-    });
-    return { ...parseSearch(rd.raw, rd.at), stale: rd.stale };
+    const rd = await this.read("https://registry.npmjs.org", searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => parseSearch(raw, at));
+    return { ...rd.value, stale: rd.stale };
   }
   async package(name, refresh = false, signal) {
     name = packageName(name);
-    const detail = await this.read("https://registry.npmjs.org", packagePath(name), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
-      parsePackage(raw, at);
-    });
-    const pkg = parsePackage(detail.raw, detail.at);
+    const detail = await this.read("https://registry.npmjs.org", packagePath(name), refresh ? 0 : this.limits.fresh, signal, (raw, at) => parsePackage(raw, at));
+    const pkg = detail.value;
     let downloads;
     let stale = detail.stale;
     try {
-      const rd = await this.read("https://api.npmjs.org", downloadsPath(name), refresh ? 0 : this.limits.fresh, signal, (raw) => {
-        parseDownloads(raw, name);
-      });
-      downloads = parseDownloads(rd.raw, name);
+      const rd = await this.read("https://api.npmjs.org", downloadsPath(name), refresh ? 0 : this.limits.fresh, signal, (raw) => parseDownloads(raw, name));
+      downloads = rd.value;
       if (rd.stale) stale = rd.stale;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
@@ -1283,14 +1321,36 @@ ${pkg.homepage}` : ""}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const field of ["query", "name"]) for (const token of exact.fieldValues(field)) {
+      if (token.raw === "null") {
+        delete args[field];
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[field] = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = Number(limit);
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1301,23 +1361,34 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "npmpackages_search" && name !== "npmpackages_package") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "npmpackages_search") {
-      const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(query, limit, false, request.signal);
-      return clip((result.packages.length ? result.packages.map((pkg, index) => summaryLine(pkg, index, service.locale)).join("\n") : t.empty) + `
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result2 = await service.search(query, limit, false, request.signal);
+      return clip((result2.packages.length ? result2.packages.map((pkg, index) => summaryLine(pkg, index, service.locale)).join("\n") : t.empty) + `
+${t.attribution}${result2.stale ? `
+${errorText(result2.stale, service.locale)}` : ""}`, 29999);
+    }
+    const result = await service.package(packageName(args.name), false, request.signal);
+    return clip(detailText(result.package, service.locale) + `
 ${t.attribution}${result.stale ? `
 ${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    if (name === "npmpackages_package") {
-      const result = await service.package(packageName(args.name), false, request.signal);
-      return clip(detailText(result.package, service.locale) + `
-${t.attribution}${result.stale ? `
-${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1350,21 +1421,55 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { q: "", found: false };
+var MAX_VIEW_ITEMS = 300;
+var MAX_RESULT_CHROME_ITEMS = 8;
+var MAX_RESULT_ITEMS = MAX_VIEW_ITEMS - MAX_RESULT_CHROME_ITEMS;
+var MAX_RESULT_BYTES = 512 * 1024;
+var MAX_STATE_BYTES = 16 * 1024;
+var encoder3 = new TextEncoder();
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "~" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
+var packageActionID = (name) => boundedID("package:", name, 128);
+function validHTTPS(raw, maxLen = 4096) {
+  if (!raw || raw.length > maxLen) return void 0;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password && !url.port ? url.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function summaryState(value) {
   if (value == null) return void 0;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("invalid");
   const raw = value, name = packageName(raw.name);
+  const rawDesc = typeof raw.description === "string" ? raw.description : "";
+  const rawLicense = typeof raw.license === "string" ? raw.license : "";
+  if (/[\ud800-\udfff]/u.test(rawDesc) || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(rawLicense)) throw new ReadError("invalid");
   const summary2 = { name, version: typeof raw.version === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,99}$/.test(raw.version) ? raw.version : (() => {
     throw new ReadError("invalid");
-  })(), description: clip(typeof raw.description === "string" ? raw.description : "", 500), license: clip(typeof raw.license === "string" ? raw.license : "", 120), url: "" };
+  })(), description: clip(rawDesc, 500), license: clip(rawLicense, 120), url: "" };
   const url = new URL(typeof raw.url === "string" ? raw.url : "");
-  if (url.protocol !== "https:" || url.hostname !== "www.npmjs.com" || url.username || url.password || url.port || url.pathname !== `/package/${name}`) throw new ReadError("invalid");
+  if (url.protocol !== "https:" || url.hostname !== "www.npmjs.com" || url.username || url.password || url.port || url.href.length > 4096 || url.pathname !== `/package/${name}`) throw new ReadError("invalid");
   summary2.url = url.href;
   for (const field of ["repository", "homepage"]) {
     if (raw[field] == null) continue;
     if (typeof raw[field] !== "string") throw new ReadError("invalid");
     const link = new URL(raw[field]);
-    if (link.protocol !== "https:" || link.username || link.password || link.port) throw new ReadError("invalid");
+    if (link.protocol !== "https:" || link.username || link.password || link.port || link.href.length > 4096) throw new ReadError("invalid");
     summary2[field] = link.href;
   }
   if (raw.published != null) {
@@ -1389,9 +1494,15 @@ function readState(raw) {
   }
 }
 var encodeState = (state) => JSON.stringify(state);
+function boundState(state) {
+  const base = { q: clip(state.q, 200), found: Boolean(state.found) };
+  if (!state.package) return base;
+  const candidate = { ...base, package: { ...state.package, description: clip(state.package.description, 500), license: clip(state.package.license, 120) } };
+  return encoder3.encode(encodeState(candidate)).byteLength <= MAX_STATE_BYTES ? candidate : base;
+}
 function packageTransition(state, result, id) {
   if (!id.startsWith("package:")) return state;
-  const pkg = result.packages.find((candidate) => id === `package:${candidate.name}`);
+  const pkg = result.packages.find((candidate) => id === `package:${candidate.name}` || id === packageActionID(candidate.name));
   return pkg ? { q: state.q, found: true, package: pkg } : state;
 }
 function transition(state, id, values = {}) {
@@ -1425,54 +1536,65 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "results", result: await service.search(state.q, 12, refresh, request.signal) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale);
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "packages", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2800), style }, key);
+  const { service, state, loaded, uiVersion = 0 } = props, locale = props.locale || service.locale, t = textsFor(locale);
+  const safeState = boundState(state);
+  const encodedState = encodeState(safeState);
+  const act = (id, next, title) => {
+    const safeNext = next ? boundState(next) : void 0;
+    const safeTitle = title ? clip(title, 2e3) : void 0;
+    return props.action?.(id, safeNext, safeTitle) ?? (safeNext && uiVersion >= 3 ? { id, push: { ui: "packages", state: encodeState(safeNext), ...safeTitle ? { title: safeTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2e3), style }, key);
   const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "npmpackages-query"),
+    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: safeState.q }, "npmpackages-query"),
     /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "npmpackages-submit")
   ] }, "npmpackages-search");
   const attribution = /* @__PURE__ */ jsx(Section, { children: text("npmpackages-license", t.attribution, "caption") }, "npmpackages-attribution");
   const footer = /* @__PURE__ */ jsxs(Section, { children: [
     /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "npmpackages-refresh"),
-    state.package ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "npmpackages-back") : null,
+    safeState.package ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "npmpackages-back") : null,
     /* @__PURE__ */ jsx(Button, { title: t.home, action: act("home") }, "npmpackages-home")
   ] }, "npmpackages-footer");
-  const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("npmpackages-stale-text", errorText(error, props.locale ?? service.locale)) }, "npmpackages-stale") : null;
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("npmpackages-stale-text", errorText(error, locale)) }, "npmpackages-stale") : null;
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "npmpackages-loading-indicator") }, "npmpackages-loading"),
     attribution
   ] }, "npmpackages");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text("npmpackages-error-message", errorText(loaded.error, props.locale ?? service.locale)),
+      text("npmpackages-error-message", errorText(loaded.error, locale)),
       /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "npmpackages-retry")
     ] }, "npmpackages-error"),
     attribution
   ] }, "npmpackages");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("npmpackages-welcome-text", t.welcome, "body") }, "npmpackages-welcome"),
     attribution
   ] }, "npmpackages");
   if (loaded.kind === "detail") {
     const { package: pkg, downloadsStart, downloadsEnd } = loaded.result;
+    const pkgURL = validHTTPS(pkg.url) ?? `https://www.npmjs.com/package/${pkg.name}`;
+    const repoURL = validHTTPS(pkg.repository);
+    const homeURL = validHTTPS(pkg.homepage);
+    const publishedText = pkg.published ? dateText(pkg.published) : "";
+    const detailFooter = clip([fmt(t.license, { license: pkg.license }), publishedText ? fmt(t.published, { version: pkg.version, date: publishedText }) : `v${pkg.version}`].join(" \xB7 "), 2e3);
     const links = /* @__PURE__ */ jsxs(Section, { children: [
-      /* @__PURE__ */ jsx(Link, { title: t.openPackage, url: pkg.url }, "npmpackages-npm-link"),
-      pkg.repository ? /* @__PURE__ */ jsx(Link, { title: t.openRepository, url: pkg.repository }, "npmpackages-repository-link") : null,
-      pkg.homepage ? /* @__PURE__ */ jsx(Link, { title: t.openHomepage, url: pkg.homepage }, "npmpackages-homepage-link") : null
+      /* @__PURE__ */ jsx(Link, { title: t.openPackage, url: pkgURL }, "npmpackages-npm-link"),
+      repoURL ? /* @__PURE__ */ jsx(Link, { title: t.openRepository, url: repoURL }, "npmpackages-repository-link") : null,
+      homeURL ? /* @__PURE__ */ jsx(Link, { title: t.openHomepage, url: homeURL }, "npmpackages-homepage-link") : null
     ] }, "npmpackages-links");
-    return /* @__PURE__ */ jsxs(View, { title: pkg.name, state: encodeState(state), children: [
+    return /* @__PURE__ */ jsxs(View, { title: clip(pkg.name, 2e3), state: encodedState, children: [
       search,
-      /* @__PURE__ */ jsxs(Section, { title: pkg.name, footer: [fmt(t.license, { license: pkg.license }), pkg.published ? fmt(t.published, { version: pkg.version, date: dateText(pkg.published) }) : `v${pkg.version}`].join(" \xB7 "), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(pkg.name, 2e3), footer: detailFooter, children: [
         text("npmpackages-description", pkg.description, "body"),
         text("npmpackages-downloads", pkg.weeklyDownloads === void 0 ? t.noDownloads : `${fmt(t.weekly, { count: number(pkg.weeklyDownloads) })}${downloadsStart && downloadsEnd ? ` \xB7 ${downloadsStart} \u2013 ${downloadsEnd}` : ""}`),
         text("npmpackages-dependencies", fmt(t.dependencies, { count: pkg.dependencies })),
@@ -1490,14 +1612,43 @@ function page(props) {
       attribution
     ] }, "npmpackages");
   }
-  return /* @__PURE__ */ jsxs(View, { title: `${t.title}: ${clip(state.q, 100)}`, state: encodeState(state), children: [
+  const cards = [];
+  const usedKeys = /* @__PURE__ */ new Set();
+  const uniqueID = (prefix, value) => {
+    let key = boundedID(prefix, value);
+    for (let n = 1; usedKeys.has(key); n++) key = boundedID(prefix, `${value}~${n}`);
+    usedKeys.add(key);
+    return key;
+  };
+  let remainingItems = MAX_RESULT_ITEMS;
+  let remainingBytes = MAX_RESULT_BYTES;
+  for (const pkg of loaded.result.packages) {
+    if (remainingItems < 3) break;
+    const title = clip(`${pkg.name}@${pkg.version}`, 2e3);
+    const publishedText = pkg.published ? dateText(pkg.published) : "";
+    const cardFooter = clip([fmt(t.license, { license: pkg.license }), pkg.weeklyDownloads !== void 0 ? fmt(t.weekly, { count: number(pkg.weeklyDownloads) }) : "", publishedText].filter(Boolean).join(" \xB7 "), 2e3);
+    const desc = clip(pkg.description || t.unknown, 2e3);
+    const pkgURL = validHTTPS(pkg.url) ?? `https://www.npmjs.com/package/${pkg.name}`;
+    const sectionKey = uniqueID("package-", pkg.name);
+    const descKey = uniqueID("description-", pkg.name);
+    const openKey = uniqueID("open-", pkg.name);
+    const linkKey = uniqueID("link-", pkg.name);
+    const nextState = boundState({ ...safeState, package: pkg });
+    const actionID = packageActionID(pkg.name);
+    const cardBytes = encoder3.encode(JSON.stringify([sectionKey, title, cardFooter, descKey, desc, openKey, actionID, linkKey, pkgURL, nextState])).byteLength;
+    if (cardBytes > remainingBytes) break;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, footer: cardFooter, children: [
+      text(descKey, desc, "body"),
+      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(actionID, nextState, pkg.name) }, openKey),
+      /* @__PURE__ */ jsx(Link, { title: t.openPackage, url: pkgURL }, linkKey)
+    ] }, sectionKey));
+    remainingItems -= 3;
+    remainingBytes -= cardBytes;
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(`${t.title}: ${clip(safeState.q, 100)}`, 2e3), state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("npmpackages-total", fmt(t.results, { total: number(loaded.result.total) }), "caption") }, "npmpackages-result-count"),
-    loaded.result.packages.length ? loaded.result.packages.map((pkg) => /* @__PURE__ */ jsxs(Section, { title: `${pkg.name}@${pkg.version}`, footer: [fmt(t.license, { license: pkg.license }), pkg.weeklyDownloads !== void 0 ? fmt(t.weekly, { count: number(pkg.weeklyDownloads) }) : "", pkg.published ? dateText(pkg.published) : ""].filter(Boolean).join(" \xB7 "), children: [
-      text(`description-${pkg.name}`, pkg.description, "body"),
-      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(`package:${pkg.name}`, { ...state, package: pkg }, pkg.name) }, `open-${pkg.name}`),
-      /* @__PURE__ */ jsx(Link, { title: t.openPackage, url: pkg.url }, `link-${pkg.name}`)
-    ] }, `package-${pkg.name}`)) : /* @__PURE__ */ jsx(Section, { children: text("npmpackages-empty", t.empty) }, "npmpackages-empty-results"),
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("npmpackages-empty", t.empty) }, "npmpackages-empty-results"),
     stale(loaded.result.stale),
     footer,
     attribution
@@ -1505,11 +1656,14 @@ function page(props) {
 }
 
 // src/root.tsx
+function sameState(a, b) {
+  return a.q === b.q && a.found === b.found && a.package?.name === b.package?.name;
+}
 function Root(options) {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState(void 0);
-  const identity = JSON.stringify(state) + ":" + refresh;
+  const identity = JSON.stringify([state, refresh]);
   useLoadEffect(async (signal) => {
     const loaded2 = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded2) ? previous : { service: options.service, identity, loaded: loaded2 });
@@ -1525,11 +1679,17 @@ function Root(options) {
         return callback(() => ({ push }), { push });
       }
       return callback((values) => {
-        if (id === "refresh") setRefresh((previous) => previous + 1);
+        if (id === "refresh") setView((previous) => ({ state: previous.state, refresh: previous.refresh + 1 }));
         else if (id.startsWith("package:")) {
           if (loaded.kind !== "results") return;
-          setState((previous) => packageTransition(previous, loaded.result, id));
-        } else setState((previous) => transition(previous, id, values));
+          setView((previous) => {
+            const nextState = packageTransition(previous.state, loaded.result, id);
+            return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+          });
+        } else setView((previous) => {
+          const nextState = transition(previous.state, id, values);
+          return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     }
   });

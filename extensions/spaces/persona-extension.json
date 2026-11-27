@@ -2,12 +2,12 @@
   "manifest_version": 1,
   "id": "spaces",
   "name": "空间",
-  "version": "0.2.1",
+  "version": "0.3.2",
   "icon": "assets/icon.png",
-  "description": "用类型、属性和关联管理任何一类事情：结构自己定义，页面、看板、进度和助手工具都从结构生成。",
+  "description": "自己搭几个小本子，把想记的事分门别类记下来：读书清单、订阅和续费日期、家里的东西放在哪……选个模板就能用，也可以让助手帮你记。",
   "publisher": "nwverse",
   "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/spaces.md",
-  "tags": ["空间", "本体", "知识管理", "项目", "清单"],
+  "tags": ["空间", "清单", "读书", "订阅", "项目"],
   "engines": {"extension_protocol": 1},
   "runtime": {"command": {
     "linux-amd64": "bin/spaces-linux-amd64",
@@ -17,8 +17,8 @@
   }},
   "contributes": {
     "ui": [
-      {"id": "spaces", "title": "空间", "placement": "nav_page", "icon": "list"},
-      {"id": "spaces-card", "title": "空间", "placement": "overview_card", "opens": "spaces"}
+      {"id": "spaces", "title": "空间", "placement": "nav_page", "icon": "doc"},
+      {"id": "spaces-card", "title": "空间 · 概况", "placement": "overview_card", "opens": "spaces"}
     ],
     "skills": [{"id": "spaces", "dir": "skills/spaces"}],
     "mcp_servers": [{

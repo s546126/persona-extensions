@@ -2,13 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +23,92 @@ import (
 )
 
 const testKey = "synthetic-linear-key"
+
+// maxQueryComplexity is Linear's documented limit for a single query; it always rejects more.
+const maxQueryComplexity = 10000
+
+var (
+	graphToken = regexp.MustCompile(`\([^()]*\)|[{}]|[_A-Za-z][_0-9A-Za-z]*|[^\s,]`)
+	graphName  = regexp.MustCompile(`^[_A-Za-z]`)
+	firstArg   = regexp.MustCompile(`\bfirst:\s*(\d+)`)
+)
+
+type graphField struct {
+	name, args string
+	children   []graphField // nil for a property
+}
+
+// queryComplexity scores a GraphQL document by the rule on linear.app/developers/rate-limiting:
+// a property costs 0.1, an object 1, and a connection multiplies its children by its first:
+// argument, or by 50 without one. It counts tenths and rounds the total up like Linear does.
+func queryComplexity(doc string) (int, error) {
+	toks := graphToken.FindAllString(doc, -1)
+	start := slices.Index(toks, "{")
+	if start < 0 {
+		return 0, errors.New("no selection set")
+	}
+	fields, next, err := parseSelection(toks, start+1)
+	if err != nil {
+		return 0, err
+	}
+	if next != len(toks) {
+		return 0, fmt.Errorf("unexpected %q after the operation", toks[next])
+	}
+	tenths := 0
+	for _, f := range fields {
+		tenths += fieldTenths(f)
+	}
+	return (tenths + 9) / 10, nil
+}
+
+// parseSelection reads fields up to the brace that closes the current selection set.
+func parseSelection(toks []string, i int) ([]graphField, int, error) {
+	var fields []graphField
+	for i < len(toks) && toks[i] != "}" {
+		if !graphName.MatchString(toks[i]) {
+			return nil, 0, fmt.Errorf("unexpected %q in a selection set", toks[i])
+		}
+		f := graphField{name: toks[i]}
+		i++
+		if i < len(toks) && strings.HasPrefix(toks[i], "(") {
+			f.args, i = toks[i], i+1
+		}
+		if i < len(toks) && toks[i] == "{" {
+			children, next, err := parseSelection(toks, i+1)
+			if err != nil {
+				return nil, 0, err
+			}
+			if len(children) == 0 {
+				return nil, 0, fmt.Errorf("empty selection set under %s", f.name)
+			}
+			f.children, i = children, next
+		}
+		fields = append(fields, f)
+	}
+	if i >= len(toks) {
+		return nil, 0, errors.New("unclosed selection set")
+	}
+	return fields, i + 1, nil
+}
+
+func fieldTenths(f graphField) int {
+	if f.children == nil {
+		return 1
+	}
+	inner, connection := 0, false
+	for _, c := range f.children {
+		inner += fieldTenths(c)
+		connection = connection || c.name == "nodes"
+	}
+	if m := firstArg.FindStringSubmatch(f.args); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n * inner
+	}
+	if connection {
+		return 50 * inner
+	}
+	return 10 + inner
+}
 
 type fakeLinear struct {
 	srv      *httptest.Server
@@ -40,13 +129,24 @@ func newFakeLinear(t *testing.T) *fakeLinear {
 		f.requests = append(f.requests, req)
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if cost, err := queryComplexity(req.Query); err != nil || cost > maxQueryComplexity {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"errors":[{"message":"Query too complex","extensions":{"code":"INPUT_ERROR"}}]}`)
+			return
+		}
 		switch {
 		case strings.Contains(req.Query, "query Assigned"):
 			fmt.Fprint(w, `{"data":{"viewer":{"assignedIssues":{"nodes":[{"id":"issue-uuid-1","identifier":"ENG-123","title":"Review offline reading","priority":2,"url":"https://linear.app/example/issue/ENG-123","dueDate":"2026-11-15","updatedAt":"2026-11-09T10:00:00Z","state":{"id":"state-started","name":"In Progress","type":"started"},"team":{"id":"team-eng","key":"ENG","name":"Engineering"},"assignee":{"id":"user-1","name":"Example User","displayName":"Example User"},"project":{"id":"project-reader","name":"Reader"}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-next"}}}}}`)
 		case strings.Contains(req.Query, "query Issue"):
 			fmt.Fprint(w, `{"data":{"issue":{"id":"issue-uuid-1","identifier":"ENG-123","title":"Review offline reading","description":"Keep article context and notes together.","priority":2,"url":"https://linear.app/example/issue/ENG-123","dueDate":"2026-11-15","createdAt":"2026-11-01T10:00:00Z","updatedAt":"2026-11-09T10:00:00Z","state":{"id":"state-started","name":"In Progress","type":"started"},"team":{"id":"team-eng","key":"ENG","name":"Engineering"},"assignee":{"id":"user-1","displayName":"Example User"},"comments":{"nodes":[{"id":"comment-1","body":"Please preserve the reading context.","createdAt":"2026-11-09T11:00:00Z","user":{"id":"user-2","displayName":"Reviewer"}}]}}}}`)
 		case strings.Contains(req.Query, "query Teams"):
-			fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team-eng","key":"ENG","name":"Engineering","states":{"nodes":[{"id":"state-started","name":"In Progress","type":"started","position":1},{"id":"state-done","name":"Done","type":"completed","position":2}]}},{"id":"team-design","key":"DES","name":"Design","states":{"nodes":[{"id":"design-done","name":"Done","type":"completed","position":2}]}}]}}}`)
+			fmt.Fprint(w, `{"data":{"teams":{"nodes":[{"id":"team-eng","key":"ENG","name":"Engineering","states":{"nodes":[{"id":"state-started","name":"In Progress","type":"started","position":1},{"id":"state-done","name":"Done","type":"completed","position":2}],"pageInfo":{"hasNextPage":true,"endCursor":"eng-states-2"}}},{"id":"team-design","key":"DES","name":"Design","states":{"nodes":[{"id":"design-done","name":"Done","type":"completed","position":2}]}}]}}}`)
+		case strings.Contains(req.Query, "query TeamStates"):
+			if req.Variables["id"] != "team-eng" || req.Variables["after"] != "eng-states-2" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": "unexpected states page"}}})
+				return
+			}
+			fmt.Fprint(w, `{"data":{"team":{"states":{"nodes":[{"id":"state-late","name":"Late Review","type":"started","position":51}],"pageInfo":{"hasNextPage":false,"endCursor":"eng-states-3"}}}}}`)
 		case strings.Contains(req.Query, "mutation Create"):
 			fmt.Fprint(w, `{"data":{"issueCreate":{"success":true,"issue":{"id":"issue-new","identifier":"ENG-124","title":"New issue","url":"https://linear.app/example/issue/ENG-124"}}}}`)
 		case strings.Contains(req.Query, "mutation Update"):
@@ -88,6 +188,44 @@ func TestManifest(t *testing.T) {
 	}
 }
 
+func TestQueryComplexityMatchesLinearDocs(t *testing.T) {
+	for doc, want := range map[string]int{
+		`query WhoAmI { user(id: "me") { name } }`:                                                               2,
+		`query MyCreatedIssues { user(id: "me") { createdIssues { nodes { id title createdAt } } } }`:            66,
+		`query MyCreatedIssues { user(id: "me") { createdIssues(first: 10) { nodes { id title createdAt } } } }`: 14,
+	} {
+		if got, err := queryComplexity(doc); err != nil || got != want {
+			t.Errorf("%s: got %d (%v), want %d", doc, got, err, want)
+		}
+	}
+}
+
+func TestQueriesStayUnderLinearComplexityLimit(t *testing.T) {
+	for name, doc := range map[string]string{
+		"assigned": assignedQuery, "issue": issueQuery, "teams": teamsQuery, "team states": teamStatesQuery,
+		"create": createMutation, "update": updateMutation, "comment": commentMutation,
+	} {
+		if cost, err := queryComplexity(doc); err != nil || cost > maxQueryComplexity {
+			t.Errorf("%s costs %d points (%v); Linear rejects more than %d", name, cost, err, maxQueryComplexity)
+		}
+	}
+}
+
+func TestTeamStatesPastFirstPage(t *testing.T) {
+	a := newFakeLinear(t).app()
+	text, err := a.callTool(t.Context(), "linear_teams", json.RawMessage(`{}`))
+	if err != nil || !strings.Contains(text, "state-late") || !strings.Contains(text, "state-done") {
+		t.Fatalf("%v %s", err, text)
+	}
+	teams, err := a.teamsRead(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validState(teams, "team-eng", "state-late"); err != nil {
+		t.Fatalf("a state on the second page was rejected: %v", err)
+	}
+}
+
 func TestAssignedUsesFixedQueryAndCursor(t *testing.T) {
 	f := newFakeLinear(t)
 	text, err := f.app().callTool(t.Context(), "linear_assigned", json.RawMessage(`{"team":"ENG","query":"offline","cursor":"cursor-old"}`))
@@ -112,6 +250,10 @@ func TestIssueDetailsAndComments(t *testing.T) {
 func TestTeamWorkflowIsScoped(t *testing.T) {
 	f := newFakeLinear(t)
 	a := f.app()
+	text, err := a.callTool(t.Context(), "linear_teams", json.RawMessage(`{}`))
+	if err != nil || !strings.Contains(text, "Engineering") || !strings.Contains(text, "state-done") {
+		t.Fatalf("%v %s", err, text)
+	}
 	teams, err := a.teamsRead(t.Context())
 	if err != nil {
 		t.Fatal(err)

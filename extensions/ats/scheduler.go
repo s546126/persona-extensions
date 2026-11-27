@@ -21,9 +21,14 @@ type MachineSlot struct {
 	Name         string   `json:"name"`            // the computer's id on the hub
 	Title        string   `json:"title,omitempty"` // its display name
 	Online       bool     `json:"online"`
+	Degraded     bool     `json:"degraded,omitempty"`
 	MaxSlots     int      `json:"max_slots"`
 	RunningSlots int      `json:"running_slots"`
 	Labels       []string `json:"labels,omitempty"`
+}
+
+func (m MachineSlot) matches(name string) bool {
+	return name == "" || strings.EqualFold(m.Name, name) || strings.EqualFold(m.Title, name)
 }
 
 // FreeSlots returns the number of unoccupied slots on an online machine.
@@ -305,8 +310,7 @@ func (q *Queue) planScheduleLocked(now time.Time) SchedulePlan {
 		}
 		c.EffectiveTier = effTier
 
-		// Select best online machine matching affinity with lowest load ratio and anti-affinity to LastFailedWorker.
-		mIdx, mWhy := pickMachineSlot(simMachines, t.Machine, t.LastFailedWorker)
+		mIdx, mWhy := pickMachineSlot(simMachines, t.Machine, t.LastFailedWorker, t.Attempts)
 		if mIdx < 0 {
 			c.Admitted = false
 			c.HoldReason = mWhy
@@ -407,16 +411,17 @@ func evaluateTierAdmission(t *Task, waitMinutes float64, mode string, quota Quot
 	return reqTier, true, ""
 }
 
-func pickMachineSlot(machines []MachineSlot, requiredMachine, lastFailedWorker string) (int, string) {
+func pickMachineSlot(machines []MachineSlot, requiredMachine, lastFailedWorker string, attempts []Attempt) (int, string) {
 	reqName := strings.TrimSpace(requiredMachine)
 	bestIdx := -1
 	bestPenalty := math.MaxFloat64
 
 	foundMachine := false
 	foundOnline := false
+	foundHealthy := false
 
 	for i, m := range machines {
-		if reqName != "" && !strings.EqualFold(m.Name, reqName) && !strings.EqualFold(m.Title, reqName) {
+		if !m.matches(reqName) {
 			continue
 		}
 		foundMachine = true
@@ -424,21 +429,37 @@ func pickMachineSlot(machines []MachineSlot, requiredMachine, lastFailedWorker s
 			continue
 		}
 		foundOnline = true
+		if !m.Degraded && m.MaxSlots > 0 {
+			foundHealthy = true
+		}
 		if m.FreeSlots() <= 0 {
 			continue
 		}
-		// Penalty is load ratio [0, 1) plus a soft anti-affinity penalty (+0.35) if this machine was the last failed worker.
 		penalty := m.LoadRatio()
+		if m.Degraded {
+			penalty += 10.0
+		}
+		for _, att := range attempts {
+			if att.State != StateFailed || att.Machine != m.Name {
+				continue
+			}
+			penalty += 0.50
+			if att.ErrorClass == "gateway_unreachable" || att.ErrorClass == "gateway_error" {
+				penalty += 2.0
+			}
+		}
 		if lastFailedWorker != "" && (strings.EqualFold(m.Name, lastFailedWorker) || strings.HasPrefix(strings.ToLower(lastFailedWorker), strings.ToLower(m.Name)+":")) {
 			penalty += 0.35
 		}
-		if penalty < bestPenalty {
+		// 失败权重可累加超过 10，健康状态仍优先。
+		if bestIdx < 0 || (machines[bestIdx].Degraded && !m.Degraded) ||
+			(machines[bestIdx].Degraded == m.Degraded && penalty < bestPenalty) {
 			bestPenalty = penalty
 			bestIdx = i
 		}
 	}
 
-	if bestIdx >= 0 {
+	if bestIdx >= 0 && (!foundHealthy || !machines[bestIdx].Degraded) {
 		return bestIdx, ""
 	}
 	if reqName != "" && !foundMachine {

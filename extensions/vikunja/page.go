@@ -31,6 +31,11 @@ func readState(r *ext.UIRequest) (pageState, error) {
 	if err := r.DecodeState(&st); err != nil || st.Page < 0 || st.TaskID < 0 || st.ProjectID < 0 || len([]rune(st.Query)) > maxQueryChars || len(st.DraftID) > 128 || len([]rune(st.Title)) > maxTitleChars || len(st.Description) > 11000 || len(st.DueDate) > 64 {
 		return pageState{}, errors.New("invalid page state")
 	}
+	switch st.Mode {
+	case "", "projects", "detail", "create", "review-create":
+	default:
+		return pageState{}, errors.New("invalid page state")
+	}
 	return st, nil
 }
 
@@ -49,7 +54,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Page = strings.TrimSpace(clipText(r.Values["q"], maxQueryChars)), 1
+		st.Query, st.Page, st.Mode = strings.TrimSpace(clipText(r.Values["q"], maxQueryChars)), 1, ""
 	case "more":
 		st.Page, err = strconv.Atoi(r.Values["page"])
 		if err != nil || st.Page < 2 {
@@ -81,6 +86,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, errors.New("the Web task must be valid and its description at most 5000 UTF-8 bytes")
 		}
 		st.Title, st.Description, st.DueDate, st.Mode = in.Title, in.Description, in.DueDate, "review-create"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("task draft exceeds page state limit; use the vikunja_create_task action")
+		}
 	case "confirm-create":
 		in := createArgs{ProjectID: st.ProjectID, Title: st.Title, Description: st.Description, DueDate: st.DueDate}
 		if err := in.validate(); err != nil || st.Mode != "review-create" || st.DraftID == "" || len(st.Description) > 5000 {
@@ -139,6 +147,11 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "create" || st.Mode == "review-create" {
+		if st.Mode == "review-create" {
+			if err := (createArgs{ProjectID: st.ProjectID, Title: st.Title, Description: st.Description, DueDate: st.DueDate}).validate(); err != nil || len(st.Description) > 5000 {
+				return nil, errors.New("a valid reviewed task draft is required")
+			}
+		}
 		return createView(r, st), nil
 	}
 	if st.Mode == "projects" {
@@ -148,10 +161,12 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.projects}
+		seenProjects := map[int64]bool{}
 		for _, item := range items {
-			if item.ID <= 0 || item.IsArchived || item.DeletedAt != "" {
+			if item.ID <= 0 || item.IsArchived || item.DeletedAt != "" || seenProjects[item.ID] {
 				continue
 			}
+			seenProjects[item.ID] = true
 			if len(section.Items) >= maxViewRecords {
 				break
 			}
@@ -159,7 +174,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			if name == "" {
 				name = fmt.Sprintf("#%d", item.ID)
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("project-%d", item.ID), Title: clipText(name, 1800), Subtitle: item.Identifier, Action: &wire.Action{ID: "create", Values: map[string]string{"project_id": fmt.Sprint(item.ID)}}})
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("project-%d", item.ID), Title: clipText(name, 1800), Subtitle: clipText(item.Identifier, 1800), Action: &wire.Action{ID: "create", Values: map[string]string{"project_id": fmt.Sprint(item.ID)}}})
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noProjects})
@@ -192,11 +207,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	v := &wire.View{Title: t.tasks, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
 	section := wire.Section{Title: t.tasks}
+	seenTasks := map[int64]bool{}
 	for _, item := range tasks {
-		if item.ID <= 0 || item.Title == "" {
+		if item.ID <= 0 || item.Title == "" || seenTasks[item.ID] {
 			continue
 		}
+		seenTasks[item.ID] = true
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("task-%d", item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(item.subtitle(), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
+		if len(section.Items) >= maxViewRecords {
+			break
+		}
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noTasks})
@@ -222,9 +242,9 @@ func createView(r *ext.UIRequest, st pageState) *wire.View {
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}
 	}
 	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: st.Title},
-		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: st.Description},
-		{Type: wire.ComponentField, Kind: "text", Name: "due_date", Label: t.due, Value: st.DueDate},
+		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: clipText(st.Title, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: clipText(st.Description, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "due_date", Label: t.due, Value: clipText(st.DueDate, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "projects"}},
 	}}}}
@@ -249,12 +269,19 @@ func capComponents(items []wire.Component, n int) []wire.Component {
 
 func detailView(r *ext.UIRequest, st pageState, item task) *wire.View {
 	t := textsFor(r.Locale)
-	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(item.subtitle(), 1800)}}
+	var items []wire.Component
+	if sub := strings.TrimSpace(item.subtitle()); sub != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(sub, 1800)})
+	}
 	if !item.Done {
 		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.complete, Action: &wire.Action{ID: "complete", Confirm: t.complete + "\n" + item.Title}})
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.tasks, Items: items}}}
+	title := strings.TrimSpace(item.Title)
+	if title == "" {
+		title = fmt.Sprintf("#%d", item.ID)
+	}
+	v := &wire.View{Title: clipText(title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.tasks, Items: items}}}
 	used := len(items)
 	if item.Description != "" {
 		desc := capComponents(textComponents(clipText(item.Description, 40000)), maxDescriptionItems)

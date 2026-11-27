@@ -40,6 +40,10 @@ type Secrets interface {
 // errCannotSend: there is nowhere to send to yet (before the owner's first message); the hub hears cannot_send.
 var errCannotSend = errors.New("nowhere to send to yet")
 
+// errRebound: the WeChat a channel.send came in for is no longer bound (the send waited for an earlier send of its ref
+// while the binding changed); the hub hears cannot_send, so it does not send the message again to the WeChat bound now.
+var errRebound = errors.New("the WeChat it was for is no longer bound")
+
 // Clock and iLink are what tests replace.
 type Options struct {
 	// Hub takes the owner's messages (the plugin protocol's channel namespace).

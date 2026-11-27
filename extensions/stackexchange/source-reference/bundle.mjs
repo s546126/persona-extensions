@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "stackexchange", name: "Stack Exchange", version: "0.1.4", icon: "assets/icon.png", description: "Search developer questions on Stack Overflow and selected Stack Exchange sites. Read accepted or highly voted answers with code, attribution and original links. Anonymous, read-only public API access.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/stackexchange/README.md", tags: ["Development", "Questions", "Answers", "Stack Overflow"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/stackexchange.mjs", sha256: "" } }, contributes: { connectors: [{ id: "stackexchange", name: "Stack Exchange", capabilities: ["status", "tools"], hosts: ["api.stackexchange.com"], agent_tools: ["stackexchange_*"] }], ui: [{ id: "answers", title: "Stack Exchange", placement: "nav_page", icon: "search" }] }, permissions: { network: ["api.stackexchange.com"] } };
+var persona_extension_default = { manifest_version: 1, id: "stackexchange", name: "Stack Exchange", version: "0.1.5", icon: "assets/icon.png", description: "Search developer questions on Stack Overflow and selected Stack Exchange sites. Read accepted or highly voted answers with code, attribution and original links. Anonymous, read-only public API access.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/stackexchange/README.md", tags: ["Development", "Questions", "Answers", "Stack Overflow"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/stackexchange.mjs", sha256: "" } }, contributes: { connectors: [{ id: "stackexchange", name: "Stack Exchange", capabilities: ["status", "tools"], hosts: ["api.stackexchange.com"], agent_tools: ["stackexchange_*"] }], ui: [{ id: "answers", title: "Stack Exchange", placement: "nav_page", icon: "search" }] }, permissions: { network: ["api.stackexchange.com"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 2 << 20, fresh: 60 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 1e3 });
@@ -802,14 +802,15 @@ var clip = (text, most) => {
   return chars.slice(0, most - 1).join("").trimEnd() + "\u2026";
 };
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
+var hasLoneSurrogate = (value) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
 function queryText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value) || hasLoneSurrogate(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 200) throw new ReadError("invalid");
   return query;
 }
 function titleText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value) || hasLoneSurrogate(value)) throw new ReadError("invalid");
   const title = oneLine(value);
   if (!title || Array.from(title).length > 500) throw new ReadError("invalid");
   return title;
@@ -880,6 +881,7 @@ function canonicalURL(raw, host, path) {
   if (url.protocol !== "https:" || url.hostname !== host || url.port || url.username || url.password || !path.test(url.pathname)) throw new ReadError("bad_answer");
   url.search = "";
   url.hash = "";
+  if (url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function wrapper(raw) {
@@ -910,7 +912,15 @@ function parseQuestions(raw, site, at) {
     seen.add(id);
     const title = clip(oneLine(decodeEntities(string(question.title))), 500);
     if (!title) throw new ReadError("bad_answer");
-    const tags = array(question.tags).slice(0, 10).map((value) => tagText(string(value)));
+    const tags = array(question.tags).slice(0, 10).map((value) => {
+      const rawTag = string(value);
+      if (!rawTag) throw new ReadError("bad_answer");
+      try {
+        return tagText(rawTag);
+      } catch {
+        throw new ReadError("bad_answer");
+      }
+    });
     if (new Set(tags).size !== tags.length) throw new ReadError("bad_answer");
     const acceptedAnswerID = question.accepted_answer_id == null ? void 0 : integer(question.accepted_answer_id, 1, 9999999999);
     return { id, title, url: canonicalURL(string(question.link), host, new RegExp(`^/questions/${id}(?:/|$)`)), score: integer(question.score, -1e6), answerCount: integer(question.answer_count), ...acceptedAnswerID ? { acceptedAnswerID } : {}, tags, license: license(question.content_license), ...person(question.owner, host) };
@@ -1292,9 +1302,12 @@ var StackExchange = class {
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
     const atMonotonic = this.monotonic();
     this.cache.set(path, { raw, at, fetched: atMonotonic, used: atMonotonic, bytes });
     this.bytes += bytes;
@@ -1319,6 +1332,21 @@ var StackExchange = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1335,7 +1363,8 @@ var StackExchange = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1356,9 +1385,6 @@ var StackExchange = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     let raw;
     try {
       raw = JSON.parse(text);
@@ -1380,6 +1406,7 @@ var StackExchange = class {
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const method = path.split("?")[0];
@@ -1408,9 +1435,18 @@ var StackExchange = class {
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        if (signal?.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        if (signal?.aborted) {
+          const reason = signal.reason;
+          if (reason instanceof ReadError) {
+            if (reason.code !== "not_found") this.lastError = { code: reason.code, status: reason.status, at: this.monotonic() };
+            throw reason;
+          }
+          throw reason instanceof Error && reason.name === "AbortError" ? reason : new DOMException("Cancelled", "AbortError");
+        }
         const failure = error instanceof ReadError ? error : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1438,7 +1474,7 @@ var StackExchange = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, site = "stackoverflow", tag = "", limit = 12, refresh = false, signal) {
@@ -1481,15 +1517,35 @@ ${answer.body}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
-    for (const field of ["query", "site", "tag"]) for (const token of exact.fieldValues(field)) {
-      const value2 = JSON.parse(token.raw);
-      if (typeof value2 !== "string") throw new ReadError("invalid");
-      args[field] = value2;
+    for (const field of ["query", "site", "tag"]) {
+      const tokens = [...exact.fieldValues(field)];
+      if (tokens.length > 1) throw new ReadError("invalid");
+      if (tokens.length === 1) {
+        const value2 = JSON.parse(tokens[0].raw);
+        if (value2 != null && typeof value2 !== "string") throw new ReadError("invalid");
+        if (typeof value2 === "string") args[field] = value2;
+      }
     }
-    const limit = exact.int64Fields(["limit", "question_id"]);
-    if (limit.limit !== 0n) args.limit = Number(limit.limit);
-    if (limit.question_id !== 0n) args.question_id = Number(limit.question_id);
+    for (const field of ["limit", "question_id"]) {
+      const tokens = [...exact.fieldValues(field)];
+      if (tokens.length > 1) throw new ReadError("invalid");
+      if (tokens.length === 1) {
+        if (tokens[0].raw.trim() === "null") continue;
+        let parsed;
+        try {
+          parsed = exact.int64Fields([field])[field];
+        } catch {
+          throw new ReadError("invalid");
+        }
+        const num = Number(parsed);
+        if (!Number.isSafeInteger(num)) throw new ReadError("invalid");
+        args[field] = num;
+      }
+    }
     return args;
   }
   if (raw == null) return {};
@@ -1500,25 +1556,23 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "stackexchange_search" && name !== "stackexchange_answer") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     const site = siteID(args.site);
     if (name === "stackexchange_search") {
       const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit), tag = tagText(args.tag);
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(query, site, tag, limit, false, request.signal);
-      return clip((result.questions.length ? result.questions.map(questionLine).join("\n") : t.empty) + `
-${t.attribution}${result.stale ? `
-${errorText(result.stale, service.locale)}` : ""}`, 29999);
+      const result2 = await service.search(query, site, tag, limit, false, request.signal);
+      return clip((result2.questions.length ? result2.questions.map(questionLine).join("\n") : t.empty) + `
+${t.attribution}${result2.stale ? `
+${errorText(result2.stale, service.locale)}` : ""}`, 29999);
     }
-    if (name === "stackexchange_answer") {
-      const id = questionID(args.question_id), result = await service.answers(id, site, false, request.signal);
-      return clip(answerText(selectedAnswer(result.answers)) + `
+    const id = questionID(args.question_id), result = await service.answers(id, site, false, request.signal);
+    return clip(answerText(selectedAnswer(result.answers)) + `
 
 ${t.attribution}${result.stale ? `
 ${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
   } catch (error) {
     if (!signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
     throw error;
@@ -1554,18 +1608,56 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { q: "", site: "stackoverflow", tag: "", found: false };
+var STATE_MAX = 16384;
+var ITEMS_MAX = 300;
+var utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
+function hash64(value) {
+  let hash = 0xcbf29ce484222325n;
+  const mask = (1n << 64n) - 1n;
+  for (const byte of new TextEncoder().encode(value)) {
+    hash ^= BigInt(byte);
+    hash = hash * 0x100000001b3n & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+function uniqueKey(used, prefix, value) {
+  const build = (suffix) => {
+    const full = `${prefix}${suffix}`;
+    if (full.length <= 128) return full;
+    const h = `~${hash64(suffix)}`;
+    return `${prefix}${suffix.slice(0, Math.max(0, 128 - prefix.length - h.length))}${h}`;
+  };
+  let candidate = build(value);
+  let attempt = 1;
+  while (used.has(candidate)) candidate = build(`${value}#${attempt++}`);
+  used.add(candidate);
+  return candidate;
+}
+function safeLinkURL(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.port) return void 0;
+    return url.href.length <= 4096 ? url.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function questionState(value, site) {
   if (value == null) return void 0;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("invalid");
   const raw = value, id = questionID(raw.id);
   const candidate = { id, title: titleText(raw.title), url: "", score: 0, answerCount: 0, tags: [], license: "CC BY-SA 4.0", author: "" };
   const url = new URL(candidate.url = typeof raw.url === "string" ? raw.url : "");
-  if (url.protocol !== "https:" || url.hostname !== sites[site].host || url.username || url.password || url.port || url.pathname !== `/questions/${id}` && !url.pathname.startsWith(`/questions/${id}/`)) throw new ReadError("invalid");
+  if (url.protocol !== "https:" || url.hostname !== sites[site].host || url.username || url.password || url.port || url.href.length > 4096 || url.pathname !== `/questions/${id}` && !url.pathname.startsWith(`/questions/${id}/`)) throw new ReadError("invalid");
   candidate.url = url.href;
   if (!Number.isSafeInteger(raw.score) || !Number.isSafeInteger(raw.answerCount) || raw.answerCount < 0 || raw.score < -1e6 || raw.score > 1e6 || raw.answerCount > 1e6) throw new ReadError("invalid");
   candidate.score = raw.score;
   candidate.answerCount = raw.answerCount;
-  candidate.tags = Array.isArray(raw.tags) ? raw.tags.slice(0, 10).map(tagText) : [];
+  candidate.tags = Array.isArray(raw.tags) ? raw.tags.slice(0, 10).map((item) => {
+    const t = tagText(item);
+    if (!t) throw new ReadError("invalid");
+    return t;
+  }) : [];
   if (new Set(candidate.tags).size !== candidate.tags.length) throw new ReadError("invalid");
   if (typeof raw.license !== "string" || !/^CC BY-SA (?:2\.5|3\.0|4\.0)$/.test(raw.license)) throw new ReadError("invalid");
   candidate.license = raw.license;
@@ -1574,23 +1666,47 @@ function questionState(value, site) {
   if (raw.authorURL != null) {
     if (typeof raw.authorURL !== "string") throw new ReadError("invalid");
     const link = new URL(raw.authorURL);
-    if (link.protocol !== "https:" || link.hostname !== sites[site].host || !/^\/users\/[1-9][0-9]*(?:\/|$)/.test(link.pathname) || link.username || link.password || link.port) throw new ReadError("invalid");
+    if (link.protocol !== "https:" || link.hostname !== sites[site].host || link.href.length > 4096 || !/^\/users\/[1-9][0-9]*(?:\/|$)/.test(link.pathname) || link.username || link.password || link.port) throw new ReadError("invalid");
     candidate.authorURL = link.href;
   }
   if (raw.acceptedAnswerID != null) candidate.acceptedAnswerID = questionID(raw.acceptedAnswerID);
   return candidate;
+}
+function safeState(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return initialState;
+  const value = raw;
+  try {
+    const site = siteID(value.site);
+    const found = typeof value.found === "boolean" ? value.found : false;
+    const tag = tagText(value.tag);
+    if (!found) {
+      const q = typeof value.q === "string" ? clip(oneLine(value.q), 200) : "";
+      return { q, site, tag, found: false };
+    }
+    return { q: queryText(value.q), site, tag, found: true, ...value.question != null ? { question: questionState(value.question, site) } : {} };
+  } catch {
+    return initialState;
+  }
 }
 function readState(raw) {
   if (typeof raw !== "string" || raw.length > 16e3) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value) || typeof value.found !== "boolean") return initialState;
-    return { q: queryText(value.q), site: siteID(value.site), tag: tagText(value.tag), found: value.found, question: questionState(value.question, siteID(value.site)) };
+    const site = siteID(value.site);
+    const question = questionState(value.question, site);
+    return { q: queryText(value.q), site, tag: tagText(value.tag), found: value.found, ...question ? { question } : {} };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+function encodeState(state) {
+  const clean = safeState(state);
+  const full = JSON.stringify(clean);
+  if (utf8Bytes(full) <= STATE_MAX) return full;
+  const slim = JSON.stringify({ q: clean.q, site: clean.site, tag: clean.tag, found: clean.found });
+  return utf8Bytes(slim) <= STATE_MAX ? slim : JSON.stringify(initialState);
+}
 function questionTransition(state, results, id) {
   if (!id.startsWith("question:")) return state;
   let idNumber;
@@ -1641,71 +1757,83 @@ async function loadPage(service, state, refresh, signal) {
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), siteName = sites[state.site].name;
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "answers", state: encodeState(next), ...title ? { title } : {} } } : { id });
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), locale = props.locale ?? service.locale, t = textsFor(locale), siteName = sites[state.site].name;
+  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "answers", state: encodeState(next), ...title ? { title: clip(title, 200) } : {} } } : { id });
   const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2e3), style }, key);
-  const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "stackexchange-query"),
-    /* @__PURE__ */ jsx(Field, { name: "site", label: t.site, kind: "choice", value: state.site, choices: siteIDs.map((id) => ({ value: id, title: sites[id].name })) }, "stackexchange-site"),
-    /* @__PURE__ */ jsx(Field, { name: "tag", label: t.tag, kind: "text", placeholder: t.tagHint, value: state.tag }, "stackexchange-tag"),
-    /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "stackexchange-submit")
+  const search = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, 200), children: [
+    /* @__PURE__ */ jsx(Field, { name: "query", label: clip(t.search, 200), kind: "text", placeholder: clip(t.searchHint, 200), value: state.q }, "stackexchange-query"),
+    /* @__PURE__ */ jsx(Field, { name: "site", label: clip(t.site, 200), kind: "choice", value: state.site, choices: siteIDs.map((id) => ({ value: id, title: sites[id].name })) }, "stackexchange-site"),
+    /* @__PURE__ */ jsx(Field, { name: "tag", label: clip(t.tag, 200), kind: "text", placeholder: clip(t.tagHint, 200), value: state.tag }, "stackexchange-tag"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.searchAction, 200), action: act("search") }, "stackexchange-submit")
   ] }, "stackexchange-search");
   const attribution = /* @__PURE__ */ jsx(Section, { children: text("stackexchange-license", t.attribution, "caption") }, "stackexchange-attribution");
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, 200), state: encodeState(state), children: [
     search,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "stackexchange-loading-indicator") }, "stackexchange-loading"),
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, 200) }, "stackexchange-loading-indicator") }, "stackexchange-loading"),
     attribution
   ] }, "stackexchange");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, 200), state: encodeState(state), children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text("stackexchange-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "stackexchange-retry")
+      text("stackexchange-error-message", errorText(loaded.error, locale)),
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, 200), action: act("refresh") }, "stackexchange-retry")
     ] }, "stackexchange-error"),
     attribution
   ] }, "stackexchange");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, 200), state: encodeState(state), children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("stackexchange-welcome-text", t.welcome, "body") }, "stackexchange-welcome"),
     attribution
   ] }, "stackexchange");
   const footer = /* @__PURE__ */ jsxs(Section, { children: [
-    /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "stackexchange-refresh"),
-    state.question ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "stackexchange-back") : null,
-    /* @__PURE__ */ jsx(Button, { title: t.home, action: act("home") }, "stackexchange-home")
+    /* @__PURE__ */ jsx(Button, { title: clip(t.retry, 200), action: act("refresh") }, "stackexchange-refresh"),
+    state.question ? /* @__PURE__ */ jsx(Button, { title: clip(t.back, 200), action: act("back") }, "stackexchange-back") : null,
+    /* @__PURE__ */ jsx(Button, { title: clip(t.home, 200), action: act("home") }, "stackexchange-home")
   ] }, "stackexchange-footer");
-  if (loaded.kind === "no-answer") return /* @__PURE__ */ jsxs(View, { title: state.question?.title ?? t.title, state: encodeState(state), children: [
+  if (loaded.kind === "no-answer") {
+    const qURL = state.question ? safeLinkURL(state.question.url) : void 0;
+    return /* @__PURE__ */ jsxs(View, { title: clip(state.question?.title ?? t.title, 200), state: encodeState(state), children: [
+      search,
+      /* @__PURE__ */ jsxs(Section, { children: [
+        text("stackexchange-no-answer-text", t.noAnswer, "body"),
+        qURL ? /* @__PURE__ */ jsx(Link, { title: clip(fmt(t.openQuestion, { site: siteName }), 200), url: qURL }, "stackexchange-question-link") : null
+      ] }, "stackexchange-no-answer"),
+      footer,
+      attribution
+    ] }, "stackexchange");
+  }
+  if (loaded.kind === "answer") {
+    const aURL = safeLinkURL(loaded.url), qURL = safeLinkURL(loaded.question.url);
+    return /* @__PURE__ */ jsxs(View, { title: clip(loaded.question.title, 200), state: encodeState(state), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(loaded.accepted ? t.accepted : t.highest, 200), footer: clip([fmt(t.score, { count: loaded.question.score }), fmt(t.answers, { count: loaded.question.answerCount })].join(" \xB7 "), 1e3), children: [
+        /* @__PURE__ */ jsx(Markdown, { text: clipMarkdown(loaded.body, 2e4) }, "stackexchange-answer-body"),
+        text("stackexchange-answer-author", fmt(t.by, { author: loaded.author, license: loaded.license }), "caption"),
+        aURL ? /* @__PURE__ */ jsx(Link, { title: clip(fmt(t.openAnswer, { site: siteName }), 200), url: aURL }, "stackexchange-answer-link") : null
+      ] }, "stackexchange-answer-heading"),
+      /* @__PURE__ */ jsxs(Section, { children: [
+        text("stackexchange-question-title", loaded.question.title, "body"),
+        qURL ? /* @__PURE__ */ jsx(Link, { title: clip(fmt(t.openQuestion, { site: siteName }), 200), url: qURL }, "stackexchange-question-link") : null,
+        loaded.question.tags.length ? text("stackexchange-question-tags", loaded.question.tags.map((tag) => "#" + tag).join(" \xB7 "), "caption") : null
+      ] }, "stackexchange-question"),
+      loaded.stale ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-stale-text", errorText(loaded.stale, locale)) }, "stackexchange-stale") : null,
+      loaded.quotaRemaining !== void 0 ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-quota-text", fmt(t.quota, { count: loaded.quotaRemaining }), "caption") }, "stackexchange-quota") : null,
+      footer,
+      attribution
+    ] }, "stackexchange");
+  }
+  const used = /* @__PURE__ */ new Set();
+  const maxQuestions = Math.min(20, Math.floor((ITEMS_MAX - 16) / 2));
+  const questions = loaded.result.questions.slice(0, maxQuestions);
+  return /* @__PURE__ */ jsxs(View, { title: clip(`${t.title}: ${clip(state.q, 100)}`, 200), state: encodeState(state), children: [
     search,
-    /* @__PURE__ */ jsxs(Section, { children: [
-      text("stackexchange-no-answer-text", t.noAnswer, "body"),
-      state.question ? /* @__PURE__ */ jsx(Link, { title: fmt(t.openQuestion, { site: siteName }), url: state.question.url }, "stackexchange-question-link") : null
-    ] }, "stackexchange-no-answer"),
-    footer,
-    attribution
-  ] }, "stackexchange");
-  if (loaded.kind === "answer") return /* @__PURE__ */ jsxs(View, { title: loaded.question.title, state: encodeState(state), children: [
-    /* @__PURE__ */ jsxs(Section, { title: loaded.accepted ? t.accepted : t.highest, footer: [fmt(t.score, { count: loaded.question.score }), fmt(t.answers, { count: loaded.question.answerCount })].join(" \xB7 "), children: [
-      /* @__PURE__ */ jsx(Markdown, { text: clipMarkdown(loaded.body, 2e4) }, "stackexchange-answer-body"),
-      text("stackexchange-answer-author", fmt(t.by, { author: loaded.author, license: loaded.license }), "caption"),
-      /* @__PURE__ */ jsx(Link, { title: fmt(t.openAnswer, { site: siteName }), url: loaded.url }, "stackexchange-answer-link")
-    ] }, "stackexchange-answer-heading"),
-    /* @__PURE__ */ jsxs(Section, { children: [
-      text("stackexchange-question-title", loaded.question.title, "body"),
-      /* @__PURE__ */ jsx(Link, { title: fmt(t.openQuestion, { site: siteName }), url: loaded.question.url }, "stackexchange-question-link"),
-      text("stackexchange-question-tags", loaded.question.tags.map((tag) => "#" + tag).join(" \xB7 "), "caption")
-    ] }, "stackexchange-question"),
-    loaded.stale ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-stale-text", errorText(loaded.stale, props.locale ?? service.locale)) }, "stackexchange-stale") : null,
-    loaded.quotaRemaining !== void 0 ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-quota-text", fmt(t.quota, { count: loaded.quotaRemaining }), "caption") }, "stackexchange-quota") : null,
-    footer,
-    attribution
-  ] }, "stackexchange");
-  return /* @__PURE__ */ jsxs(View, { title: `${t.title}: ${clip(state.q, 100)}`, state: encodeState(state), children: [
-    search,
-    loaded.result.questions.length ? loaded.result.questions.map((question) => /* @__PURE__ */ jsxs(Section, { title: question.title, footer: [fmt(t.score, { count: question.score }), fmt(t.answers, { count: question.answerCount }), question.tags.map((tag) => "#" + tag).join(" \xB7 ")].filter(Boolean).join(" \xB7 "), children: [
-      /* @__PURE__ */ jsx(Button, { title: t.readAnswer, action: act(`question:${question.id}`, { ...state, question }, question.title) }, `open-${question.id}`),
-      /* @__PURE__ */ jsx(Link, { title: fmt(t.openQuestion, { site: siteName }), url: question.url }, `link-${question.id}`)
-    ] }, `question-${question.id}`)) : /* @__PURE__ */ jsx(Section, { children: text("stackexchange-empty", t.empty) }, "stackexchange-empty-results"),
-    loaded.result.stale ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-stale-text", errorText(loaded.result.stale, props.locale ?? service.locale)) }, "stackexchange-stale") : null,
+    questions.length ? questions.map((question) => {
+      const qURL = safeLinkURL(question.url);
+      return /* @__PURE__ */ jsxs(Section, { title: clip(question.title, 200), footer: clip([fmt(t.score, { count: question.score }), fmt(t.answers, { count: question.answerCount }), question.tags.map((tag) => "#" + tag).join(" \xB7 ")].filter(Boolean).join(" \xB7 "), 1e3), children: [
+        /* @__PURE__ */ jsx(Button, { title: clip(t.readAnswer, 200), action: act(`question:${question.id}`, { ...state, question }, clip(question.title, 200)) }, uniqueKey(used, "open-", String(question.id))),
+        qURL ? /* @__PURE__ */ jsx(Link, { title: clip(fmt(t.openQuestion, { site: siteName }), 200), url: qURL }, uniqueKey(used, "link-", String(question.id))) : null
+      ] }, uniqueKey(used, "question-", String(question.id)));
+    }) : /* @__PURE__ */ jsx(Section, { children: text("stackexchange-empty", t.empty) }, "stackexchange-empty-results"),
+    loaded.result.stale ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-stale-text", errorText(loaded.result.stale, locale)) }, "stackexchange-stale") : null,
     loaded.result.quotaRemaining !== void 0 ? /* @__PURE__ */ jsx(Section, { children: text("stackexchange-quota-text", fmt(t.quota, { count: loaded.result.quotaRemaining }), "caption") }, "stackexchange-quota") : null,
     footer,
     attribution
@@ -1736,8 +1864,16 @@ function Root(options) {
         if (id === "refresh") setRefresh((previous) => previous + 1);
         else if (id.startsWith("question:")) {
           if (loaded.kind !== "results") return;
-          setState((previous) => questionTransition(previous, loaded.result, id));
-        } else setState((previous) => transition(previous, id, values));
+          setState((previous) => {
+            const nextState = questionTransition(previous, loaded.result, id);
+            if (nextState !== previous) setRefresh(0);
+            return nextState;
+          });
+        } else setState((previous) => {
+          const nextState = transition(previous, id, values);
+          if (nextState !== previous) setRefresh(0);
+          return nextState;
+        });
       }, { submit: true });
     }
   });

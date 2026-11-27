@@ -29,9 +29,16 @@ type pageState struct {
 	TagName     string `json:"g,omitempty"`
 }
 
+const maxViewRecords = 250
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
 	if err := r.DecodeState(&st); err != nil || st.BookID < 0 || st.HighlightID < 0 || st.Page < 0 || len([]rune(st.BookName)) > maxTitleChars || len(st.DraftID) > 128 || len([]rune(st.Text)) > maxHighlightChars || len([]rune(st.Title)) > maxTitleChars || len([]rune(st.Author)) > maxAuthorChars || len([]rune(st.Note)) > maxHighlightChars || len(st.SourceURL) > 2100 || len([]rune(st.TagName)) > maxTagNameChars {
+		return pageState{}, errors.New("invalid page state")
+	}
+	switch st.Mode {
+	case "", "highlights", "detail", "create", "review-create", "edit-note", "review-note", "add-tag", "review-tag":
+	default:
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -110,6 +117,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		st.TagName, st.Mode = r.Values["tag_name"], "review-tag"
 	case "confirm-create":
+		if st.DraftID == "" {
+			return nil, errors.New("draft is required")
+		}
 		raw, _ := json.Marshal(createArgs{Text: st.Text, Title: st.Title, Author: st.Author, Note: st.Note, SourceURL: st.SourceURL})
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "readwise_library_create_highlight", raw)
 		if err != nil {
@@ -117,6 +127,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-note":
+		if st.DraftID == "" {
+			return nil, errors.New("draft is required")
+		}
 		raw, _ := json.Marshal(noteArgs{HighlightID: st.HighlightID, Note: st.Note})
 		out, err := a.doAction(ctx, "ui-note:"+st.DraftID, "readwise_library_update_note", raw)
 		if err != nil {
@@ -124,6 +137,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-tag":
+		if st.DraftID == "" {
+			return nil, errors.New("draft is required")
+		}
 		raw, _ := json.Marshal(tagArgs{BookID: st.BookID, Name: st.TagName})
 		out, err := a.doAction(ctx, "ui-tag:"+st.DraftID, "readwise_library_add_book_tag", raw)
 		if err != nil {
@@ -165,13 +181,19 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if err != nil {
 			return nil, err
 		}
-		section := wire.Section{Title: fmt.Sprintf(t.highlights, len(page.Results))}
+		section := wire.Section{}
+		seenHighlights := map[int64]bool{}
 		for _, item := range page.Results {
-			if item.ID <= 0 || item.Text == "" {
+			if item.ID <= 0 || item.Text == "" || seenHighlights[item.ID] {
 				continue
 			}
+			seenHighlights[item.ID] = true
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "highlight-" + fmt.Sprint(item.ID), Title: clipText(item.Text, 1800), Subtitle: clipText(item.Note, 500), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
+			if len(section.Items) >= maxViewRecords {
+				break
+			}
 		}
+		section.Title = fmt.Sprintf(t.highlights, len(section.Items))
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noHighlights})
 		}
@@ -190,11 +212,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.books}
+		seenBooks := map[int64]bool{}
 		for _, item := range page.Results {
-			if item.ID <= 0 || item.Title == "" {
+			if item.ID <= 0 || item.Title == "" || seenBooks[item.ID] {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "book-" + fmt.Sprint(item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(item.Author+" · "+fmt.Sprint(item.NumHighlights)+" highlights", 1800), Action: &wire.Action{ID: "book", Values: map[string]string{"id": fmt.Sprint(item.ID), "name": item.Title}}})
+			seenBooks[item.ID] = true
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "book-" + fmt.Sprint(item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(item.Author+" · "+fmt.Sprint(item.NumHighlights)+" highlights", 1800), Action: &wire.Action{ID: "book", Values: map[string]string{"id": fmt.Sprint(item.ID), "name": clipText(item.Title, maxTitleChars)}}})
+			if len(section.Items) >= maxViewRecords {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noBooks})
@@ -216,27 +243,31 @@ func (a *app) editorView(r *ext.UIRequest, st pageState) *wire.View {
 		} else if st.Mode == "review-tag" {
 			action, back = "confirm-tag", "add-tag"
 		}
-		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(st.Title+st.Note+st.TagName, 1800)}}
+		summary := strings.TrimSpace(st.Title + st.Note + st.TagName)
+		if summary == "" {
+			summary = t.note
+		}
+		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(summary, 1800)}}
 		if st.Mode == "review-create" {
 			items = append(items, textComponents(st.Text)...)
 		}
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: action, Confirm: t.save + "\n" + clipText(st.Title+st.Note+st.TagName, 500)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: back}})
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: action, Confirm: t.save + "\n" + clipText(summary, 500)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: back}})
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.review, Items: items}}}
 	}
 	var items []wire.Component
 	switch st.Mode {
 	case "create":
 		items = []wire.Component{
-			{Type: wire.ComponentField, Kind: "text", Name: "text", Label: t.text, Value: st.Text},
-			{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: st.Title},
-			{Type: wire.ComponentField, Kind: "text", Name: "author", Label: t.author, Value: st.Author},
-			{Type: wire.ComponentField, Kind: "text", Name: "note", Label: t.note, Value: st.Note},
-			{Type: wire.ComponentField, Kind: "text", Name: "source_url", Label: t.sourceURL, Value: st.SourceURL},
+			{Type: wire.ComponentField, Kind: "text", Name: "text", Label: t.text, Value: clipText(st.Text, wire.StringMost)},
+			{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: clipText(st.Title, wire.StringMost)},
+			{Type: wire.ComponentField, Kind: "text", Name: "author", Label: t.author, Value: clipText(st.Author, wire.StringMost)},
+			{Type: wire.ComponentField, Kind: "text", Name: "note", Label: t.note, Value: clipText(st.Note, wire.StringMost)},
+			{Type: wire.ComponentField, Kind: "text", Name: "source_url", Label: t.sourceURL, Value: clipText(st.SourceURL, wire.StringMost)},
 		}
 	case "edit-note":
-		items = []wire.Component{{Type: wire.ComponentField, Kind: "text", Name: "note", Label: t.note, Value: st.Note}}
+		items = []wire.Component{{Type: wire.ComponentField, Kind: "text", Name: "note", Label: t.note, Value: clipText(st.Note, wire.StringMost)}}
 	case "add-tag":
-		items = []wire.Component{{Type: wire.ComponentField, Kind: "text", Name: "tag_name", Label: t.addTag, Value: st.TagName}}
+		items = []wire.Component{{Type: wire.ComponentField, Kind: "text", Name: "tag_name", Label: t.addTag, Value: clipText(st.TagName, wire.StringMost)}}
 	}
 	action := map[string]string{"create": "review-create", "edit-note": "review-note", "add-tag": "review-tag"}[st.Mode]
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: action, Submit: true}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
@@ -245,7 +276,7 @@ func (a *app) editorView(r *ext.UIRequest, st pageState) *wire.View {
 
 func detailView(r *ext.UIRequest, st pageState, item highlight) *wire.View {
 	t := textsFor(r.Locale)
-	items := []wire.Component{{Type: wire.ComponentText, Text: fmt.Sprintf("%s %d", item.LocationType, item.Location)}}
+	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s %d", item.LocationType, item.Location), 1800)}}
 	if link := safeLibraryLink(item.ReadwiseURL); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/nwverse/persona/sdk/go/wire"
 
 	"github.com/nwverse/persona-extensions/extensions/household/internal/datadir"
+	"github.com/nwverse/persona-extensions/extensions/household/internal/imports"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/mcp"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/model"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/remind"
@@ -114,7 +115,7 @@ func runMCP(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return mcp.Serve(context.Background(), in, out, store.Open(dir), datadir.Zone(dir))
+	return mcp.ServeImports(context.Background(), in, out, store.Open(dir), imports.Open(dir), datadir.Zone(dir))
 }
 
 // extension holds the app that Init creates. Requests are handled concurrently, so the pointer is atomic.
@@ -180,10 +181,18 @@ func (x *extension) start(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[
 	dir := in.Info().DataDir
 	datadir.Remember(dir)
 	st := store.Open(dir)
+	imp := imports.Open(dir)
+	var unreadable *imports.UnreadableError
 	if err := st.Update(func(b *kernel.Base, now time.Time) error {
+		if err := imp.SettleRecords(b); err != nil {
+			return err
+		}
 		_, err := model.Ensure(b, now)
 		return err
-	}); err != nil {
+	}); errors.As(err, &unreadable) {
+		// The records are not written while the import drafts cannot be read; the page still shows them and says why.
+		log.Printf("家庭管家：%v", err)
+	} else if err != nil {
 		return nil, err
 	}
 	if name := in.Hub.Timezone; name != "" {
@@ -206,9 +215,22 @@ func (x *extension) start(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[
 		default:
 		}
 	}
-	x.app.Store(ui.New(st, func() *time.Location { return loc }, changed))
-	go run(ctx, st, hub, rem, loc, kick, firstRoundAfter, checkEvery, remindEvery)
+	x.app.Store(ui.New(st, func() *time.Location { return loc }, changed).UseImports(imp))
+	go run(ctx, watched{Storage: st, imp: imp}, hub, rem, loc, kick, firstRoundAfter, checkEvery, remindEvery)
 	return nil, nil
+}
+
+// watched is the records' storage whose Changed also reports a change of the import drafts, which the assistant's
+// server writes beside the records: the page then shows a new draft without waiting.
+type watched struct {
+	kernel.Storage
+	imp *imports.Store
+}
+
+func (w watched) Changed() bool {
+	records := w.Storage.Changed()
+	drafts := w.imp.Changed()
+	return records || drafts
 }
 
 // hubLocation is the hub's time zone, else this machine's.

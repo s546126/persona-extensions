@@ -378,8 +378,8 @@ func TestCardNeverRunsAPipeline(t *testing.T) {
 	if stored == nil || stored.ScannedSessions == 0 {
 		t.Fatalf("fixture run scanned nothing: %+v", stored)
 	}
-	want := fmt.Sprintf("已索引 %d 个", stored.ScannedSessions)
-	if got := caption(); !strings.Contains(got, want) || !strings.Contains(got, fmt.Sprintf("命中 %d 条", stored.TotalMatches)) {
+	want := fmt.Sprintf("搜了本机 %d 段聊天", stored.ScannedSessions)
+	if got := caption(); !strings.Contains(got, want) || !strings.Contains(got, fmt.Sprintf("找到 %d 段", stored.TotalMatches)) {
 		t.Fatalf("card after a query run: caption %q, want the stored run's (%s…)", got, want)
 	}
 

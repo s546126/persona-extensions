@@ -58,7 +58,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if in.Page == 0 {
 			in.Page = 1
 		}
-		if in.MinReactions < 0 || in.Limit < 0 || in.Limit > 30 || len([]rune(in.Query)) > 200 || len(in.Tag) > 60 {
+		if in.MinReactions < 0 || in.Limit < 0 || in.Limit > 30 || len([]rune(in.Query)) > 200 || len([]rune(in.Tag)) > 60 {
 			return "", errors.New("invalid filters or limit")
 		}
 		items, err := a.client.articles(ctx, in.Tag, in.Page)
@@ -66,7 +66,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if err != nil {
 			return "", err
 		}
-		filtered := filterArticles(items, a.cfg, in.Query, in.MinReactions)
+		filtered := filterArticles(items, a.config(), in.Query, in.MinReactions)
 		if in.Limit == 0 {
 			in.Limit = 20
 		}

@@ -67,20 +67,32 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	return &wire.ActionResult{View: v}, err
 }
 
-// maxViewRecords is half the SDK's component limit: a document can render a row and a search highlight line.
-const maxViewRecords = 125
+const (
+	// maxViewRecords is half the SDK's component limit: a document can render a row and a search highlight line.
+	maxViewRecords = 125
+	maxViewLookup  = 250
+	maxViewItems   = 250
+	maxOCRItems    = 180
+)
 
 // collectDocuments reads page 1 through the current page so that Load more answers the whole list, longer. It stops at
 // maxViewRecords to keep the view within the SDK's component limit, and reports whether another page can be loaded
 // (HasMore, NextPage) and the total Paperless-ngx counts (Count) as of the last page read.
 func (a *app) collectDocuments(ctx context.Context, query string, current int) (documentPage, error) {
 	var out documentPage
+	seen := map[int64]bool{}
 	for pageNumber := 1; pageNumber <= current && len(out.Items) < maxViewRecords; {
 		batch, err := a.client.documents(ctx, query, pageNumber)
 		if err != nil {
 			return documentPage{}, err
 		}
-		out.Items = append(out.Items, batch.Items...)
+		for _, item := range batch.Items {
+			if item.ID <= 0 || seen[item.ID] {
+				continue
+			}
+			seen[item.ID] = true
+			out.Items = append(out.Items, item)
+		}
 		out.Count, out.HasMore, out.NextPage = batch.Count, batch.HasMore, batch.NextPage
 		if !batch.HasMore {
 			break
@@ -119,6 +131,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		for _, item := range page.Results {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %d", item.Name, item.DocumentCount), 1800)})
 		}
+		section.Items = capComponents(section.Items, maxViewLookup)
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noLookup})
 		}
@@ -137,13 +150,15 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	v := &wire.View{Title: t.documents, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
 	section := wire.Section{Title: fmt.Sprintf(t.results, page.Count)}
+	seen := make(map[int64]bool, len(page.Items))
 	for _, item := range page.Items {
-		if item.ID <= 0 || item.Title == "" {
+		if item.ID <= 0 || item.Title == "" || seen[item.ID] {
 			continue
 		}
+		seen[item.ID] = true
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("document-%d", item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(fmt.Sprintf("%s · %d %s", item.Created, item.PageCount, t.pages), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
-		if item.SearchHit.Highlights != "" {
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(plainText(item.SearchHit.Highlights), 1800), Style: wire.TextStyleSecondary})
+		if hl := plainText(item.SearchHit.Highlights); hl != "" {
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(hl, 1800), Style: wire.TextStyleSecondary})
 		}
 	}
 	if len(section.Items) == 0 {
@@ -167,17 +182,36 @@ func detailView(r *ext.UIRequest, st pageState, item document, originalURL strin
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
 	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.documents, Items: items}}}
-	v.Sections = append(v.Sections, wire.Section{Title: t.ocr, Items: textComponents(clipText(item.Content, 50000))})
+	used := len(items)
+	ocr := capComponents(textComponents(clipText(item.Content, 50000)), maxOCRItems)
+	used += len(ocr)
+	v.Sections = append(v.Sections, wire.Section{Title: t.ocr, Items: ocr})
 	if len(item.Notes) > 0 {
 		section := wire.Section{Title: t.notes}
 		for _, n := range item.Notes {
-			if n.Note != "" {
+			if strings.TrimSpace(n.Note) != "" {
 				section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(n.User.Username+": "+n.Note, 1800)})
 			}
 		}
-		v.Sections = append(v.Sections, section)
+		section.Items = capComponents(section.Items, maxViewItems-used)
+		if len(section.Items) > 0 {
+			v.Sections = append(v.Sections, section)
+		}
 	}
 	return v
+}
+
+// capComponents keeps the first n components and shows the cut on the last one.
+func capComponents(items []wire.Component, n int) []wire.Component {
+	if n <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) <= n {
+		return items
+	}
+	items = items[:n]
+	items[n-1].Text = clipText(items[n-1].Text, 1700) + " […]"
+	return items
 }
 
 func textComponents(text string) []wire.Component {

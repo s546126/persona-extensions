@@ -77,7 +77,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 
 // resolveCity finds the city to read: a configured one by name, the default when the name is empty, or a search.
 func (a *app) resolveCity(ctx context.Context, name string) (City, error) {
-	if c, ok := cityByName(a.cities, name); ok {
+	_, cities, _ := a.snapshotConfig()
+	if c, ok := cityByName(cities, name); ok {
 		return a.locate(ctx, c)
 	}
 	rd, err := a.read(ctx, a.client.geo, geoURL(name), cacheFor)
@@ -136,7 +137,8 @@ func (a *app) toolNow(ctx context.Context, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	u, w := a.cfg.tempUnit(), a.cfg.windUnit()
+	cfg, _, _ := a.snapshotConfig()
+	u, w := cfg.tempUnit(), cfg.windUnit()
 	cur := f.Current
 	var b strings.Builder
 	desc, icon := wmoOptional(cur.WeatherCode)
@@ -166,7 +168,8 @@ func (a *app) toolForecast(ctx context.Context, name string, days int) (string, 
 	if err != nil {
 		return "", err
 	}
-	u := a.cfg.tempUnit()
+	cfg, _, _ := a.snapshotConfig()
+	u := cfg.tempUnit()
 	ds := f.days(days)
 	if len(ds) == 0 {
 		return "", errors.New("Open-Meteo 没给这几天的预报")

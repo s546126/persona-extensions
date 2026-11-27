@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
@@ -25,10 +27,35 @@ type pageState struct {
 	Create   createArgs `json:"c,omitempty"`
 }
 
+const maxQueryChars = 200
+
+func validMode(mode string) bool {
+	switch mode {
+	case "", "list", "detail", "create", "review":
+		return true
+	default:
+		return false
+	}
+}
+
+func boundedKey(prefix, id string) string {
+	key := prefix + id
+	if len(key) <= 128 && utf8.RuneCountInString(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "k-" + hex.EncodeToString(sum[:16])
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || len(st.Token) > maxPageToken || len(st.History) >= maxViewPages || len(st.IssueKey) > 64 || len(st.DraftID) > 128 {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || utf8.RuneCountInString(st.Query) > maxQueryChars || len(st.Token) > maxPageToken || len(st.History) >= maxViewPages || len(st.IssueKey) > 64 || len(st.DraftID) > 128 {
 		return pageState{}, errors.New("invalid page state")
+	}
+	for _, h := range st.History {
+		if len(h) > maxPageToken {
+			return pageState{}, errors.New("invalid page state")
+		}
 	}
 	return st, nil
 }
@@ -48,14 +75,17 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Token, st.History, st.Mode = r.Values["q"], "", nil, "list"
+		st.Query, st.Token, st.History, st.Mode = clipText(r.Values["q"], maxQueryChars), "", nil, "list"
 	case "more":
 		token := r.Values["token"]
-		if token == "" || len(token) > maxPageToken {
+		if token == "" || token == st.Token || slices.Contains(st.History, token) || len(token) > maxPageToken || utf8.RuneCountInString(token) > wire.StringMost {
 			return nil, errors.New("invalid page token")
 		}
 		st.History = append(st.History, st.Token)
 		st.Token = token
+		if len(st.History) >= maxViewPages || len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("pagination state exceeds page limit")
+		}
 	case "detail":
 		if err := validKey(r.Values["id"]); err != nil {
 			return nil, err
@@ -71,6 +101,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, err
 		}
 		st.Create, st.Mode = in, "review"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("issue draft exceeds page state limit")
+		}
 	case "confirm-create":
 		if st.DraftID == "" {
 			return nil, errors.New("the create form expired")
@@ -117,16 +150,32 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "create", Push: &wire.Push{State: ext.EncodeState(pageState{Mode: "create", DraftID: randomID()}), Title: t.create}},
 	}}}
 	for _, item := range issues {
+		if item.Key == "" {
+			continue
+		}
 		if st.Query != "" && !strings.Contains(strings.ToLower(item.Fields.Summary+" "+item.Key), strings.ToLower(st.Query)) {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "issue-" + item.Key, Title: item.Key + " " + clipText(item.Fields.Summary, 1800), Subtitle: item.Fields.Project.Key + " · " + item.Fields.Status.Name, Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.Key}}})
+		title := clipText(strings.TrimSpace(item.Key+" "+item.Fields.Summary), 1800)
+		if title == "" {
+			title = clipText(item.Key, 1800)
+		}
+		row := wire.Component{Type: wire.ComponentRow, Key: boundedKey("issue-", item.Key), Title: title, Subtitle: clipText(item.Fields.Project.Key+" · "+item.Fields.Status.Name, 1800)}
+		if validKey(item.Key) == nil {
+			row.Action = &wire.Action{ID: "detail", Values: map[string]string{"id": item.Key}}
+		}
+		section.Items = append(section.Items, row)
 	}
 	if len(section.Items) == 1 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noIssues})
 	}
-	if next != "" {
-		section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more", Values: map[string]string{"token": next}}}
+	if next != "" && next != st.Token && !slices.Contains(st.History, next) && len(next) <= maxPageToken && utf8.RuneCountInString(next) <= wire.StringMost {
+		nextState := st
+		nextState.History = append(slices.Clone(st.History), st.Token)
+		nextState.Token = next
+		if len(nextState.History) < maxViewPages && len(ext.EncodeState(nextState)) <= wire.StateMost {
+			section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more", Values: map[string]string{"token": next}}}
+		}
 	}
 	v.Sections = []wire.Section{section}
 	return v, nil
@@ -178,18 +227,23 @@ func httpsLink(raw string) bool {
 
 func detailView(r *ext.UIRequest, st pageState, item issue) *wire.View {
 	t := textsFor(r.Locale)
-	items := []wire.Component{
-		{Type: wire.ComponentText, Text: item.Fields.Summary},
-		{Type: wire.ComponentText, Text: t.project + ": " + item.Fields.Project.Name + " · " + t.status + ": " + item.Fields.Status.Name},
+	var items []wire.Component
+	if summary := clipText(strings.TrimSpace(item.Fields.Summary), 1800); summary != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: summary})
 	}
+	items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(t.project+": "+item.Fields.Project.Name+" · "+t.status+": "+item.Fields.Status.Name, 1800)})
 	if item.Fields.Assignee != nil {
-		items = append(items, wire.Component{Type: wire.ComponentText, Text: t.assignee + ": " + item.Fields.Assignee.DisplayName})
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(t.assignee+": "+item.Fields.Assignee.DisplayName, 1800)})
 	}
 	if httpsLink(item.URL) {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: item.URL})
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: item.Key, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.issues, Items: items}}}
+	title := clipText(item.Key, 1800)
+	if title == "" {
+		title = t.issues
+	}
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.issues, Items: items}}}
 	used := len(items)
 	if text := richText(item.Fields.Description); text != "" {
 		description := capComponents(textComponents(text), maxDescriptionItems)
@@ -199,7 +253,7 @@ func detailView(r *ext.UIRequest, st pageState, item issue) *wire.View {
 	if len(item.Fields.Comment.Comments) > 0 {
 		section := wire.Section{Title: t.comments}
 		for _, c := range item.Fields.Comment.Comments {
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: c.Author.DisplayName + " · " + c.Created, Style: wire.TextStyleSecondary})
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(c.Author.DisplayName+" · "+c.Created, 1800), Style: wire.TextStyleSecondary})
 			section.Items = append(section.Items, textComponents(richText(c.Body))...)
 		}
 		section.Items = capComponents(section.Items, maxViewItems-used)
@@ -232,8 +286,23 @@ func (a *app) createView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 		return nil, err
 	}
 	choices := []wire.Choice{}
+	seen := map[string]bool{}
 	for _, project := range projects {
-		choices = append(choices, wire.Choice{Value: fmt.Sprint(project["id"]), Title: fmt.Sprint(project["name"])})
+		id, ok := project["id"].(string)
+		id = strings.TrimSpace(id)
+		if !ok || id == "" || len(id) > 64 || strings.ContainsAny(id, "\x00\r\n") || seen[id] {
+			continue
+		}
+		seen[id] = true
+		name, _ := project["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			name = id
+		}
+		choices = append(choices, wire.Choice{Value: id, Title: clipText(name, 200)})
+		if len(choices) >= 50 {
+			break
+		}
 	}
 	if len(choices) == 0 {
 		return nil, errors.New("no accessible Jira project")
@@ -249,10 +318,18 @@ func (a *app) createView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 }
 
 func (a *app) reviewCreateView(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
+	if err := st.Create.validate(); err != nil {
+		return nil, err
+	}
 	t := textsFor(r.Locale)
-	items := []wire.Component{{Type: wire.ComponentText, Text: st.Create.Summary}, {Type: wire.ComponentText, Text: t.project + ": " + st.Create.ProjectID + " · " + st.Create.IssueTypeID}}
-	items = append(items, textComponents(st.Create.Description)...)
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.confirm, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Create.Summary}})
+	items := []wire.Component{
+		{Type: wire.ComponentText, Text: clipText(st.Create.Summary, 1800)},
+		{Type: wire.ComponentText, Text: clipText(t.project+": "+st.Create.ProjectID+" · "+st.Create.IssueTypeID, 1800)},
+	}
+	if st.Create.Description != "" {
+		items = append(items, capComponents(textComponents(st.Create.Description), maxViewItems-3)...)
+	}
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.confirm, Action: &wire.Action{ID: "confirm-create", Confirm: clipText(t.create+"\n"+st.Create.Summary, wire.StringMost)}})
 	return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Items: items}}}, nil
 }
 

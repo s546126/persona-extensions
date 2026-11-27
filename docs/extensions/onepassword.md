@@ -4,7 +4,7 @@
 
 This extension (id `onepassword`) connects Persona to your 1Password vaults, either those you grant to a 1Password [service account](https://developer.1password.com/docs/service-accounts/) or those of the account the [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) is signed in to on one of your computers. The assistant gets three read-only tools: the vaults it can read, item search by title, tag or website, and one item's fields with each field's `op://` [secret reference](https://developer.1password.com/docs/cli/secret-reference-syntax/). No tool returns a secret value, and the query tools never change your vaults. Phone-approved storage is a separate manager-owned flow, described below. It is also Persona's secret provider for `op://` references: when one of Persona's settings holds a reference, or you approve handing one to an Agent run, Persona's manager asks this extension for the value.
 
-This page describes version 0.4.0. When the manifest shown in the install preview disagrees with this page, the manifest wins.
+This page describes version 0.4.1. When the manifest shown in the install preview disagrees with this page, the manifest wins.
 
 | Extension point | Contribution | Behavior |
 | --- | --- | --- |
@@ -158,7 +158,12 @@ metadata and local field-file paths:
 ```
 
 For an update use `operation: "edit"`, stable vault/item IDs and fields, omitting category/title. Create categories:
-`LOGIN`, `PASSWORD`, `SECURE_NOTE`, `API_CREDENTIAL`, `SERVER`, `DATABASE`. Types: `STRING`, `CONCEALED` (default).
+`LOGIN`, `PASSWORD`, `SECURE_NOTE`, `API_CREDENTIAL`, `SERVER`, `DATABASE`. Types: `STRING`, `CONCEALED` (default),
+`OTP` (one-time password: accepts a raw base32 secret, wrapped into `otpauth://totp/...`, or an `otpauth://` URI, and
+writes a native 1Password OTP field). On `LOGIN` items, `username` and `password` write to 1Password's built-in
+`USERNAME`/`PASSWORD` fields instead of creating duplicate custom fields. On `edit`, a field may set `"delete": true`
+(without `type` or `file`) to remove an existing field, or omit `file` with an explicit `type` (such as `"OTP"`) to
+convert an existing field's type in place inside the resident node.
 Private regular files only (0600; no symlinks), UTF-8 text values of 1–16384 bytes, at most 16 fields. Delete source
 files after the command returns. The metadata manifest can also come from stdin (`--from-file -`). Never put values
 in JSON arguments or shell commands. The CLI reads field files only after approval and seals them to the resident
@@ -167,11 +172,13 @@ node's one-use, two-minute HPKE key. Manager/hub/extension relay ciphertext; onl
 The phone/web card identifies create/edit, vault, item, field names, Agent and source computer. No value or source
 path is shown. Only an explicit card approval authorizes the write; no Always rule applies. Commit consumes the key
 and binds it to the approved target and source identity. `op item create` and `op item edit` receive JSON on stdin,
-never field values in argv. The answer is only `{references:{field:"op://vault-id/item-id/field-id"}}`. Raw op output
+never field values in argv. The answer is only `{references:{field:"op://vault-id/item-id/field-id"}}` (plus `deleted`
+when fields are removed). Raw op output
 and error text never leave the write path. Inspect item metadata before retrying an uncertain result.
 
-Login updates are refused because CLI JSON template editing can overwrite passkeys. Sectioned/ambiguous fields,
-attachments and documents are also refused; unrelated fields, metadata and version remain in the node's template.
+Items with passkeys, attachments or documents are refused because CLI JSON template editing cannot safely preserve them;
+passkey-free `LOGIN` items may be edited. Sectioned/ambiguous fields are also refused; unrelated fields, metadata and
+version remain in the node's template.
 Writes through service-account mode are not implemented in this release: storage requires a configured resident op
 node, and never falls back to another authentication method. Existing service-account metadata reads/resolution stay
 available.

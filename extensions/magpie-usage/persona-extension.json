@@ -1,0 +1,74 @@
+{
+  "manifest_version": 1,
+  "id": "magpie-usage",
+  "name": "Magpie Subscription Usage",
+  "version": "0.1.0",
+  "icon": "assets/icon.png",
+  "description": "Shows subscription allowance windows from Magpie accounts in Persona.",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/extensions/magpie-usage/README.md",
+  "tags": ["Magpie", "subscriptions", "quota"],
+  "engines": {"persona": ">=202611251338", "extension_protocol": 1},
+  "activation_events": ["on_startup"],
+  "runtime": {"command": {
+    "linux-amd64": "bin/magpie-usage-linux-amd64",
+    "linux-arm64": "bin/magpie-usage-linux-arm64",
+    "darwin-amd64": "bin/magpie-usage-darwin-amd64",
+    "darwin-arm64": "bin/magpie-usage-darwin-arm64"
+  }},
+  "contributes": {
+    "usage": [{"id": "magpie", "name": "Magpie", "direct": true, "remote_address": "remote_address", "remote_key": "magpie_quota_key"}]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "local_address": {
+        "type": "string",
+        "title": "Local Magpie address",
+        "description": "On the Persona manager's machine. The default needs no setup.",
+        "format": "uri",
+        "default": "http://127.0.0.1:3425"
+      },
+      "remote_address": {
+        "type": "string",
+        "title": "Remote Magpie HTTPS address (optional)",
+        "description": "Leave empty to read local Magpie. Save this address before setting a dedicated read-only Magpie quota key.",
+        "format": "uri"
+      },
+      "include_providers": {
+        "type": "array",
+        "title": "Only sync these providers (optional)",
+        "description": "Leave empty to sync all Magpie subscription providers that report periodic allowance windows. Example: claude, antigravity.",
+        "maxItems": 32,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+        }
+      },
+      "exclude_providers": {
+        "type": "array",
+        "title": "Exclude providers (optional)",
+        "description": "Skip these Magpie providers, such as codex when Persona already reads local Codex usage.",
+        "maxItems": 32,
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+        }
+      },
+      "anonymous_names": {
+        "type": "boolean",
+        "title": "Hide account names (anonymous mode)",
+        "description": "Show opaque per-account aliases instead of Magpie account aliases or usernames in Persona.",
+        "default": false
+      }
+    }
+  },
+  "secrets": [{
+    "name": "magpie_quota_key",
+    "title": "Remote Magpie quota key",
+    "description": "A dedicated Magpie read-only key with quota access. Never sent to the local endpoint."
+  }],
+  "permissions": {"network": ["127.0.0.1", "config:remote_address"]}
+}

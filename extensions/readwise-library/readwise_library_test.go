@@ -245,7 +245,7 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 		t.Fatal("restart repeated note")
 	}
 	key, _ := json.Marshal(noteArgs{HighlightID: 42, Note: "Updated note"})
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(key), Status: "pending", StartedAt: time.Now()}})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "readwise_library_update_note:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -4,8 +4,30 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const plain = (text: string) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+export function boundedID(prefix: string, raw: string, most = 128): string {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
   return value as Record<string, unknown>;
@@ -43,7 +65,7 @@ export function publicURL(value: unknown, allowed: "apple" | "feed"): string | u
   }
   return url.toString();
 }
-function text(value: unknown, most: number): string { return clip(plain(string(value)), most); }
+function text(value: unknown, most: number): string { return clip(plain(string(value).replace(/[\ud800-\udfff]/gu, "")), most); }
 function date(value: unknown): string | undefined {
   if (value == null) return undefined;
   const raw = string(value);
@@ -66,7 +88,7 @@ export interface EpisodesResult { show: Show; episodes: Episode[]; at: number; s
 export function queryText(value: unknown): string {
   if (typeof value !== "string") throw new ReadError("invalid");
   const text = plain(value);
-  if (!text || Array.from(text).length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (!text || Array.from(text).length > 200 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   return text;
 }
 export function searchPath(query: string, limit = 20): string {

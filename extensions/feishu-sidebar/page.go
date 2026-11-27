@@ -41,7 +41,7 @@ func (a *app) page() *wire.View {
 	}
 
 	open := wire.Section{Title: "在飞书打开 Persona", Items: []wire.Component{
-		{Type: wire.ComponentLink, Title: "在飞书侧边栏打开", URL: link},
+		{Type: wire.ComponentLink, Title: "在飞书主导航打开", URL: link},
 		text("把下面的链接复制下来，发到飞书里点开（或直接用上面的入口）。", wire.TextStyleCaption),
 		text(clip(link, 1900), wire.TextStyleBody),
 	}}
@@ -51,7 +51,7 @@ func (a *app) page() *wire.View {
 
 	notes := wire.Section{Title: "说明", Items: []wire.Component{
 		text("打开的是："+clip(target, 1900), wire.TextStyleCaption),
-		text("需要飞书 3.41+（sidebar-semi）；手机端飞书可能没有侧边栏。", wire.TextStyleSecondary),
+		text("桌面端飞书 7.5+ 会在左侧主导航打开一个标签页。右键标签页可将它固定。", wire.TextStyleSecondary),
 		text("第一次打开要在飞书的内置浏览器里登录一次 Persona（网页版的登录态和 App 是分开的）。", wire.TextStyleSecondary),
 		text("这个扩展不向飞书发请求，也不保存任何凭证。", wire.TextStyleSecondary),
 	}}

@@ -1,0 +1,54 @@
+{
+  "name": "Steam",
+  "description": "See Steam player status, two weeks of playtime, your game library, achievement progress and regional prices for your public wishlist in Persona. Access is read-only. The Hub encrypts your Steam Web API key.",
+  "configuration": {
+    "steam_id": {
+      "title": "Steam player ID",
+      "description": "Enter your 17-digit SteamID64 or the vanity name from your Steam profile URL."
+    },
+    "country_code": {
+      "title": "Store country or region",
+      "description": "Two-letter ISO 3166-1 country or region code for wishlist prices and currency. Defaults to US."
+    },
+    "inbox_events_enabled": {
+      "title": "Steam Inbox events",
+      "description": "Send wishlist price drops, releases, major sales and game updates to the Inbox. Inbox triage may use AI tokens. Off by default."
+    },
+    "inbox_max_events_per_day": {
+      "title": "Daily Steam Inbox event limit",
+      "description": "Maximum number of Steam events sent per day when Inbox events are enabled. Range 1–50, default 5."
+    },
+    "patch_notes_summary_enabled": {
+      "title": "AI summaries of major updates",
+      "description": "Use AI tokens to summarize major update announcements for games you often play. Off by default."
+    },
+    "sale_roundup_enabled": {
+      "title": "Wishlist sale roundups",
+      "description": "Send a roundup of wishlist deals to the Inbox during major sales. Requires Steam Inbox events, and triage may use AI tokens. Off by default."
+    },
+    "memory_export_enabled": {
+      "title": "Export gaming preferences to assistant memory",
+      "description": "Share personal gaming preferences through memory_sources. Loading them into the assistant uses context tokens. Off by default."
+    },
+    "memory_max_items": {
+      "title": "Gaming preference export limit",
+      "description": "Maximum number of personal gaming preference items exported when memory export is enabled. Range 1–30, default 10."
+    },
+    "discovery_tools_enabled": {
+      "title": "Steam game research tools and skill",
+      "description": "Allow game research tools and their skill to add detailed results to the assistant's context. Turn this off to disable those research features. On by default."
+    },
+    "discovery_max_results": {
+      "title": "Game research result limit",
+      "description": "Maximum number of candidates per search or research request when game research is enabled. Range 1–50, default 15."
+    }
+  },
+  "secrets": {
+    "steam_api_key": {
+      "title": "Steam Web API key",
+      "description": "Get a key from your Steam Web API settings. The Hub encrypts it and sends it only to api.steampowered.com."
+    }
+  },
+  "ui": {"steam": "Steam", "steam-summary": "Steam overview"},
+  "groups": {"personal": "Personal"}
+}

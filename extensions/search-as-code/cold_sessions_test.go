@@ -107,7 +107,7 @@ func TestArchivedSessionsAreSearchable(t *testing.T) {
 		h.SessionID != "sess-cold-01" || h.Project != "orbit" || h.Harness != "claude-code" {
 		t.Fatalf("archived hit fields: %+v", h)
 	}
-	if res.ScannedArchived != 1 || !strings.Contains(res.StepTraces[0].Note, locationArchived) {
+	if res.ScannedArchived != 1 || !strings.Contains(res.StepTraces[0].Note, "已移到云端") {
 		t.Fatalf("trace must count archived sessions: %d %q", res.ScannedArchived, res.StepTraces[0].Note)
 	}
 	if len(h.Snippets) == 0 || h.Snippets[0].Role != "User" {
@@ -225,7 +225,7 @@ func TestArchivedHitsInUIAndMCP(t *testing.T) {
 			}
 		}
 	}
-	if row == nil || row.Badge == nil || row.Badge.Text != locationArchived || len(row.Actions) != 1 ||
+	if row == nil || row.Badge == nil || row.Badge.Text != locationLabel(locationArchived) || len(row.Actions) != 1 ||
 		row.Actions[0].Title != "恢复" || !strings.Contains(row.Actions[0].Action.Confirm, missingPath) ||
 		!strings.Contains(row.Actions[0].Action.Confirm, "claude --resume sess-cold-01") {
 		t.Fatalf("archived row: %+v", row)
@@ -332,7 +332,7 @@ func TestUnconfirmedIndexIsNotOfferedForRestore(t *testing.T) {
 	prog, _ := CompileProgram(CompileInput{Query: "quasarvellum", Scope: "conversation"})
 	res := ExecuteProgram(st, prog, t0)
 	if len(res.Hits) != 1 || res.Hits[0].Location != locationUnconfirmed || res.ScannedUnconfirmed != 1 ||
-		!strings.Contains(res.StepTraces[0].Note, locationUnconfirmed) {
+		!strings.Contains(res.StepTraces[0].Note, "可能没传完") {
 		t.Fatalf("pending index: %+v %q", res.Hits, res.StepTraces[0].Note)
 	}
 
@@ -353,7 +353,7 @@ func TestUnconfirmedIndexIsNotOfferedForRestore(t *testing.T) {
 				if len(it.Actions) > 0 || it.Key == "restore-session" {
 					t.Fatalf("a pending index must not offer 恢复: %+v", it)
 				}
-				if it.Key == "hit-row-0" && it.Badge.Text != locationUnconfirmed {
+				if it.Key == "hit-row-0" && it.Badge.Text != locationLabel(locationUnconfirmed) {
 					t.Fatalf("pending badge: %+v", it.Badge)
 				}
 			}

@@ -180,15 +180,15 @@ func (a *app) do(ctx context.Context, method, path string, body, out any) error 
 	}
 	res, err := a.client.Do(req)
 	if err != nil {
-		return a.redact(fmt.Errorf("连不上 openGym 服务器 %s：%w", base.Host, unwrapURL(err)), token)
+		return &reachError{a.redact(fmt.Errorf("连不上 openGym 服务器 %s：%w", base.Host, unwrapURL(err)), token)}
 	}
 	defer res.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(res.Body, bodyMost+1))
 	if err != nil {
-		return a.redact(fmt.Errorf("读 openGym 的回答失败：%w", err), token)
+		return &reachError{a.redact(fmt.Errorf("读 openGym 的回答失败：%w", err), token)}
 	}
 	if len(raw) > bodyMost {
-		return errors.New("openGym 的回答超过 16 MB")
+		return &answerError{errors.New("openGym 的回答超过 16 MB")}
 	}
 	if res.StatusCode/100 != 2 {
 		e := &apiError{Status: res.StatusCode, RetryAfter: res.Header.Get("Retry-After")}
@@ -208,10 +208,21 @@ func (a *app) do(ctx context.Context, method, path string, body, out any) error 
 		return nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("openGym 的回答不是预期的 JSON（地址指向的是 openGym 吗？）：%w", err)
+		return &answerError{fmt.Errorf("openGym 的回答不是预期的 JSON（地址指向的是 openGym 吗？）：%w", err)}
 	}
 	return nil
 }
+
+// reachError is a request that got no (complete) answer: the server is down, the address leads nowhere, or the
+// connection broke. answerError is an answer that is not what an openGym server sends. Both keep the wrapped
+// error's text as it was; the page uses the kind to say what to do.
+type reachError struct{ error }
+
+func (e *reachError) Unwrap() error { return e.error }
+
+type answerError struct{ error }
+
+func (e *answerError) Unwrap() error { return e.error }
 
 func unwrapURL(err error) error {
 	var ue *url.Error
@@ -336,7 +347,7 @@ func (a *app) parse(d dataAnswer) (*snapshot, error) {
 		return s, nil
 	}
 	if err := json.Unmarshal(d.State, &s.Raw); err != nil {
-		return nil, fmt.Errorf("openGym 的数据不是一个 JSON 对象：%w", err)
+		return nil, &answerError{fmt.Errorf("openGym 的数据不是一个 JSON 对象：%w", err)}
 	}
 	s.State = parseState(s.Raw)
 	return s, nil

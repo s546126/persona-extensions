@@ -101,3 +101,31 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     assert.ok(JSON.stringify(view).includes("A Survey of Large Language Models"));
   } finally { h.p.close(); }
 });
+
+test("ExactJSON rejects limit: 0, unknown tool checks before args, and refresh resets on navigation", async () => {
+  const h = await setup();
+  try {
+    const zeroLimit = await h.call("connector.tools.call", { name: "openalex_search", args: { query: "synthetic", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
+    const unknownTool = await h.call("connector.tools.call", { name: "openalex_unknown", args: { limit: "bad" } });
+    assert.equal(unknownTool.error?.code, "unknown_method");
+
+    const pathOther = "/works?search=other&per-page=20&select=id%2Cdisplay_name%2Cpublication_year%2Cdoi%2Cprimary_location%2Copen_access%2Ccited_by_count";
+    h.fixture.put(pathOther, { meta: { count: 1 }, results: [{ id: "https://openalex.org/W99", display_name: "Other Paper", cited_by_count: 5, open_access: { is_oa: false } }] });
+    await h.call("ui.page.mount", { session: "refresh-reset", params: { contribution: "research", locale: "en", ui_version: 1 } });
+    let snap = await settled(h, "refresh-reset", "openalex-welcome-text");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "openalex-submit", { query: "synthetic" }) });
+    snap = await settled(h, "refresh-reset", "A Survey of Large Language Models");
+    // Prime cache for "other", then refresh "synthetic", then navigate to "other": "other" must hit cache.
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "openalex-submit", { query: "other" }) });
+    snap = await settled(h, "refresh-reset", "Other Paper");
+    const hitsOtherBefore = h.fixture.hits.get(pathOther) ?? 0;
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "openalex-submit", { query: "synthetic" }) });
+    snap = await settled(h, "refresh-reset", "A Survey of Large Language Models");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "openalex-refresh") });
+    snap = await settled(h, "refresh-reset", "A Survey of Large Language Models");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "openalex-submit", { query: "other" }) });
+    await settled(h, "refresh-reset", "Other Paper");
+    assert.equal(h.fixture.hits.get(pathOther), hitsOtherBefore, "refresh must reset after navigating to another search");
+  } finally { h.p.close(); }
+});

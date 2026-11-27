@@ -181,7 +181,7 @@ func (a *App) Act(_ context.Context, r *ext.UIRequest) (*wire.ActionResult, erro
 	switch {
 	case refused != nil:
 		c.st = st0
-		res = &wire.ActionResult{Toast: refused.Error()}
+		res = &wire.ActionResult{Toast: toastOf(refused)}
 	case err != nil && !errors.Is(err, errKeep):
 		return nil, err
 	}
@@ -350,7 +350,7 @@ func actTab(c *ctx, arg string) (*wire.ActionResult, error) {
 		key = ""
 	}
 	if key != "" && c.typeOf(key) == nil {
-		return nil, fmt.Errorf("没有类型「%s」", key)
+		return nil, fmt.Errorf("找不到分类「%s」，它可能刚被删掉了。请回到概览重新选", key)
 	}
 	c.st = state{S: c.st.S, T: key}
 	return nil, nil
@@ -360,7 +360,7 @@ func actView(c *ctx, arg string) (*wire.ActionResult, error) {
 	t := c.typeOf(c.st.T)
 	i, err := strconv.Atoi(c.pick(arg, "view"))
 	if t == nil || err != nil || i < 0 || i >= len(t.ViewsOrDefault()) {
-		return nil, errors.New("没有这个视图")
+		return nil, errors.New("找不到这个显示方式，它可能刚被删掉了。请重新选一个")
 	}
 	c.st.V, c.st.N, c.st.F = i, 0, ""
 	return nil, nil
@@ -404,7 +404,7 @@ func actNew(c *ctx, arg string) (*wire.ActionResult, error) {
 	if arg == "" {
 		arg = pickSlot
 	} else if _, ok := templates.Get(arg); !ok {
-		return nil, fmt.Errorf("没有模板「%s」", arg)
+		return nil, fmt.Errorf("找不到模板「%s」。请从模板列表里重新选一个", arg)
 	}
 	c.st = state{S: c.st.S, C: arg}
 	return nil, nil
@@ -425,7 +425,7 @@ func actCancel(c *ctx, _ string) (*wire.ActionResult, error) {
 func actCreate(c *ctx, arg string) (*wire.ActionResult, error) {
 	t, ok := templates.Get(arg)
 	if !ok {
-		return nil, fmt.Errorf("没有模板「%s」", arg)
+		return nil, fmt.Errorf("找不到模板「%s」。请从模板列表里重新选一个", arg)
 	}
 	name := strings.TrimSpace(c.r.Values["name"])
 	if name == "" {
@@ -460,27 +460,30 @@ func samplesChoice(t *templates.Template, values map[string]string, fromForm boo
 	case "false":
 		return false, nil
 	}
-	return false, fmt.Errorf("「带示例记录」只能是 true 或 false，收到「%s」", v)
+	return false, fmt.Errorf("「先放几条示例」的开关没有读懂（收到「%s」）。请重新打开或关上这个开关，再点创建", v)
 }
 
 // actAdd creates an entity of the type tab's type with the title of the quick-add fold. It starts at the first stage.
 func actAdd(c *ctx, _ string) (*wire.ActionResult, error) {
 	t := c.typeOf(c.st.T)
 	if t == nil {
-		return nil, errors.New("先选择一个类型")
+		return nil, errors.New("还没选分类。请先点上面的一个分类，再添加条目")
 	}
 	title := strings.TrimSpace(c.r.Values["title"])
+	if title == "" {
+		return nil, errors.New("标题是空的。请先写下这一条叫什么（例如书名），再点添加")
+	}
 	if _, err := c.sp.PutEntity(c.b, kernel.EntityInput{Type: t.Key, Title: &title}, c.now); err != nil {
 		return nil, err
 	}
 	c.st.F = ""
-	return &wire.ActionResult{Toast: "已创建「" + title + "」"}, nil
+	return &wire.ActionResult{Toast: "已添加「" + title + "」"}, nil
 }
 
 // actSave changes the name and the about of the space shown, from its settings fold.
 func actSave(c *ctx, _ string) (*wire.ActionResult, error) {
 	if c.sp == nil {
-		return nil, errors.New("还没有空间")
+		return nil, errors.New("还没有空间。请先从模板新建一个空间")
 	}
 	name := strings.TrimSpace(c.r.Values["name"])
 	about := strings.TrimSpace(c.r.Values["about"])
@@ -494,7 +497,7 @@ func actSave(c *ctx, _ string) (*wire.ActionResult, error) {
 // actDrop deletes the space shown, with everything in it. The state then shows the first space left, or the welcome.
 func actDrop(c *ctx, _ string) (*wire.ActionResult, error) {
 	if c.sp == nil {
-		return nil, errors.New("还没有空间")
+		return nil, errors.New("还没有空间，没有可以删除的")
 	}
 	name := c.sp.Name
 	if err := c.b.DropSpace(c.sp.ID); err != nil {

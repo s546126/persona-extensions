@@ -256,7 +256,7 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 		t.Fatal("restart repeated update")
 	}
 	key, _ := json.Marshal(updateArgs{ProjectID: "project-1", WorkItemID: "item-1", Priority: "low"})
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(key), Status: "pending", StartedAt: time.Now()}})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "plane_update_work_item:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -5,16 +5,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-// sftp -D sftp_server_command connects to a local sftp server: OpenSSH splits the value into a program and its
+// sftp -D sftp_server_command connects to a local sftp server: newer OpenSSH splits the value into a program and its
 // arguments and execs it on this computer, like an ssh -o ProxyCommand value.
 func TestSftpDirectServerCommand(t *testing.T) {
-	// the real client runs "rm -f <sentinel>" as its server, and the file goes; with two -D it runs the last
-	if _, err := exec.LookPath("sftp"); err == nil {
-		for _, before := range [][]string{nil, {"-D", "true"}} {
+	// Probe the real client in a subtest so OpenSSH builds whose sftp -D does not split arguments (e.g. 8.4 on
+	// Debian 11) skip only the fixture check while still running all guard policy cases below.
+	t.Run("fixture", func(t *testing.T) {
+		if _, err := exec.LookPath("sftp"); err != nil {
+			t.Skip("sftp not in PATH")
+		}
+		for i, before := range [][]string{nil, {"-D", "true"}} {
 			sentinel := filepath.Join(t.TempDir(), "sentinel")
 			if err := os.WriteFile(sentinel, nil, 0o600); err != nil {
 				t.Fatal(err)
@@ -23,10 +28,13 @@ func TestSftpDirectServerCommand(t *testing.T) {
 			out, _ := exec.CommandContext(ctx, "sftp", append(before, "-D", "rm -f "+sentinel)...).CombinedOutput()
 			cancel()
 			if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+				if i == 0 && strings.Contains(string(out), "No such file or directory") {
+					t.Skipf("sftp -D does not split arguments on this OpenSSH build: %s", strings.TrimSpace(string(out)))
+				}
 				t.Fatalf("fixture: sftp %q -D did not run its value: %s", before, out)
 			}
 		}
-	}
+	})
 	for _, c := range []struct {
 		command string
 		blocked bool

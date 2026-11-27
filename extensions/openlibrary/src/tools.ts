@@ -1,7 +1,7 @@
 import { ExtError, noContribution, unknownMethod, withExactParams, type ExactJSON, type Handler } from "@persona/extension";
-import { clip, ReadError, type Book, type Work } from "./model.ts";
+import { clip, queryText, ReadError, workKey, type Book, type Work } from "./model.ts";
 import { errorText, fmt, textsFor } from "./i18n.ts";
-import { budget, OpenLibrary } from "./service.ts";
+import { budget, checkSignal, OpenLibrary } from "./service.ts";
 export function toolsFor(locale = "en") {
   const t = textsFor(locale);
   return [
@@ -18,12 +18,23 @@ function detail(work: Work): string {
 }
 function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
     for (const key of ["query", "work"] as const) for (const token of exact.fieldValues(key)) {
+      if (token.raw === "null") { delete args[key]; continue; }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args[key] = value;
     }
-    const parsed = exact.int64Fields(["limit"]).limit;
-    if (parsed !== 0n) args.limit = parsed;
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") { hasLimit = false; limit = 0n; continue; }
+      try { limit = token.int64(limit); } catch { throw new ReadError("invalid"); }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -34,23 +45,33 @@ function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   return value;
 }
 export async function callTool(service: OpenLibrary, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
+  if (name !== "openlibrary_search" && name !== "openlibrary_work") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "openlibrary_search") {
-      if (typeof args.query !== "string") throw new ReadError("invalid");
-      const limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 30) throw new ReadError("invalid");
-      const result = await service.search(args.query, limit, false, request.signal);
-      return clip(result.books.length ? result.books.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29_999);
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 30n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 30) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result = await service.search(query, limit, false, request.signal);
+      return clip(result.books.length ? result.books.map(line).join("\n").trim() : fmt(t.results, { query }) + "\n" + t.empty, 29_999);
     }
-    if (name === "openlibrary_work") {
-      if (typeof args.work !== "string") throw new ReadError("invalid");
-      const search = await service.search(args.work, 30, false, request.signal);
-      const base = search.books.find(book => book.key === args.work);
-      if (!base) throw new ReadError("not_found");
-      return clip(detail(await service.work(base.key, base, false, request.signal)), 29_999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    const key = workKey(args.work);
+    const search = await service.search(key, 30, false, request.signal);
+    const base = search.books.find(book => book.key === key);
+    if (!base) throw new ReadError("not_found");
+    return clip(detail(await service.work(base.key, base, false, request.signal)), 29_999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally { request.dispose(); }
 }
 export function connector(getService: () => OpenLibrary): Handler { return withExactParams(async (method, params: unknown, call) => {

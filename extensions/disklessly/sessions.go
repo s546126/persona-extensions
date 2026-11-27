@@ -215,17 +215,33 @@ func (o sessionRunOutcome) err() error {
 	case o.refsFailed:
 		return errors.New(refProbeFailed)
 	case !o.ran:
-		return errors.New("会话归档脚本没有返回结果，未归档或删除任何会话")
+		return errors.New("搬对话的脚本没有返回结果，一个对话都没有搬走或删除")
 	case o.exitCode == cliExitMissing:
-		return errors.New("目标机器未安装 disklessly CLI，冷会话需由 disklessly 上传到备份后端后才能移除，未归档或删除任何会话")
+		return errors.New("这台电脑还没装配套小工具（disklessly），旧对话要由它放进网盘后才能删，所以一个都没有搬走或删除")
 	case o.exitCode == cliExitBackend:
-		return rawError("备份后端连不上，没有上传或删除任何会话；确认后端在线后再试", msg)
+		return rawError("网盘连不上，一个对话都没有搬走或删除；确认网盘在线后再试", msg)
+	case o.exitCode != 0 && o.noBackend():
+		// The same reason and fix as a computer whose refresh found no backend.
+		p := noBackendProblem(nil)
+		return &detailError{msg: p.text(), raw: strings.TrimSpace(msg), command: p.Command}
 	case o.exitCode != 0:
-		return rawError(fmt.Sprintf("disklessly 上传冷会话失败（退出码 %d），没有确认上传的会话都留在本地", o.exitCode), msg)
+		return rawError(fmt.Sprintf("配套小工具搬对话时出错了（退出码 %d）；没确认放进网盘的对话都还留在电脑上，没有删", o.exitCode), msg)
 	case o.report == nil || !o.report.OK:
-		return rawError("disklessly 上传后给出的报告看不懂，没有确认上传的会话都留在本地", msg)
+		return rawError("配套小工具搬完后给的结果看不懂；没确认放进网盘的对话都还留在电脑上，没有删", msg)
 	}
 	return nil
+}
+
+// noBackend reports a run the CLI refused because no backup backend is configured.
+func (o sessionRunOutcome) noBackend() bool {
+	var ce *cliError
+	if o.report != nil {
+		ce = o.report.Error
+	}
+	if ce == nil && strings.Contains(strings.ToLower(o.stderr), "no backend") {
+		ce = &cliError{Message: o.stderr}
+	}
+	return noBackendError(ce)
 }
 
 func cmpOr(a, b string) string {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { downloadsPath, packageName, packagePath, parseDownloads, parsePackage, parseSearch, queryText, ReadError, searchPath } from "../src/model.ts";
+import { clip, downloadsPath, packageName, packagePath, parseDownloads, parsePackage, parseSearch, queryText, ReadError, searchPath } from "../src/model.ts";
+import { dateText } from "../src/i18n.ts";
 import { encodeState, initialState, packageTransition, readState, transition } from "../src/page.tsx";
 import { scoped, typescript } from "./fixtures.ts";
 
@@ -13,7 +14,23 @@ test("registry requests bound search input and encode scoped package names", () 
   for (const name of ["", "@scope", "@scope/", "a/b/c", "a b", "../secret", "a\n", 42]) assert.throws(() => packageName(name), ReadError);
   // Legacy uppercase names are still served by the registry.
   for (const name of ["JSONStream", "Base64", "@Scope/Pkg", "a.B-C_d"]) assert.equal(packageName(name), name);
-  for (const value of ["", "x\n", 42, "x".repeat(201)]) assert.throws(() => queryText(value), ReadError);
+  for (const value of ["", "x\n", 42, "x".repeat(201), "\uD800", "\uDC00", "a\uD800b"]) assert.throws(() => queryText(value), ReadError);
+  assert.equal(queryText("📦"), "📦");
+});
+
+test("clip enforces exact code-point limits and dateText tolerates invalid dates", () => {
+  assert.equal(Array.from(clip("a".repeat(20), 10)).length, 10);
+  assert.equal(clip("a".repeat(20), 10), "aaaaaaaaa…");
+  assert.equal(Array.from(clip("📦".repeat(10), 5)).length, 5);
+  assert.equal(clip("📦".repeat(10), 5), "📦📦📦📦…");
+  assert.equal(clip("hello", 1), "h");
+  assert.equal(clip("hello", 0), "");
+  assert.equal(clip("hello", -5), "");
+  assert.equal(clip("hello", Number.NaN), "");
+  assert.equal(Array.from(clip("hello", 3.9)).length, 3);
+  assert.equal(dateText("not-a-date"), "");
+  assert.equal(dateText(""), "");
+  assert.ok(dateText("2026-11-10T04:06:51.126Z").includes("2026"));
 });
 
 test("search keeps bounded metadata and rejects duplicate or malicious packages", () => {
@@ -29,6 +46,9 @@ test("search keeps bounded metadata and rejects duplicate or malicious packages"
     { license: { type: ["MIT"] } }
   ]) assert.throws(() => parseSearch({ objects: [{ package: { ...typescript, ...change } }], total: 1 }, 0), ReadError);
   assert.throws(() => parseSearch({ objects: [{ package: typescript }, { package: typescript }], total: 2 }, 0), ReadError);
+  const overlongLink = parseSearch({ objects: [{ package: { ...typescript, repository: "https://github.com/microsoft/" + "a".repeat(4100), homepage: "https://example.org/" + "b".repeat(4100) } }], total: 1 }, 0);
+  assert.equal(overlongLink.packages[0].repository, undefined);
+  assert.equal(overlongLink.packages[0].homepage, undefined);
 });
 
 test("a git+ssh, git or scp-style repository is shown as https, and an unreadable link is left out, not a failed search", () => {
@@ -77,5 +97,8 @@ test("page state accepts only validated results and canonical package URLs", () 
   assert.deepEqual(readState(encodeState(detail)), detail);
   assert.deepEqual(readState(encodeState({ ...detail, package: { ...detail.package!, url: "https://attacker.invalid/package/@babel/preset-typescript" } })), initialState);
   assert.deepEqual(readState(encodeState({ ...detail, package: { ...detail.package!, repository: "javascript:alert(1)" } })), initialState);
+  assert.deepEqual(readState(encodeState({ ...detail, package: { ...detail.package!, repository: "https://github.com/a/" + "x".repeat(4100) } })), initialState);
+  assert.deepEqual(readState(JSON.stringify({ q: "\uD800", found: true })), initialState);
   assert.equal(transition(state, "search", { query: "typescript" }).found, true);
+  assert.equal(transition(initialState, "search", { query: "\uD800" }).found, false);
 });

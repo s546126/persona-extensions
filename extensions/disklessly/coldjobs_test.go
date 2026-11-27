@@ -137,7 +137,7 @@ func TestColdStateClassifier(t *testing.T) {
 			if err := wire.CheckView(v); err != nil {
 				t.Fatal(err)
 			}
-			if items[0].Badge == nil || items[0].Badge.Text != coldStateLabel(c.state) {
+			if items[0].Badge == nil || items[0].Badge.Text != coldStatePageLabel(c.state) {
 				t.Fatalf("badge %+v", items[0].Badge)
 			}
 			if strings.Contains(items[0].Badge.Text+items[0].Title, "EX_") {
@@ -194,7 +194,7 @@ func TestOldColdCatalogLoads(t *testing.T) {
 	if err := wire.CheckView(v); err != nil {
 		t.Fatal(err)
 	}
-	if got := texts(v); !strings.Contains(got, "机器 3 台 1 回答无法识别 · 1 未安装 CLI · 1 正常") {
+	if got := texts(v); !strings.Contains(got, "电脑 3 台 1 台正常 · 2 台要处理") || !strings.Contains(got, "（1 台配套小工具出错了、1 台还没装配套小工具）") {
 		t.Fatalf("summary:\n%s", got)
 	}
 }
@@ -226,6 +226,14 @@ func TestBackgroundRefreshDoesNotBlock(t *testing.T) {
 	a := newTestApp(t)
 	b := &blockingRunner{release: make(chan struct{}), calls: map[string]int{}}
 	a.runner = b.run
+	// A failed assertion must not leave build-box blocked: the app's cleanup waits for its jobs.
+	t.Cleanup(func() {
+		select {
+		case <-b.release:
+		default:
+			close(b.release)
+		}
+	})
 	if err := a.db().update(func(st *State, now time.Time) error {
 		_, err := st.upsertMachine(MachineInput{Host: "build-box", Name: "build-box"}, now)
 		return err
@@ -259,13 +267,13 @@ func TestBackgroundRefreshDoesNotBlock(t *testing.T) {
 		return nil
 	}
 	res := act("", map[string]string{"m": ""})
-	if !strings.Contains(res.Toast, "已开始读取 2 台机器") {
+	if !strings.Contains(res.Toast, "开始检查 2 台电脑") {
 		t.Fatalf("toast: %s", res.Toast)
 	}
 	if res.View.RefreshAfter != coldPollSeconds {
 		t.Fatalf("refresh_after %d while reading", res.View.RefreshAfter)
 	}
-	if !strings.Contains(texts(res.View), "正在后台读取") || !strings.Contains(texts(res.View), "build-box") {
+	if !strings.Contains(texts(res.View), "正在进行：") || !strings.Contains(texts(res.View), "「build-box」检查对话和网盘") || !strings.Contains(texts(res.View), "build-box") {
 		t.Fatalf("no progress shown:\n%s", texts(res.View))
 	}
 	if rows := itemsOf(res.View, "build-box"); len(rows) == 0 || rows[0].Badge.Text != "进行中" {
@@ -274,7 +282,7 @@ func TestBackgroundRefreshDoesNotBlock(t *testing.T) {
 
 	// A second tap while build-box is still being read does not start it again.
 	again := act(res.View.State, map[string]string{"m": "build-box"})
-	if !strings.Contains(again.Toast, "已在读取") {
+	if !strings.Contains(again.Toast, "已经在检查了") {
 		t.Fatalf("second tap: %s", again.Toast)
 	}
 
@@ -293,10 +301,10 @@ func TestBackgroundRefreshDoesNotBlock(t *testing.T) {
 		t.Fatalf("still polling: %d", v.RefreshAfter)
 	}
 	rows := itemsOf(v, "build-box")
-	if len(rows) == 0 || rows[0].Badge.Text != coldStateLabel(ColdReady) || !strings.Contains(rows[0].Detail, "已索引 4 个") {
+	if len(rows) == 0 || rows[0].Badge.Text != coldStateLabel(ColdReady) || !strings.Contains(rows[0].Detail, "记下 4 个对话") {
 		t.Fatalf("build-box after refresh: %+v", rows)
 	}
-	if !strings.Contains(texts(v), "2 正常") {
+	if !strings.Contains(texts(v), "电脑 2 台 都正常") {
 		t.Fatalf("summary:\n%s", texts(v))
 	}
 }
@@ -341,11 +349,11 @@ func TestCopyInstallOffer(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := itemsOf(v, "old-box")
-	btn := buttonIn(old, "从 build-box 复制安装")
+	btn := buttonIn(old, "从 build-box 复制过来")
 	if btn == nil {
 		t.Fatalf("old-box offers no copy-install: %+v", old)
 	}
-	for _, w := range []string{"build-box", "old-box", "0.3.0", "~/.local/opt/disklessly-0.3.0-linux-amd64", "原来的版本保留"} {
+	for _, w := range []string{"build-box", "old-box", "0.3.0", "~/.local/opt/disklessly-0.3.0-linux-amd64", "原来的版本留在原处"} {
 		if !strings.Contains(btn.Action.Confirm, w) {
 			t.Fatalf("confirm lacks %q: %s", w, btn.Action.Confirm)
 		}
@@ -353,8 +361,8 @@ func TestCopyInstallOffer(t *testing.T) {
 	if btn.Action.Values["m"] != "old-box" || btn.Action.Values["id"] != "build-box" {
 		t.Fatalf("install values: %v", btn.Action.Values)
 	}
-	if !strings.Contains(old[0].Detail, "0.1.0") || !strings.Contains(old[0].Detail, "太旧") {
-		t.Fatalf("old-box detail: %s", old[0].Detail)
+	if says := rowSays(old); !strings.Contains(says, "0.1.0") || !strings.Contains(says, "太旧") {
+		t.Fatalf("old-box detail: %s", says)
 	}
 
 	// Across platforms nothing is offered; the only darwin CLI is a Homebrew install, so the row says why.
@@ -362,8 +370,8 @@ func TestCopyInstallOffer(t *testing.T) {
 	if buttonIn(mini, "从 ") != nil {
 		t.Fatalf("mini-mac offered a copy: %+v", mini)
 	}
-	if !strings.Contains(mini[0].Detail, "studio-mac") || !strings.Contains(mini[0].Detail, "不能复制") {
-		t.Fatalf("mini-mac reason: %s", mini[0].Detail)
+	if says := rowSays(mini); !strings.Contains(says, "studio-mac") || !strings.Contains(says, "也不能从别的电脑复制过来：") {
+		t.Fatalf("mini-mac reason: %s", says)
 	}
 	hasLink := false
 	for _, c := range mini {
@@ -409,12 +417,12 @@ func TestCopyInstallOffer(t *testing.T) {
 		return coldRunner(nil)(ctx, m, s, d)
 	}
 	toast, err := a.coldAction(context.Background(), "cold-install", "old-box", "build-box")
-	if err != nil || !strings.Contains(toast, "已开始从「build-box」复制安装到「old-box」") {
+	if err != nil || !strings.Contains(toast, "开始从「build-box」把配套小工具复制到「old-box」") {
 		t.Fatalf("install: %q %v", toast, err)
 	}
 	a.waitJobs()
 	j := a.jobSnapshot()["old-box"]
-	if j.Err != "" || !strings.Contains(j.Note, "已从 build-box 复制安装 disklessly 0.3.0") || !strings.Contains(j.Note, "disklessly-0.1.0") {
+	if j.Err != "" || !strings.Contains(j.Note, "已从 build-box 复制好配套小工具 disklessly 0.3.0") || !strings.Contains(j.Note, "disklessly-0.1.0") {
 		t.Fatalf("install job: %+v", j)
 	}
 	if len(scripts) != 2 || len(refreshed) == 0 || refreshed[0] != "old-box" {

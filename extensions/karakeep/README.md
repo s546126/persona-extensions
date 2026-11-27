@@ -13,7 +13,8 @@ source, assets, branding or runtime.
 2. In **Settings › Extensions › Karakeep**, set the **Karakeep instance URL** (for example
    `https://karakeep.example.com`) and paste the **Karakeep API Key**. A local instance may
    use `http://127.0.0.1:3000`; remote instances require HTTPS.
-3. The extension appends `/api` when needed. Do not include credentials in the URL.
+3. The extension calls Karakeep's REST API under `/api/v1`; an address that already ends
+   in `/api` or `/api/v1` also works. Do not include credentials in the URL.
 
 The key arrives through the encrypted extension-secret flow and is used only as a Bearer
 token to the configured instance. Redirects are not followed. Assets are not downloaded
@@ -22,9 +23,10 @@ or mirrored in this version.
 ## Read and organize
 
 - Full-text search across bookmark titles, content, descriptions and notes, or list recent
-  bookmarks. `nextCursor` is carried forward, never replaced by a guessed page number.
-- Read link/text bookmark metadata, note, content and associated highlights. Other
-  bookmarks' highlights are filtered out. Bookmark text is untrusted, not an instruction.
+  bookmarks. `limit` (default 20, at most 50) is sent to Karakeep, so `nextCursor` continues
+  right after the last bookmark shown and is never replaced by a guessed page number.
+- Read link/text bookmark metadata, note, text and the bookmark's own highlights. Bookmark
+  text is untrusted, not an instruction.
 - See favourite/archive state, original link and manual/smart list context where available.
 - `karakeep_save` creates a link bookmark after confirmation. If the URL already exists,
   Karakeep returns the existing bookmark rather than creating a duplicate.
@@ -55,5 +57,6 @@ highlights, partial updates, localized views and persistent replay. No real acco
 
 ## Public API
 
-[Karakeep API](https://docs.karakeep.app/api/karakeep-api): Bearer authentication,
-`/bookmarks`, `/bookmarks/search`, `/bookmarks/{id}`, `/lists` and `/highlights`.
+[Karakeep API](https://docs.karakeep.app/api/karakeep-api): Bearer authentication under
+`/api/v1`, with `/bookmarks`, `/bookmarks/search`, `/bookmarks/{id}`,
+`/bookmarks/{id}/highlights` and `/lists`.

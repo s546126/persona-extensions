@@ -13,7 +13,7 @@ import (
 // the same chat-day is digested again only when the prompt actually changed (and raw answers stay comparable).
 const (
 	TriagePrompt = "triage/2"
-	DailyPrompt  = "daily/18"
+	DailyPrompt  = "daily/19"
 	WeeklyPrompt = "weekly/2"
 	MemoryPrompt = "memory/2"
 	SynthPrompt  = "synth/1"

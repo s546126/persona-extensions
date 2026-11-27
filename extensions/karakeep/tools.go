@@ -68,20 +68,17 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if in.Limit < 0 || in.Limit > 50 || len([]rune(in.Query)) > 200 || len(in.Cursor) > 256 {
 			return "", errors.New("invalid query, cursor or limit")
 		}
-		page, err := a.client.bookmarks(ctx, in.Query, in.Cursor)
+		if in.Limit == 0 {
+			in.Limit = 20
+		}
+		page, err := a.client.bookmarks(ctx, in.Query, in.Cursor, in.Limit)
 		a.record(err)
 		if err != nil {
 			return "", err
 		}
 		var b strings.Builder
-		if in.Limit == 0 {
-			in.Limit = 20
-		}
 		for _, item := range page.Bookmarks {
 			b.WriteString(formatBookmark(item))
-			if in.Limit--; in.Limit == 0 {
-				break
-			}
 		}
 		if page.NextCursor != nil && *page.NextCursor != "" {
 			fmt.Fprintf(&b, "\nNext cursor: %s\n", *page.NextCursor)
@@ -100,7 +97,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if err != nil {
 			return "", err
 		}
-		highlights, err := a.client.highlights(ctx, "")
+		highlights, err := a.client.bookmarkHighlights(ctx, in.ID)
 		if err != nil {
 			return "", err
 		}
@@ -109,16 +106,10 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if item.Note != "" {
 			b.WriteString("\nNote:\n" + clipText(item.Note, 10000) + "\n")
 		}
-		if item.Text != "" {
-			b.WriteString("\nText:\n" + clipText(item.Text, 30000) + "\n")
+		if item.Content.Text != "" {
+			b.WriteString("\nText:\n" + clipText(item.Content.Text, 30000) + "\n")
 		}
-		if item.Content != "" {
-			b.WriteString("\nContent:\n" + clipText(item.Content, 30000) + "\n")
-		}
-		for _, h := range highlights.Bookmarks {
-			if h.BookmarkID != item.ID {
-				continue
-			}
+		for _, h := range highlights {
 			fmt.Fprintf(&b, "\nHighlight %s:\n%s\n", h.ID, clipText(h.Text, 6000))
 			if h.Note != "" {
 				b.WriteString("Note: " + clipText(h.Note, 3000) + "\n")
@@ -142,9 +133,9 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 
 func formatBookmark(item bookmark) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n- %s\n  ID: %s | type: %s", clipText(item.Title, 500), item.ID, item.Type)
-	if item.URL != "" {
-		b.WriteString("\n  " + item.URL)
+	fmt.Fprintf(&b, "\n- %s\n  ID: %s | type: %s", clipText(item.displayTitle(), 500), item.ID, item.kind())
+	if link := item.link(); link != "" {
+		b.WriteString("\n  " + link)
 	}
 	if item.Favourited {
 		b.WriteString(" | favourite")
@@ -152,8 +143,8 @@ func formatBookmark(item bookmark) string {
 	if item.Archived {
 		b.WriteString(" | archived")
 	}
-	if item.Description != "" {
-		b.WriteString("\n  " + clipText(item.Description, 1000))
+	if item.Content.Description != "" {
+		b.WriteString("\n  " + clipText(item.Content.Description, 1000))
 	}
 	b.WriteString("\n")
 	return b.String()

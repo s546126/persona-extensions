@@ -81,10 +81,11 @@ func (c *ctx) editorPage() (*wire.View, error) {
 // newTypePage is the form of a new type: its key and its name, and the button that creates it. Creating it turns the
 // page into the editor of the new type.
 func newTypePage() *wire.View {
-	return &wire.View{Title: "新建类型", Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentHeader, Title: "新建类型", Subtitle: "类型有自己的属性、生命周期和视图"},
-		textField("t_key", "标识", "", "小写字母开头，如 task"),
-		textField("t_name", "名称", "", "例如 任务"),
+	return &wire.View{Title: "新建分类", Sections: []wire.Section{{Items: []wire.Component{
+		{Type: wire.ComponentHeader, Title: "新建分类", Subtitle: "分类就是你要记的一种东西，例如「电影」「药品」「任务」"},
+		caption("建好以后，可以再给它加要填的内容（例如 导演、评分）和几个状态（例如 想看、看过）。"),
+		textField("t_name", "名称", "", "例如 电影"),
+		textField("t_key", "代号", "", "给程序用的短名字，例如 film；小写英文字母开头，建好后不能改"),
 		button("创建", &wire.Action{ID: "typenew", Submit: true}, wire.ButtonRoleNormal),
 	}}}}
 }
@@ -93,8 +94,9 @@ func newTypePage() *wire.View {
 // and the icon.
 func (c *ctx) typeHead(t *kernel.Type) []wire.Component {
 	items := []wire.Component{
-		{Type: wire.ComponentHeader, Title: cut(t.Name, maxTitle), Subtitle: fmt.Sprintf("结构 · %d 条记录", len(c.entitiesOf(t.Key)))},
-		{Type: wire.ComponentRow, Title: "名称与图标", Subtitle: "标识 " + t.Key, Action: &wire.Action{ID: "fold:name"}},
+		{Type: wire.ComponentHeader, Title: cut(t.Name, maxTitle), Subtitle: fmt.Sprintf("分类设置 · 现在有 %d 条", len(c.entitiesOf(t.Key)))},
+		caption("在这里决定这一类要填哪些内容、有哪些状态、在列表里怎么显示。改动会马上用到已有的每一条上。"),
+		{Type: wire.ComponentRow, Title: "名称与图标", Subtitle: "代号 " + t.Key, Action: &wire.Action{ID: "fold:name"}},
 	}
 	if c.st.F == "name" {
 		items = append(items,
@@ -121,20 +123,24 @@ func (c *ctx) flowSection(t *kernel.Type) wire.Section {
 			items = append(items, c.stageFields(t, i)...)
 		}
 	}
-	items = append(items, wire.Component{Type: wire.ComponentRow, Title: "添加阶段", Action: &wire.Action{ID: "fold:stage:" + newSlot}})
+	items = append(items, wire.Component{Type: wire.ComponentRow, Title: "添加状态", Action: &wire.Action{ID: "fold:stage:" + newSlot}})
 	if c.st.F == "stage:"+newSlot {
 		items = append(items, c.stageFields(t, -1)...)
 	}
-	return wire.Section{Title: "生命周期", Items: items}
+	footer := "每一条按顺序从一个状态挪到下一个，例如 想读 → 在读 → 读完。"
+	if len(t.Flow) == 0 {
+		footer = "还没有状态，只用来记东西也可以。想跟进度，就加几个状态，例如 想读 → 在读 → 读完（至少两个）。"
+	}
+	return wire.Section{Title: "状态", Footer: footer, Items: items}
 }
 
 // stageFields is the fold of a stage: its name, its phase, and the buttons that save, move up and delete it. For a new
 // stage (i < 0) there is no move or delete.
 func (c *ctx) stageFields(t *kernel.Type, i int) []wire.Component {
 	if i < 0 {
-		items := []wire.Component{textField("stage_name", "名称", "", "例如 探索"), phaseField("stage_phase", kernel.Todo)}
+		items := []wire.Component{textField("stage_name", "名称", "", "例如 想读"), phaseField("stage_phase", kernel.Todo)}
 		if len(t.Flow) == 0 {
-			items = append(items, textField("stage2_name", "第二阶段", "", "例如 完成"), phaseField("stage2_phase", kernel.Done))
+			items = append(items, textField("stage2_name", "第二个状态", "", "例如 读完"), phaseField("stage2_phase", kernel.Done))
 		}
 		return append(items, button("添加", &wire.Action{ID: "stagesave:" + newSlot, Submit: true}, wire.ButtonRoleNormal))
 	}
@@ -149,7 +155,7 @@ func (c *ctx) stageFields(t *kernel.Type, i int) []wire.Component {
 		items = append(items, button("上移", &wire.Action{ID: "stageup:" + ref}, wire.ButtonRoleNormal))
 	}
 	return append(items, button("删除", &wire.Action{ID: "stagedrop:" + ref,
-		Confirm: fmt.Sprintf("删除阶段「%s」？", cut(st.Name, maxTitle))}, wire.ButtonRoleDestructive))
+		Confirm: fmt.Sprintf("删除状态「%s」？", cut(st.Name, maxTitle))}, wire.ButtonRoleDestructive))
 }
 
 // propsSection is the properties: a row per property that folds it, the row that adds one, and under it the eight
@@ -163,11 +169,11 @@ func (c *ctx) propsSection(t *kernel.Type) wire.Section {
 			items = append(items, c.propFields(t, i)...)
 		}
 	}
-	items = append(items, wire.Component{Type: wire.ComponentRow, Title: "添加属性", Action: &wire.Action{ID: "fold:addprop"}})
+	items = append(items, wire.Component{Type: wire.ComponentRow, Title: "添加填写项", Action: &wire.Action{ID: "fold:addprop"}})
 	if c.st.F == "addprop" || strings.HasPrefix(c.st.F, "new:") {
 		items = append(items, c.kindRows(t)...)
 	}
-	return wire.Section{Title: "属性", Items: items}
+	return wire.Section{Title: "填写项", Footer: "每一条除了标题，还要记哪些内容，例如 作者、页数、下次续费日期。", Items: items}
 }
 
 // propRow is a property: its kind's icon, its name, its summary from the descriptor, and its key as the value.
@@ -188,7 +194,7 @@ func (c *ctx) kindRows(t *kernel.Type) []wire.Component {
 	var items []wire.Component
 	for _, k := range kernel.Kinds {
 		items = append(items, wire.Component{
-			Type: wire.ComponentRow, Title: k.Label, Subtitle: k.Hint, Icon: iconName(k.Icon),
+			Type: wire.ComponentRow, Title: kindLabel(k), Subtitle: kindAbout(k), Icon: iconName(k.Icon),
 			Action: &wire.Action{ID: "fold:new:" + k.Name},
 		})
 		if c.st.F == "new:"+k.Name {
@@ -209,14 +215,14 @@ func (c *ctx) propFields(t *kernel.Type, i int) []wire.Component {
 		items = append(items, button("上移", &wire.Action{ID: "propup:" + p.Key}, wire.ButtonRoleNormal))
 	}
 	return append(items, button("删除", &wire.Action{ID: "propdrop:" + p.Key,
-		Confirm: fmt.Sprintf("删除属性「%s」？它在每条记录上的值会一起删除。", cut(p.Name, maxTitle))}, wire.ButtonRoleDestructive))
+		Confirm: fmt.Sprintf("删除填写项「%s」？每一条里填过的这一项会一起删除，不能撤销。", cut(p.Name, maxTitle))}, wire.ButtonRoleDestructive))
 }
 
 // newPropFields is the fold that creates a property of a kind: its key, its name, the inputs of its options, and the
 // button that adds it.
 func (c *ctx) newPropFields(t *kernel.Type, k *kernel.Kind) []wire.Component {
 	p := kernel.Prop{Kind: k.Name}
-	items := []wire.Component{textField("p_key", "标识", "", "小写字母开头，如 due"), textField("p_name", "名称", "", "")}
+	items := []wire.Component{textField("p_name", "名称", "", "例如 作者"), textField("p_key", "代号", "", "例如 author；小写英文字母开头，建好后不能改")}
 	items = append(items, c.optFields(t, p)...)
 	return append(items, button("添加", &wire.Action{ID: "propnew:" + k.Name, Submit: true}, wire.ButtonRoleNormal))
 }
@@ -238,7 +244,7 @@ func (c *ctx) optFields(t *kernel.Type, p kernel.Prop) []wire.Component {
 
 // cardSection is the card and the views: the card's row that folds it, a row per view, and the row that adds one.
 func (c *ctx) cardSection(t *kernel.Type) wire.Section {
-	items := []wire.Component{{Type: wire.ComponentRow, Title: "卡片", Subtitle: c.cardSummary(t), Action: &wire.Action{ID: "fold:card"}}}
+	items := []wire.Component{{Type: wire.ComponentRow, Title: "列表里的样子", Subtitle: c.cardSummary(t), Action: &wire.Action{ID: "fold:card"}}}
 	if c.st.F == "card" {
 		items = append(items, c.cardFields(t)...)
 	}
@@ -252,11 +258,11 @@ func (c *ctx) cardSection(t *kernel.Type) wire.Section {
 			items = append(items, c.viewFields(t, i, v)...)
 		}
 	}
-	items = append(items, wire.Component{Type: wire.ComponentRow, Title: "添加视图", Action: &wire.Action{ID: "fold:view:" + newSlot}})
+	items = append(items, wire.Component{Type: wire.ComponentRow, Title: "添加显示方式", Action: &wire.Action{ID: "fold:view:" + newSlot}})
 	if c.st.F == "view:"+newSlot {
 		items = append(items, c.viewFields(t, -1, kernel.View{})...)
 	}
-	return wire.Section{Title: "卡片与视图", Items: items}
+	return wire.Section{Title: "怎么显示", Footer: "每种显示方式是分类页上的一个切换按钮，例如 列表、看板、表格。", Items: items}
 }
 
 // cardFields is the fold of the card: the lead, the pills as names, and the progress as a ratio of two fields.
@@ -267,10 +273,10 @@ func (c *ctx) cardFields(t *kernel.Type) []wire.Component {
 	}
 	choices := c.fieldChoices(t)
 	return []wire.Component{
-		optionalChoice("c_lead", "主行", choices, t.Card.Lead),
-		textField("c_pills", "标签", c.pillNames(t, t.Card.Pills), "用、分隔的字段名"),
-		optionalChoice("c_of", "进度", choices, of),
-		optionalChoice("c_over", "进度分母", choices, over),
+		optionalChoice("c_lead", "标题下面一行显示", choices, t.Card.Lead),
+		textField("c_pills", "旁边显示", c.pillNames(t, t.Card.Pills), "写填写项的名称，用、分隔，例如 评分、页数"),
+		optionalChoice("c_of", "进度条：已完成多少", choices, of),
+		optionalChoice("c_over", "进度条：一共多少", choices, over),
 		button("保存", &wire.Action{ID: "cardsave", Submit: true}, wire.ButtonRoleNormal),
 	}
 }
@@ -285,13 +291,13 @@ func (c *ctx) viewFields(t *kernel.Type, i int, v kernel.View) []wire.Component 
 	choices := c.fieldChoices(t)
 	items := []wire.Component{
 		textField("v_name", "名称", v.Name, ""),
-		requiredChoice("v_kind", "类型", viewKindChoices(), textOr(v.Kind, viewOrder[0])),
-		optionalChoice("v_group", "分组", choices, v.Group),
-		optionalChoice("v_sort", "排序", choices, sortBy),
-		toggleField("v_desc", "倒序", desc),
+		requiredChoice("v_kind", "显示成", viewKindChoices(), textOr(v.Kind, viewOrder[0])),
+		optionalChoice("v_group", "按什么分组", choices, v.Group),
+		optionalChoice("v_sort", "按什么排序", choices, sortBy),
+		toggleField("v_desc", "倒过来排（从大到小、从新到旧）", desc),
 	}
 	if len(v.Where) > 0 || len(v.Agg) > 0 {
-		items = append(items, caption(fmt.Sprintf("还有 %d 条筛选、%d 项汇总，在助手中修改", len(v.Where), len(v.Agg))))
+		items = append(items, caption(fmt.Sprintf("这个显示方式还有 %d 个筛选条件、%d 项统计，这里改不了，可以让助手改", len(v.Where), len(v.Agg))))
 	}
 	slot := newSlot
 	if i >= 0 {
@@ -299,15 +305,15 @@ func (c *ctx) viewFields(t *kernel.Type, i int, v kernel.View) []wire.Component 
 	}
 	items = append(items, button("保存", &wire.Action{ID: "viewsave:" + slot, Submit: true}, wire.ButtonRoleNormal))
 	if i >= 0 {
-		items = append(items, button("删除视图", &wire.Action{ID: "viewdrop:" + slot,
-			Confirm: fmt.Sprintf("删除视图「%s」？", cut(v.Name, maxTitle))}, wire.ButtonRoleDestructive))
+		items = append(items, button("删除这个显示方式", &wire.Action{ID: "viewdrop:" + slot,
+			Confirm: fmt.Sprintf("删除显示方式「%s」？条目本身不会被删。", cut(v.Name, maxTitle))}, wire.ButtonRoleDestructive))
 	}
 	return items
 }
 
 // typeDelete is the button that deletes the type with its records; the confirmation says how many.
 func (c *ctx) typeDelete(t *kernel.Type) wire.Component {
-	return button("删除类型", &wire.Action{ID: "typedrop", Confirm: fmt.Sprintf("删除类型「%s」？会删除 %d 条记录。",
+	return button("删除这个分类", &wire.Action{ID: "typedrop", Confirm: fmt.Sprintf("删除分类「%s」？里面的 %d 条会一起删除，不能撤销。",
 		cut(t.Name, maxTitle), len(c.entitiesOf(t.Key)))}, wire.ButtonRoleDestructive)
 }
 
@@ -315,20 +321,20 @@ func (c *ctx) typeDelete(t *kernel.Type) wire.Component {
 func (c *ctx) cardSummary(t *kernel.Type) string {
 	var parts []string
 	if t.Card.Lead != "" {
-		parts = append(parts, "主行 "+c.fieldName(t, t.Card.Lead))
+		parts = append(parts, "下面一行 "+c.fieldName(t, t.Card.Lead))
 	}
 	if len(t.Card.Pills) > 0 {
-		parts = append(parts, "标签 "+c.pillNames(t, t.Card.Pills))
+		parts = append(parts, "旁边 "+c.pillNames(t, t.Card.Pills))
 	}
 	if pr := t.Card.Progress; pr != nil {
-		s := "进度 " + c.fieldName(t, pr.Of)
+		s := "进度条 " + c.fieldName(t, pr.Of)
 		if pr.Over != "" {
 			s += " / " + c.fieldName(t, pr.Over)
 		}
 		parts = append(parts, s)
 	}
 	if len(parts) == 0 {
-		return "按默认"
+		return "默认样子"
 	}
 	return strings.Join(parts, " · ")
 }
@@ -350,21 +356,21 @@ func (c *ctx) propSummary(p kernel.Prop) string {
 	}
 	switch {
 	case k.Input == kernel.InPick:
-		s := k.Label + " → " + c.typeName(p.Target)
+		s := "连到「" + c.typeName(p.Target) + "」"
 		if p.Many {
-			s += " · 多个"
+			s += " · 可以连多条"
 		}
 		return s
 	case k.Eval != nil:
-		s := k.Label + " · " + aggLabel(p.Op)
+		s := kindLabel(k) + " · " + aggLabel(p.Op)
 		if p.Via != "" {
-			s += " · " + p.Via
+			s += " · " + c.viaTitle(p.Via)
 		}
 		return s
 	case p.Unit != "":
-		return k.Label + " · " + p.Unit
+		return kindLabel(k) + " · " + p.Unit
 	}
-	return k.Label
+	return kindLabel(k)
 }
 
 // fieldChoices are the fields of the type as choices: the built-in fields, then the declared properties.
@@ -380,7 +386,7 @@ func (c *ctx) fieldChoices(t *kernel.Type) []wire.Choice {
 func (c *ctx) fieldsOf(t *kernel.Type) []kernel.Prop {
 	var out []kernel.Prop
 	for _, key := range builtinKeys {
-		if p, ok := c.sp.Field(t, key); ok {
+		if p, ok := c.fieldOf(t, key); ok {
 			out = append(out, p)
 		}
 	}
@@ -389,7 +395,7 @@ func (c *ctx) fieldsOf(t *kernel.Type) []kernel.Prop {
 
 // fieldName is the name of a field of the type, or the key when there is none.
 func (c *ctx) fieldName(t *kernel.Type, key string) string {
-	if p, ok := c.sp.Field(t, key); ok {
+	if p, ok := c.fieldOf(t, key); ok {
 		return p.Name
 	}
 	return key
@@ -416,7 +422,7 @@ func (c *ctx) pillKeys(t *kernel.Type, raw string) ([]string, error) {
 			}
 		}
 		if key == "" {
-			return nil, fmt.Errorf("没有字段「%s」", name)
+			return nil, fmt.Errorf("没有叫「%s」的填写项。请写这个分类里已有的名称，用、分隔", name)
 		}
 		out = append(out, key)
 	}
@@ -462,6 +468,25 @@ func (c *ctx) viaPaths(t *kernel.Type) []viaPath {
 		}
 	}
 	return out
+}
+
+// viaTitle names a rollup's path as the via choice does: a backlink "type.prop" as the type and the relation, an own
+// relation of the type in the editor by its name; the path itself when it names nothing left.
+func (c *ctx) viaTitle(via string) string {
+	if tk, pk, ok := strings.Cut(via, "."); ok {
+		if st := typeIn(c.sp, tk); st != nil {
+			if p, ok := propOf(st, pk); ok {
+				return st.Name + " · " + p.Name
+			}
+		}
+		return via
+	}
+	if t := c.typeOf(c.st.D); t != nil {
+		if p, ok := propOf(t, via); ok {
+			return p.Name
+		}
+	}
+	return via
 }
 
 // numericChoices are the stored numeric properties of the types the paths of the type reach, each key once.
@@ -516,7 +541,7 @@ func viewKindChoices() []wire.Choice {
 func iconChoices(current string) []wire.Choice {
 	out := make([]wire.Choice, 0, len(wire.NavIcons)+1)
 	for _, name := range wire.NavIcons {
-		out = append(out, wire.Choice{Value: name, Title: name})
+		out = append(out, wire.Choice{Value: name, Title: iconTitle(name)})
 	}
 	if current != "" && !slices.Contains(wire.NavIcons, current) {
 		out = append(out, wire.Choice{Value: current, Title: current})
@@ -558,7 +583,7 @@ func toggleField(name, label string, on bool) wire.Component {
 // No option at all is a caption: a choice field needs choices.
 func requiredChoice(name, label string, options []wire.Choice, current string) wire.Component {
 	if len(options) == 0 {
-		return caption(label + "没有可以选的项")
+		return caption("「" + label + "」现在没有可以选的")
 	}
 	value := options[0].Value
 	if slices.ContainsFunc(options, func(ch wire.Choice) bool { return ch.Value == current }) {
@@ -583,7 +608,7 @@ func optionalChoice(name, label string, options []wire.Choice, current string) w
 
 // phaseField is the choice of a stage's phase.
 func phaseField(name string, p kernel.Phase) wire.Component {
-	return requiredChoice(name, "阶段", phaseChoices(), string(p))
+	return requiredChoice(name, "算作", phaseChoices(), string(p))
 }
 
 // caption is a small text that says something about the fold it is in.
@@ -604,27 +629,27 @@ func setUnit(p *kernel.Prop, raw string) { p.Unit = strings.TrimSpace(raw) }
 func optionsInput(_ *ctx, _ *kernel.Type, p kernel.Prop) []wire.Component {
 	text := strings.Join(p.Options, "、")
 	if utf8.RuneCountInString(text) > maxText {
-		return []wire.Component{caption("选项太多，不能在这里编辑，请在助手中修改")}
+		return []wire.Component{caption("选项太多，这里放不下，可以让助手改")}
 	}
-	return []wire.Component{textField("o_options", "选项", text, "用、分隔，如 甲、乙")}
+	return []wire.Component{textField("o_options", "选项", text, "用、分隔，例如 ★、★★、★★★")}
 }
 
 func setChoices(p *kernel.Prop, raw string) { p.Options = splitList(raw) }
 
 func targetInput(c *ctx, _ *kernel.Type, p kernel.Prop) []wire.Component {
-	return []wire.Component{requiredChoice("o_target", "指向", c.typeChoices(), p.Target)}
+	return []wire.Component{requiredChoice("o_target", "连到哪个分类", c.typeChoices(), p.Target)}
 }
 
 func setTarget(p *kernel.Prop, raw string) { p.Target = raw }
 
 func manyInput(_ *ctx, _ *kernel.Type, p kernel.Prop) []wire.Component {
-	return []wire.Component{toggleField("o_many", "多个", p.Many)}
+	return []wire.Component{toggleField("o_many", "可以连多条", p.Many)}
 }
 
 func setMany(p *kernel.Prop, raw string) { p.Many = raw == "true" }
 
 func backInput(_ *ctx, _ *kernel.Type, p kernel.Prop) []wire.Component {
-	return []wire.Component{textField("o_back", "反向名称", p.Back, "例如 任务")}
+	return []wire.Component{textField("o_back", "在对方那边叫什么", p.Back, "例如 笔记")}
 }
 
 func setBack(p *kernel.Prop, raw string) { p.Back = strings.TrimSpace(raw) }
@@ -632,25 +657,25 @@ func setBack(p *kernel.Prop, raw string) { p.Back = strings.TrimSpace(raw) }
 func viaInput(c *ctx, t *kernel.Type, p kernel.Prop) []wire.Component {
 	paths := c.viaPaths(t)
 	if len(paths) == 0 {
-		return []wire.Component{caption("没有可以汇总的关联，先给某个类型添加关联属性")}
+		return []wire.Component{caption("还没有可以统计的：要先有「连到别的条目」的填写项（例如 笔记出自哪本书），才能统计连着的条目。")}
 	}
 	choices := make([]wire.Choice, 0, len(paths))
 	for _, pa := range paths {
 		choices = append(choices, wire.Choice{Value: pa.value, Title: pa.title})
 	}
-	return []wire.Component{requiredChoice("o_via", "经由", choices, p.Via)}
+	return []wire.Component{requiredChoice("o_via", "统计哪些连着的条目", choices, p.Via)}
 }
 
 func setVia(p *kernel.Prop, raw string) { p.Via = raw }
 
 func opInput(_ *ctx, _ *kernel.Type, p kernel.Prop) []wire.Component {
-	return []wire.Component{requiredChoice("o_op", "汇总方式", aggChoices(), p.Op)}
+	return []wire.Component{requiredChoice("o_op", "怎么算", aggChoices(), p.Op)}
 }
 
 func setOp(p *kernel.Prop, raw string) { p.Op = raw }
 
 func ofInput(c *ctx, t *kernel.Type, p kernel.Prop) []wire.Component {
-	return []wire.Component{optionalChoice("o_of", "汇总字段", c.numericChoices(t), p.Of)}
+	return []wire.Component{optionalChoice("o_of", "算哪一项（求和、平均时用）", c.numericChoices(t), p.Of)}
 }
 
 func setOf(p *kernel.Prop, raw string) { p.Of = strings.TrimPrefix(raw, choicePrefix) }
@@ -673,7 +698,7 @@ func (c *ctx) editedType() (*kernel.Type, error) {
 	if t := c.typeOf(c.st.D); t != nil {
 		return t, nil
 	}
-	return nil, errors.New("没有这个类型")
+	return nil, errors.New("找不到这个分类，它可能刚被删掉了。请返回再看")
 }
 
 // putType saves a whole type: PutType checks it and migrates its records, and a refused change leaves the space as it was.
@@ -732,10 +757,10 @@ func nameAt(arg string, names []string, what string) (int, error) {
 	idx, name, _ := strings.Cut(arg, ":")
 	i, err := strconv.Atoi(idx)
 	if err != nil || i < 0 || i >= len(names) {
-		return 0, errors.New("没有这个" + what)
+		return 0, errors.New("找不到这个" + what + "，它可能刚被删掉了。请重新打开再试")
 	}
 	if names[i] != name {
-		return 0, errors.New("这个" + what + "已经变了，请重新打开再试")
+		return 0, errors.New("这个" + what + "刚被改过了。请重新打开再试")
 	}
 	return i, nil
 }
@@ -787,11 +812,11 @@ func (c *ctx) stageFrom(prefix string, old kernel.Stage) kernel.Stage {
 // refused: PutType would replace that type instead.
 func actTypeNew(c *ctx, _ string) (*wire.ActionResult, error) {
 	if c.sp == nil {
-		return nil, errors.New("还没有空间")
+		return nil, errors.New("还没有空间。请先从模板新建一个空间")
 	}
 	nt := kernel.Type{Key: strings.TrimSpace(c.sentOr("t_key", "")), Name: strings.TrimSpace(c.sentOr("t_name", ""))}
 	if typeIn(c.sp, nt.Key) != nil {
-		return nil, fmt.Errorf("已经有类型「%s」", nt.Key)
+		return nil, fmt.Errorf("已经有代号是「%s」的分类了，请换一个代号", nt.Key)
 	}
 	if err := c.putType(nt); err != nil {
 		return nil, err
@@ -837,7 +862,7 @@ func actStageSave(c *ctx, arg string) (*wire.ActionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	i, err := slotOf(arg, stageNames(t), "阶段")
+	i, err := slotOf(arg, stageNames(t), "状态")
 	if err != nil {
 		return nil, err
 	}
@@ -863,12 +888,12 @@ func actStageUp(c *ctx, arg string) (*wire.ActionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	i, err := nameAt(arg, stageNames(t), "阶段")
+	i, err := nameAt(arg, stageNames(t), "状态")
 	if err != nil {
 		return nil, err
 	}
 	if i == 0 {
-		return nil, errors.New("已经在最前面")
+		return nil, errors.New("已经在最前面了")
 	}
 	nt := cloneType(t)
 	nt.Flow[i-1], nt.Flow[i] = nt.Flow[i], nt.Flow[i-1]
@@ -885,7 +910,7 @@ func actStageDrop(c *ctx, arg string) (*wire.ActionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	i, err := nameAt(arg, stageNames(t), "阶段")
+	i, err := nameAt(arg, stageNames(t), "状态")
 	if err != nil {
 		return nil, err
 	}
@@ -895,10 +920,10 @@ func actStageDrop(c *ctx, arg string) (*wire.ActionResult, error) {
 		nt.Flow = nil
 	}
 	if err := c.putType(nt); err != nil {
-		return nil, err
+		return nil, hinted(err, "先把这个状态里的条目挪到别的状态，再删除")
 	}
 	c.st.F = ""
-	return &wire.ActionResult{Toast: "已删除阶段"}, nil
+	return &wire.ActionResult{Toast: "已删除状态"}, nil
 }
 
 // actPropNew adds a property of the kind named by the argument. A key the type already has is refused: PutType would
@@ -910,11 +935,11 @@ func actPropNew(c *ctx, arg string) (*wire.ActionResult, error) {
 	}
 	k, ok := kernel.KindOf(arg)
 	if !ok {
-		return nil, fmt.Errorf("没有属性类型「%s」", arg)
+		return nil, fmt.Errorf("没有「%s」这种填写项。请从列表里重新选一种", arg)
 	}
 	key := strings.TrimSpace(c.sentOr("p_key", ""))
 	if propAt(t, key) >= 0 {
-		return nil, fmt.Errorf("已经有属性「%s」", key)
+		return nil, fmt.Errorf("这个分类已经有代号是「%s」的填写项了，请换一个代号", key)
 	}
 	nt := cloneType(t)
 	nt.Props = append(nt.Props, c.applyProp(kernel.Prop{Key: key, Kind: k.Name}, k))
@@ -933,11 +958,11 @@ func actPropSave(c *ctx, key string) (*wire.ActionResult, error) {
 	}
 	i := propAt(t, key)
 	if i < 0 {
-		return nil, errors.New("没有这个属性")
+		return nil, errors.New("找不到这个填写项，它可能刚被删掉了。请重新打开再试")
 	}
 	k, ok := kernel.KindOf(t.Props[i].Kind)
 	if !ok {
-		return nil, errors.New("没有这个属性类型")
+		return nil, errors.New("这个填写项的种类认不出来，这里改不了。可以让助手看看")
 	}
 	nt := cloneType(t)
 	nt.Props[i] = c.applyProp(t.Props[i], k)
@@ -956,10 +981,10 @@ func actPropUp(c *ctx, key string) (*wire.ActionResult, error) {
 	}
 	i := propAt(t, key)
 	if i < 0 {
-		return nil, errors.New("没有这个属性")
+		return nil, errors.New("找不到这个填写项，它可能刚被删掉了。请重新打开再试")
 	}
 	if i == 0 {
-		return nil, errors.New("已经在最前面")
+		return nil, errors.New("已经在最前面了")
 	}
 	nt := cloneType(t)
 	nt.Props[i-1], nt.Props[i] = nt.Props[i], nt.Props[i-1]
@@ -975,7 +1000,7 @@ func actPropDrop(c *ctx, key string) (*wire.ActionResult, error) {
 	}
 	i := propAt(t, key)
 	if i < 0 {
-		return nil, errors.New("没有这个属性")
+		return nil, errors.New("找不到这个填写项，它可能刚被删掉了。请重新打开再试")
 	}
 	nt := cloneType(t)
 	nt.Props = slices.Delete(nt.Props, i, i+1)
@@ -983,10 +1008,13 @@ func actPropDrop(c *ctx, key string) (*wire.ActionResult, error) {
 		nt.Props = nil
 	}
 	if err := c.putType(nt); err != nil {
-		return nil, err
+		if strings.Contains(err.Error(), "「"+key+"」") {
+			return nil, fmt.Errorf("删不掉「%s」：它还用在「列表里的样子」、某个显示方式或统计里。先在那里去掉它，再删除", cut(t.Props[i].Name, maxTitle))
+		}
+		return nil, hinted(err, "它可能还用在「列表里的样子」、某个显示方式或统计里，先在那里去掉，再删除")
 	}
 	c.st.F = ""
-	return &wire.ActionResult{Toast: "已删除属性"}, nil
+	return &wire.ActionResult{Toast: "已删除填写项"}, nil
 }
 
 // actCardSave changes the lead, the pills and the progress of the card. A pill names a field of the type.
@@ -1027,7 +1055,7 @@ func actViewSave(c *ctx, arg string) (*wire.ActionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	i, err := slotOf(arg, viewNames(t), "视图")
+	i, err := slotOf(arg, viewNames(t), "显示方式")
 	if err != nil {
 		return nil, err
 	}
@@ -1079,7 +1107,7 @@ func actViewDrop(c *ctx, arg string) (*wire.ActionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	i, err := nameAt(arg, viewNames(t), "视图")
+	i, err := nameAt(arg, viewNames(t), "显示方式")
 	if err != nil {
 		return nil, err
 	}
@@ -1092,5 +1120,5 @@ func actViewDrop(c *ctx, arg string) (*wire.ActionResult, error) {
 		return nil, err
 	}
 	c.st.F = ""
-	return &wire.ActionResult{Toast: "已删除视图"}, nil
+	return &wire.ActionResult{Toast: "已删除显示方式"}, nil
 }

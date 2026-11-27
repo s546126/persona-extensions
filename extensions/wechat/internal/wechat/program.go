@@ -26,7 +26,7 @@ func Item() wire.ConnectorItem {
 const MaxText = 3500
 
 // Network is where it goes: iLink and WeChat's media CDN.
-var Network = []string{"*.weixin.qq.com"}
+var Network = []string{"*.weixin.qq.com", "*.wechat.com"}
 
 // Channel is the channel it contributes (docs/extensions/channels.md): pictures, documents, videos and voice (WeChat's
 // own transcript, or decrypted audio delivered as a file when WeChat sends no transcript) come in, plain text goes out
@@ -153,10 +153,16 @@ func (p *program) channel(ctx context.Context, method string, params json.RawMes
 		}
 		ctx, cancel := context.WithTimeout(ctx, sendDeadline) // waiting for an earlier send of the ref counts too
 		defer cancel()
-		res, err := p.sent.do(ctx, sp.Ref, b.sendKey(sp), func() (wire.ChannelSendResult, error) { return b.Send(ctx, sp) })
+		gen := b.sendGeneration() // the binding the call is for: after waiting for the ref, it goes there or nowhere
+		res, err := p.sent.do(ctx, sp.Ref, sendKey(gen, sp), func() (wire.ChannelSendResult, error) { return b.sendIn(ctx, gen, sp) })
 		switch {
-		case errors.Is(err, errCannotSend):
+		case errors.Is(err, errCannotSend), errors.Is(err, errRebound):
 			return nil, ext.CannotSend(err.Error())
+		case err != nil && b.sendGeneration() != gen:
+			// Failed (out of time waiting for the ref, or a send that ran across the change) after the WeChat the call
+			// came in for was unbound: the hub's retry would come in for the WeChat bound now, so it hears cannot_send.
+			log.Printf("wechat: send reply_to=%q ref=%q failed after the WeChat it came in for was unbound: %v", sp.ReplyTo, sp.Ref, err)
+			return nil, ext.CannotSend(errRebound.Error())
 		case errors.Is(err, errStillSending):
 			log.Printf("wechat: send reply_to=%q ref=%q stopped: out of time (%s at most) waiting for the ref's earlier send",
 				sp.ReplyTo, sp.Ref, sendDeadline)
@@ -192,7 +198,7 @@ func (s hubSecrets) Delete(ctx context.Context) error { return s.hub.DeleteSecre
 // doneMost is how many sent refs the program remembers.
 const doneMost = 256
 
-// sentRefs runs each channel.send once by its ref and key (Bot.sendKey: the binding and the content; a failed one may
+// sentRefs runs each channel.send once by its ref and key (sendKey: the binding and the content; a failed one may
 // go again). A send still running holds its ref, so the hub's retry of it (it timed out waiting) waits for that send
 // instead of sending the message again. The same ref with another key is another message: it waits for a send of the
 // ref still running, then goes, and replaces what was remembered for the ref. A wait ends with ctx: errStillSending.
@@ -200,10 +206,12 @@ type sentRefs struct {
 	mu    sync.Mutex
 	sent  map[string]*sentRef
 	order []string // the refs sent successfully, oldest first
+	// waiting, when set (tests), is told the ref each time a send starts waiting for an earlier send of it.
+	waiting func(ref string)
 }
 
 type sentRef struct {
-	key  string // Bot.sendKey
+	key  string // sendKey
 	done chan struct{}
 	res  wire.ChannelSendResult
 	err  error
@@ -231,6 +239,9 @@ func (r *sentRefs) do(ctx context.Context, ref, key string, send func() (wire.Ch
 		default:
 		}
 		r.mu.Unlock()
+		if r.waiting != nil {
+			r.waiting(ref)
+		}
 		select {
 		case <-prev.done:
 		case <-ctx.Done():

@@ -77,7 +77,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err != nil {
 			return nil, errors.New("invalid favorite value")
 		}
-		raw, _ := json.Marshal(favoriteArgs{ItemID: st.ItemID, Favorite: favorite})
+		raw, _ := json.Marshal(favoriteArgs{ItemID: st.ItemID, Favorite: &favorite})
 		out, err := a.doAction(ctx, "ui-favorite:"+st.DraftID, "jellyfin_set_favorite", raw)
 		if err != nil {
 			return nil, err
@@ -97,13 +97,22 @@ const maxViewRecords = 250
 // batch can be loaded and where it starts.
 func (a *app) collectItems(ctx context.Context, userID, view, query string, start int) ([]mediaItem, int, bool, error) {
 	var out []mediaItem
+	seen := map[string]bool{}
 	next, more := 0, false
 	for pos := 0; len(out) < maxViewRecords; pos = next {
 		page, err := a.client.items(ctx, userID, view, query, pos)
 		if err != nil {
 			return nil, 0, false, err
 		}
-		out = append(out, page.Items...)
+		for _, item := range page.Items {
+			if item.ID != "" {
+				if seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+			}
+			out = append(out, item)
+		}
 		next = pos + len(page.Items)
 		more = len(page.Items) > 0 && next < page.TotalRecordCount
 		if !more || pos >= start {
@@ -140,10 +149,18 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if st.View == "" {
 		st.View = "resume"
 	}
-	items, next, more, err := a.collectItems(ctx, me.ID, st.View, st.Query, st.StartIndex)
-	a.record(err)
-	if err != nil {
-		return nil, err
+	if st.View != "resume" && st.View != "favorites" && st.View != "search" {
+		return nil, errors.New("invalid media view")
+	}
+	var items []mediaItem
+	var next int
+	var more bool
+	if st.View != "search" || strings.TrimSpace(st.Query) != "" {
+		items, next, more, err = a.collectItems(ctx, me.ID, st.View, st.Query, st.StartIndex)
+		a.record(err)
+		if err != nil {
+			return nil, err
+		}
 	}
 	v := &wire.View{Title: t.watching, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}, Filter: &wire.Filter{Name: "view", Title: t.watching, Value: st.View, Action: wire.Action{ID: "view"}, Choices: []wire.Choice{{Value: "resume", Title: t.resume}, {Value: "favorites", Title: t.favorites}, {Value: "search", Title: t.searchView}}}}
 	section := wire.Section{Title: t.items}
@@ -165,6 +182,13 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 
 func detailView(r *ext.UIRequest, st pageState, item mediaItem) *wire.View {
 	t := textsFor(r.Locale)
+	name := clipText(strings.TrimSpace(item.Name), 1800)
+	if name == "" {
+		name = clipText(strings.TrimSpace(item.ID), 1800)
+	}
+	if name == "" {
+		name = t.item
+	}
 	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %d · %.1f%%", item.Type, item.ProductionYear, item.UserData.PlayedPercentage), 1800)}}
 	if item.SeriesName != "" {
 		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %s · S%02dE%02d", item.SeriesName, item.SeasonName, item.ParentIndexNumber, item.IndexNumber), 1800)})
@@ -174,8 +198,8 @@ func detailView(r *ext.UIRequest, st pageState, item mediaItem) *wire.View {
 	if item.UserData.IsFavorite {
 		title, favorite = t.unfavorite, false
 	}
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: title, Action: &wire.Action{ID: "favorite", Values: map[string]string{"favorite": strconv.FormatBool(favorite)}, Confirm: title + "\n" + item.Name}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.item, Items: items}}}
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: title, Action: &wire.Action{ID: "favorite", Values: map[string]string{"favorite": strconv.FormatBool(favorite)}, Confirm: clipText(title+"\n"+name, 1800)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
+	v := &wire.View{Title: name, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.item, Items: items}}}
 	if item.Overview != "" {
 		v.Sections = append(v.Sections, wire.Section{Title: t.overview, Items: textComponents(clipText(item.Overview, 20000))})
 	}

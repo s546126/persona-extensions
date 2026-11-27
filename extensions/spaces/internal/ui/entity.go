@@ -23,8 +23,9 @@ const (
 	factMost    = 8
 	badgeMost   = 4
 	addLabel    = "添加…" // the first choice of a relation with many targets: adds the one chosen
-	noLinks     = "没有关联"
-	noBacklinks = "没有被关联"
+	noLinks     = "还没连到别的条目"
+	noBacklinks = "还没有别的条目连到它"
+	stageFooter = "这里只列出现在能改成的状态，一次挪一步"
 )
 
 // entityPage is the entity page of c.e, pushed over the page below: a header with the badges and facts of the entity,
@@ -48,7 +49,7 @@ func (c *ctx) entityPage() (*wire.View, error) {
 	}
 	v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{
 		button("编辑", &wire.Action{ID: "fold:edit"}, wire.ButtonRoleNormal),
-		button("衍生", &wire.Action{ID: "fold:derive"}, wire.ButtonRoleNormal),
+		button("由它新建", &wire.Action{ID: "fold:derive"}, wire.ButtonRoleNormal),
 		button("删除", &wire.Action{ID: "delete", Confirm: c.deleteConfirm(e)}, wire.ButtonRoleDestructive),
 	}})
 	return v, nil
@@ -58,11 +59,11 @@ func (c *ctx) entityPage() (*wire.View, error) {
 // is a base that the kernel would not have stored.
 func (c *ctx) shown() (*kernel.Entity, *kernel.Type, error) {
 	if c.e == nil {
-		return nil, nil, errors.New("没有这条记录")
+		return nil, nil, errors.New("找不到这一条，它可能刚被删掉了。请返回列表再看")
 	}
 	t := typeIn(c.sp, c.e.Type)
 	if t == nil {
-		return nil, nil, fmt.Errorf("记录「%s」的类型「%s」不存在", c.e.Title, c.e.Type)
+		return nil, nil, fmt.Errorf("「%s」所在的分类「%s」找不到了。请返回列表再看", c.e.Title, c.e.Type)
 	}
 	return c.e, t, nil
 }
@@ -79,7 +80,7 @@ func (c *ctx) entityHead(t *kernel.Type, e *kernel.Entity) []wire.Component {
 	}
 	badged := map[string]bool{}
 	for _, key := range t.CardOrDefault().Pills {
-		p, ok := c.sp.Field(t, key)
+		p, ok := c.fieldOf(t, key)
 		k, known := kernel.KindOf(p.Kind)
 		if !ok || !known || (k.Input != kernel.InChoice && k.Input != kernel.InToggle) {
 			continue
@@ -148,7 +149,7 @@ func httpsURL(s string) bool {
 func (c *ctx) lifecycle(t *kernel.Type, e *kernel.Entity) wire.Section {
 	moves := t.Moves(e.Status)
 	if 1+len(moves) > segmentMost {
-		return wire.Section{Title: "生命周期", Items: moveButtons(t, e, moves)}
+		return wire.Section{Title: "状态", Footer: stageFooter, Items: moveButtons(t, e, moves)}
 	}
 	choices := []wire.Choice{}
 	for _, st := range t.Flow {
@@ -156,7 +157,7 @@ func (c *ctx) lifecycle(t *kernel.Type, e *kernel.Entity) wire.Section {
 			choices = append(choices, wire.Choice{Value: st.Name, Title: st.Name})
 		}
 	}
-	return wire.Section{Title: "生命周期", Items: []wire.Component{{
+	return wire.Section{Title: "状态", Footer: stageFooter, Items: []wire.Component{{
 		Type: wire.ComponentSegmented, Name: "stage", Value: e.Status, Choices: choices,
 		Action: &wire.Action{ID: "status"},
 	}}}
@@ -188,7 +189,7 @@ func (c *ctx) outLinks(t *kernel.Type, e *kernel.Entity) wire.Section {
 		if target == nil {
 			continue
 		}
-		p, _ := c.sp.Field(t, l.Prop)
+		p, _ := c.fieldOf(t, l.Prop)
 		row := c.linkRow(target, p.Name)
 		if editing && p.Many {
 			row.Value = "移除"
@@ -196,7 +197,7 @@ func (c *ctx) outLinks(t *kernel.Type, e *kernel.Entity) wire.Section {
 		}
 		items = append(items, row)
 	}
-	return wire.Section{Title: "关联 →", Items: orEmpty(capped(items), noLinks)}
+	return wire.Section{Title: "它连到的", Items: orEmpty(capped(items), noLinks)}
 }
 
 // inLinks is the section of the links into the entity: a row per source, subtitled with the relation's back label (the
@@ -210,7 +211,7 @@ func (c *ctx) inLinks(e *kernel.Entity) wire.Section {
 		}
 		items = append(items, c.linkRow(src, c.backLabel(src, l.Prop)))
 	}
-	return wire.Section{Title: "← 被关联", Items: orEmpty(capped(items), noBacklinks)}
+	return wire.Section{Title: "连到它的", Items: orEmpty(capped(items), noBacklinks)}
 }
 
 // linkRow is the row of a linked entity: its title, the label of the link, its toned status and its type's icon; it
@@ -233,13 +234,13 @@ func (c *ctx) linkRow(target *kernel.Entity, label string) wire.Component {
 // 衍生.
 func (c *ctx) backLabel(src *kernel.Entity, prop string) string {
 	if prop == "origin" {
-		return "衍生"
+		return "由它新建"
 	}
 	st := typeIn(c.sp, src.Type)
 	if st == nil {
 		return prop
 	}
-	p, _ := c.sp.Field(st, prop)
+	p, _ := c.fieldOf(st, prop)
 	if p.Back != "" {
 		return p.Back
 	}
@@ -252,7 +253,7 @@ func capped(items []wire.Component) []wire.Component {
 		return items
 	}
 	rest := wire.Component{
-		Type: wire.ComponentText, Text: fmt.Sprintf("还有 %d 条关联没有显示", len(items)-linksMost), Style: wire.TextStyleCaption,
+		Type: wire.ComponentText, Text: fmt.Sprintf("还有 %d 条没有显示", len(items)-linksMost), Style: wire.TextStyleCaption,
 	}
 	return append(items[:linksMost:linksMost], rest)
 }
@@ -276,7 +277,7 @@ func (c *ctx) deleteConfirm(e *kernel.Entity) string {
 	if n == 0 {
 		return fmt.Sprintf("删除「%s」？", cut(e.Title, maxTitle))
 	}
-	return fmt.Sprintf("删除「%s」？有 %d 条关联会被解除。", cut(e.Title, maxTitle), n)
+	return fmt.Sprintf("删除「%s」？有 %d 条别的条目连着它，删除后这些连接会断开。", cut(e.Title, maxTitle), n)
 }
 
 // editFold is the edit fold: the title, then one field for each stored property, built from the descriptor, then 保存
@@ -344,9 +345,10 @@ func (c *ctx) deriveFold(e *kernel.Entity) wire.Section {
 		}
 	}
 	return wire.Section{Items: []wire.Component{
-		{Type: wire.ComponentField, Name: "type", Label: "类型", Kind: wire.FieldKindChoice, Value: def, Choices: choices},
+		caption(cut("用「"+e.Title+"」新建一条别的分类的条目，能对上的内容会带过去，两条会连在一起；原来这条不变。", maxText)),
+		{Type: wire.ComponentField, Name: "type", Label: "新建成哪个分类", Kind: wire.FieldKindChoice, Value: def, Choices: choices},
 		{Type: wire.ComponentField, Name: "title", Label: "标题", Kind: wire.FieldKindText, Placeholder: cut(e.Title, maxTitle)},
-		button("衍生", &wire.Action{ID: "derive", Submit: true}, wire.ButtonRoleNormal),
+		button("新建", &wire.Action{ID: "derive", Submit: true}, wire.ButtonRoleNormal),
 	}}
 }
 
@@ -359,7 +361,7 @@ func actStatus(c *ctx, arg string) (*wire.ActionResult, error) {
 	}
 	stage := c.pick(arg, "stage")
 	if stage == "" {
-		return nil, errors.New("没有选择阶段")
+		return nil, errors.New("还没选状态。请点一个状态")
 	}
 	if _, err := c.sp.PutEntity(c.b, kernel.EntityInput{ID: e.ID, Status: &stage}, c.now); err != nil {
 		return nil, err
@@ -378,7 +380,7 @@ func actUpdate(c *ctx, _ string) (*wire.ActionResult, error) {
 	if sent, ok := c.r.Values["title"]; ok {
 		title := strings.TrimSpace(sent)
 		if title == "" {
-			return nil, errors.New("记录需要一个标题")
+			return nil, errors.New("标题不能是空的。请写上标题再保存")
 		}
 		in.Title = &title
 	}
@@ -433,7 +435,7 @@ func actDerive(c *ctx, _ string) (*wire.ActionResult, error) {
 	}
 	typ := strings.TrimPrefix(c.r.Values["type"], choicePrefix)
 	if typ == "" {
-		return nil, errors.New("先选择一个类型")
+		return nil, errors.New("还没选分类。请选一个分类再点新建")
 	}
 	title := strings.TrimSpace(c.r.Values["title"])
 	ne, err := c.sp.Derive(c.b, e.ID, typ, title, c.now)
@@ -442,7 +444,7 @@ func actDerive(c *ctx, _ string) (*wire.ActionResult, error) {
 	}
 	c.st.F = ""
 	return &wire.ActionResult{
-		Toast: "已衍生「" + cut(ne.Title, maxTitle) + "」",
+		Toast: "已新建「" + cut(ne.Title, maxTitle) + "」",
 		Push:  ext.Open("open:"+ne.ID, PageUI, state{S: c.sp.ID, E: ne.ID}, cut(ne.Title, maxTitle)).Push,
 	}, nil
 }
@@ -456,11 +458,11 @@ func actUnlink(c *ctx, arg string) (*wire.ActionResult, error) {
 	key, id, _ := strings.Cut(arg, ":")
 	p, ok := propOf(t, key)
 	if !ok {
-		return nil, errors.New("没有这个关联")
+		return nil, errors.New("这条连接已经不在了。请返回再打开这一条看看")
 	}
 	k, known := kernel.KindOf(p.Kind)
 	if !known || k.Refs == nil || !slices.Contains(k.Refs(e.Values[key]), id) {
-		return nil, errors.New("没有这个关联")
+		return nil, errors.New("这条连接已经不在了。请返回再打开这一条看看")
 	}
 	rest := slices.DeleteFunc(slices.Clone(k.Refs(e.Values[key])), func(x string) bool { return x == id })
 	vals := map[string]any{key: nil}

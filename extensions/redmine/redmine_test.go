@@ -207,7 +207,7 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 		t.Fatal("restart repeated creation")
 	}
 	key, _ := json.Marshal(createArgs{ProjectID: 7, Subject: "Keep reading context", Description: "Preserve source context."})
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(key), Status: "pending", StartedAt: time.Now()}})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "redmine_create_issue:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

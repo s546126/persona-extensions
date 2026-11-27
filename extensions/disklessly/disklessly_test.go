@@ -43,18 +43,18 @@ disklessly 0.3.0
 Filesystem     1B-blocks         Used    Available Use% Mounted on
 /dev/sda1   214748364800 182536110080  32212254720  85% /
 @@SECTION:CACHES
-cache-gobuild	go-cache	Go 编译构建缓存 (go-build)	/home/dev/.cache/go-build	4404019	safe	可随时重建的 Go 编译器构建缓存
-cache-gomod	go-cache	Go 模块下载缓存 (pkg/mod)	/home/dev/go/pkg/mod	3145728	safe	可重新下载的 Go 依赖模块缓存
-cache-pnpm	node-python-cache	pnpm 内容寻址缓存 (pnpm/store)	/home/dev/.local/share/pnpm/store	2621440	safe	可重新拉取的 pnpm 全局存储
-cache-uv	node-python-cache	uv Python 极速缓存 (~/.cache/uv)	/home/dev/.cache/uv	1572864	safe	可重新下载的 uv 包缓存
-cache-cargo-registry	rust-xcode-build	Cargo 索引与源码包 (~/.cargo/registry)	/home/dev/.cargo/registry	1048576	safe	可重新同步的 Rust Crates 缓存
-cache-playwright	rust-xcode-build	Playwright 浏览器缓存 (ms-playwright)	/home/dev/.cache/ms-playwright	1258291	review	无头浏览器镜像，清理后首次运行需重新下载
+cache-gobuild	go-cache	Go 编译缓存	/home/dev/.cache/go-build	4404019	safe	Go 编译时留下的缓存，删了下次编译会自动再生成
+cache-gomod	go-cache	Go 下载的依赖包	/home/dev/go/pkg/mod	3145728	safe	Go 项目下载过的依赖包，删了下次用到时会重新下载
+cache-pnpm	node-python-cache	pnpm 存的包	/home/dev/.local/share/pnpm/store	2621440	safe	pnpm 给所有项目共用的一份包，删了下次安装时会重新下载
+cache-uv	node-python-cache	uv 下载的 Python 包	/home/dev/.cache/uv	1572864	safe	uv 下载过的 Python 包，删了下次用到时会重新下载
+cache-cargo-registry	rust-xcode-build	Rust 下载的依赖包（Cargo）	/home/dev/.cargo/registry	1048576	safe	Rust 项目下载过的依赖包，删了下次编译时会重新下载
+cache-playwright	rust-xcode-build	Playwright 自动测试用的浏览器	/home/dev/.cache/ms-playwright	1258291	review	自动测试用的几个浏览器，删了下次跑测试前要重新下载，比较大、比较慢
 @@SECTION:TMP_LOGS
 Archived and active journals take up 1.5G in the file system.
-logs-rotated	tmp-logs	系统轮转归档日志 (/var/log/*.gz)	/var/log	524288	safe	已轮转压缩的历史系统日志，不影响当前服务写入
-tmp-stale	tmp-logs	/tmp 陈旧构建与临时产物 (>7天)	/tmp	314572	safe	超过 7 天或已退出的 go-build/playwright/npm 临时目录
+logs-rotated	tmp-logs	系统换下来的旧日志	/var/log	524288	safe	/var/log 里换下来的旧日志文件（.gz 压缩的和 .1、.old 结尾的），正在写的日志不碰
+tmp-stale	tmp-logs	临时文件夹里的旧文件和编译剩下的文件	/tmp	314572	safe	临时文件夹 /tmp 里编译和安装剩下的文件（go-build、playwright、npm、pnpm、cargo-install 等开头的，最近的也删）和放了 7 天以上的文件
 @@SECTION:DOCKER
-docker-dangling	docker-unused	Docker 悬空镜像 (dangling images)	docker://dangling-images	2097152	safe	未被任何运行或停止容器引用的悬空镜像层
+docker-dangling	docker-unused	Docker 没名字的旧镜像	docker://dangling-images	2097152	safe	重新构建后被换下来、已经没有名字的旧镜像，没有任何容器（不管在不在运行）用到它们
 docker-buildx	3.2GB (100%)
 @@SECTION:SESSIONS
 tool	claude	Claude Code	/home/dev/.claude/projects	18	245760	42	1887436
@@ -85,8 +85,8 @@ armbox-arm64
 Filesystem     1024-blocks      Used Available Capacity Mounted on
 /dev/sda1        104857600  96468992   8388608      92% /
 @@SECTION:CACHES
-cache-gobuild	go-cache	Go 编译构建缓存 (go-build)	/home/armbox/.cache/go-build	5242880	safe	可随时重建的 Go 编译器构建缓存
-cache-pnpm	node-python-cache	pnpm 内容寻址缓存 (pnpm/store)	/home/armbox/.local/share/pnpm/store	4194304	safe	可重新拉取的 pnpm 全局存储
+cache-gobuild	go-cache	Go 编译缓存	/home/armbox/.cache/go-build	5242880	safe	Go 编译时留下的缓存，删了下次编译会自动再生成
+cache-pnpm	node-python-cache	pnpm 存的包	/home/armbox/.local/share/pnpm/store	4194304	safe	pnpm 给所有项目共用的一份包，删了下次安装时会重新下载
 @@SECTION:TMP_LOGS
 Archived and active journals take up 800M in the file system.
 @@SECTION:DOCKER
@@ -385,11 +385,11 @@ func TestUIViewsAndActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(rArch.View)
-	if !strings.Contains(rArch.Toast, "已开始上传") {
+	if !strings.Contains(rArch.Toast, "搬到网盘") {
 		t.Fatalf("unexpected toast: %s", rArch.Toast)
 	}
 	a.waitJobs()
-	if j := a.jobSnapshot()["local"]; !strings.Contains(j.Note, "冷会话已上云") || !strings.Contains(j.Note, "保护 1 个被引用会话") {
+	if j := a.jobSnapshot()["local"]; !strings.Contains(j.Note, "搬完了：1 个") || !strings.Contains(j.Note, "1 个还在用的对话留在电脑上没动") {
 		t.Fatalf("offload outcome: %+v", j)
 	}
 
@@ -494,8 +494,8 @@ func TestMCPOverStdio(t *testing.T) {
 	}
 	listRes := rpc("tools/list", map[string]any{})
 	tList, _ := listRes["tools"].([]any)
-	if len(tList) != len(tools) || len(tools) != 12 {
-		t.Fatalf("tools/list count = %d, want 11", len(tList))
+	if len(tList) != len(tools) || len(tools) != 14 {
+		t.Fatalf("tools/list count = %d, want 14", len(tList))
 	}
 
 	// 1. Upsert remote machine armbox

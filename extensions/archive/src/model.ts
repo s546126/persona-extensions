@@ -15,11 +15,18 @@ export function configFrom(raw: unknown): Config {
   if (value !== "all" && value !== "texts" && value !== "audio" && value !== "movies" && value !== "image") throw new ReadError("invalid");
   return { media: value };
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
 export function queryText(value: unknown): string {
   if (typeof value !== "string") throw new ReadError("invalid");
-  if (/[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 160) throw new ReadError("invalid");
   return query;

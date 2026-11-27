@@ -238,7 +238,7 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 		t.Fatal("restart repeated creation")
 	}
 	key, _ := json.Marshal(createArgs{ProjectHref: "/api/v3/projects/7", TypeHref: "/api/v3/types/1", Subject: "Keep reading context", Description: "Preserve source context."})
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(key), Status: "pending", StartedAt: time.Now()}})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "openproject_create_work_package:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

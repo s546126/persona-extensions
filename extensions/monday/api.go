@@ -99,21 +99,26 @@ const boardsPageSize = 50
 // maxBoards keeps the board list within the SDK's component limit.
 const maxBoards = 250
 
+// maxBoardPages caps paginated board reads so repeating pages cannot loop forever.
+const maxBoardPages = 20
+
 func (c *client) boards(ctx context.Context) ([]board, error) {
 	var boards []board
 	seen := map[int64]bool{}
-	for page := 1; len(boards) < maxBoards; page++ {
+	for page := 1; page <= maxBoardPages && len(boards) < maxBoards; page++ {
 		var out boardPage
 		if err := c.query(ctx, fmt.Sprintf(`query { boards(limit: %d, page: %d) { id name url } }`, boardsPageSize, page), &out); err != nil {
 			return nil, err
 		}
+		added := 0
 		for _, item := range out.Boards {
-			if !seen[item.ID] {
+			if item.ID > 0 && !seen[item.ID] {
 				seen[item.ID] = true
 				boards = append(boards, item)
+				added++
 			}
 		}
-		if len(out.Boards) < boardsPageSize {
+		if added == 0 || len(out.Boards) < boardsPageSize {
 			break
 		}
 	}
@@ -125,11 +130,13 @@ func (c *client) board(ctx context.Context, id int64) (board, error) {
 		return board{}, errors.New("board ID must be positive")
 	}
 	var out boardPage
-	err := c.query(ctx, fmt.Sprintf(`query { boards(ids: [%d]) { id name url columns { id title type settings_str } } }`, id), &out)
+	if err := c.query(ctx, fmt.Sprintf(`query { boards(ids: [%d]) { id name url columns { id title type settings_str } } }`, id), &out); err != nil {
+		return board{}, err
+	}
 	if len(out.Boards) != 1 {
 		return board{}, errNotFound
 	}
-	return out.Boards[0], err
+	return out.Boards[0], nil
 }
 
 func (c *client) items(ctx context.Context, boardID int64, cursor string) (itemsPage, error) {

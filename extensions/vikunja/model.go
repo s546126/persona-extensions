@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type user struct {
 	ID       int64  `json:"id"`
@@ -63,8 +66,14 @@ func (t task) dueLabel() string {
 
 // subtitle is the identifier, followed by the due date when the task has one.
 func (t task) subtitle() string {
-	if due := t.due(); due != "" {
-		return t.Identifier + " · " + due
+	id := strings.TrimSpace(t.Identifier)
+	due := strings.TrimSpace(t.due())
+	switch {
+	case id != "" && due != "":
+		return id + " · " + due
+	case id != "":
+		return id
+	default:
+		return due
 	}
-	return t.Identifier
 }

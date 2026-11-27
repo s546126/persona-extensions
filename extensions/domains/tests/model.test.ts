@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { domainName, lookupURL, parseRegistration, rdapService, ReadError, statusURL } from "../src/model.ts";
+import { clip, domainName, lookupURL, parseRegistration, rdapService, ReadError, statusURL } from "../src/model.ts";
+import { readTime } from "../src/i18n.ts";
 import { bootstrap, registration } from "./fixtures.ts";
 import { decodeHistory, encodeHistory, MemoryHistory } from "../src/store.ts";
-import { encodeState, readState, transition } from "../src/page.tsx";
+import { Domains } from "../src/service.ts";
+import { encodeState, page, readState, transition } from "../src/page.tsx";
+import { Renderer } from "@persona/extension/ui";
 
 test("one domain is normalized and IDNs are kept separate from URLs", () => {
   assert.deepEqual(domainName("EXAMPLE.com."), { ascii: "example.com", unicode: "example.com" });
@@ -58,4 +61,103 @@ test("navigation accepts only one valid domain and keeps history reachable", () 
   for (const value of ["", "example", "https://example.com", "bad\n.com", 2, null, { domain: ["example.com"] }]) assert.equal(transition(readState(undefined), "search", value).v, "lookup");
   assert.equal(transition(readState(undefined), "domain:example.com").v, "result");
   assert.equal(transition(readState(undefined), "domain:https://attacker.invalid").v, "lookup");
+});
+
+test("RDAP timezone offsets, upstream ldhName errors, clip, readTime, and history normalization handle edge cases", () => {
+  // Valid RFC 3339 timestamp with non-zero offset crossing UTC midnight must be accepted.
+  const tzResult = parseRegistration({
+    ...registration,
+    events: [{ eventAction: "registration", eventDate: "2026-01-01T23:30:00-05:00" }],
+  }, "example.com", 1000);
+  assert.equal(tzResult.events[0].at, "2026-01-02T04:30:00.000Z");
+
+  // Impossible local calendar day with offset must still fail.
+  assert.throws(
+    () => parseRegistration({ ...registration, events: [{ eventAction: "registration", eventDate: "2026-02-30T23:30:00-05:00" }] }, "example.com", 0),
+    (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+  );
+
+  // Malformed upstream ldhName must report bad_answer, not user-input invalid.
+  assert.throws(
+    () => parseRegistration({ ...registration, ldhName: "not a domain!!" }, "example.com", 0),
+    (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+  );
+
+  // Overlong self URL (> 4096 chars) must be rejected as bad_answer.
+  assert.throws(
+    () => parseRegistration({ ...registration, links: [{ rel: "self", href: "https://rdap.verisign.com/com/v1/domain/" + "a".repeat(4100) }] }, "example.com", 0),
+    (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+  );
+
+  // clip must strictly respect rune budget and non-positive bounds.
+  assert.equal(clip("abcdef", 0), "");
+  assert.equal(clip("abcdef", 1), "a");
+  assert.equal(clip("abcdef", 4), "abc…");
+  assert.equal(Array.from(clip("😀😀😀😀😀", 4)).length, 4);
+
+  // Lone surrogates must be rejected in domainName.
+  assert.throws(() => domainName("bad\ud800.com"), (error: unknown) => error instanceof ReadError && error.code === "invalid");
+
+  // readTime must never throw on invalid timezone, locale, or timestamp.
+  assert.doesNotThrow(() => readTime(Date.UTC(2026, 0, 2), "Not/A_Zone", "bad_locale_!!!"));
+  assert.equal(readTime(Number.NaN, "UTC", "en"), "");
+
+  // Case-duplicate domains in encoded history must be rejected after ASCII normalization.
+  const dup = Buffer.from(JSON.stringify({ schema_version: 1, domains: ["EXAMPLE.com", "example.com"] }), "utf8").toString("base64");
+  assert.throws(() => decodeHistory(dup), (error: unknown) => error instanceof ReadError && error.code === "storage");
+});
+
+test("page bounds 253-char domain keys, action IDs, titles and CheckView limits", () => {
+  const longDomain = `${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.com`; // 247 chars
+  const service = new Domains(async () => new Response("{}", { status: 200 }));
+  const history = new MemoryHistory();
+  const render = (node: ReturnType<typeof page>) => {
+    const renderer = new Renderer({ authorize: () => false });
+    try { return renderer.render(node).view; }
+    finally { renderer.dispose(); }
+  };
+
+  // History view with 247-char domain must keep keys and action IDs <= 128 chars.
+  const histView = render(page({ service, history, state: { v: "history", q: "" }, loaded: { kind: "history", domains: [longDomain, longDomain] }, locale: "en", uiVersion: 5 }));
+  const histItems = histView.sections.flatMap(s => s.items);
+  const seenKeys = new Set<string>();
+  for (const item of histItems) {
+    if (typeof item.key === "string") {
+      assert.ok(item.key.length > 0 && item.key.length <= 128, `key too long: ${item.key.length}`);
+      assert.equal(seenKeys.has(item.key), false, `duplicate key: ${item.key}`);
+      seenKeys.add(item.key);
+    }
+    if ("action" in item && item.action) {
+      assert.ok(item.action.id.length <= 128, `action.id too long: ${item.action.id.length}`);
+    }
+  }
+
+  // Result view with 247-char domain must keep View.title <= 200 chars and Section.title <= 200 chars.
+  const resultView = render(page({
+    service,
+    history,
+    state: { v: "result", q: longDomain },
+    loaded: {
+      kind: "result",
+      result: {
+        domain: { ascii: longDomain, unicode: longDomain },
+        name: longDomain,
+        statuses: ["ok"],
+        events: [{ action: "registration", at: "2026-01-01T00:00:00.000Z" }],
+        url: "https://rdap.verisign.com/com/v1/domain/example.com",
+        source: "https://rdap.verisign.com",
+        at: Date.UTC(2026, 0, 2),
+      },
+    },
+    locale: "en",
+  }));
+  assert.ok(Array.from(resultView.title ?? "").length <= 200, `view title length ${Array.from(resultView.title ?? "").length} > 200`);
+  for (const section of resultView.sections) {
+    assert.ok(section.items.length > 0, `empty section: ${section.key}`);
+    if (section.title) assert.ok(Array.from(section.title).length <= 200, `section title too long: ${section.title.length}`);
+  }
+
+  // Invalid direct state passed to page() must sanitize safely.
+  const badView = render(page({ service, history, state: { v: "result", q: "not-a-domain" }, loaded: { kind: "empty" }, locale: "en" }));
+  assert.equal(JSON.parse(badView.state ?? "{}").v, "lookup");
 });

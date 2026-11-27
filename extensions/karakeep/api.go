@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,15 +92,17 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 }
 
-func (c *client) bookmarks(ctx context.Context, query, cursor string) (page[bookmark], error) {
-	q := url.Values{"limit": {"50"}}
+// bookmarks requests exactly limit items so nextCursor continues right after
+// the last one shown.
+func (c *client) bookmarks(ctx context.Context, query, cursor string, limit int) (bookmarkPage, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
 	if query != "" {
 		q.Set("q", query)
 	}
 	if cursor != "" {
 		q.Set("cursor", cursor)
 	}
-	var out page[bookmark]
+	var out bookmarkPage
 	path := "/bookmarks"
 	if query != "" {
 		path = "/bookmarks/search"
@@ -115,19 +118,19 @@ func (c *client) bookmark(ctx context.Context, id string) (bookmark, error) {
 }
 
 func (c *client) lists(ctx context.Context) ([]bookmarkList, error) {
-	var out []bookmarkList
+	var out struct {
+		Lists []bookmarkList `json:"lists"`
+	}
 	err := c.do(ctx, http.MethodGet, "/lists", nil, nil, &out)
-	return out, err
+	return out.Lists, err
 }
 
-func (c *client) highlights(ctx context.Context, cursor string) (page[highlight], error) {
-	q := url.Values{"limit": {"50"}}
-	if cursor != "" {
-		q.Set("cursor", cursor)
+func (c *client) bookmarkHighlights(ctx context.Context, id string) ([]highlight, error) {
+	var out struct {
+		Highlights []highlight `json:"highlights"`
 	}
-	var out page[highlight]
-	err := c.do(ctx, http.MethodGet, "/highlights", q, nil, &out)
-	return out, err
+	err := c.do(ctx, http.MethodGet, "/bookmarks/"+url.PathEscape(id)+"/highlights", nil, nil, &out)
+	return out.Highlights, err
 }
 
 func (c *client) save(ctx context.Context, rawURL string) (bookmark, error) {

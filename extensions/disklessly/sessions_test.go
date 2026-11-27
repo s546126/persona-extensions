@@ -69,7 +69,7 @@ func TestProbeUsesCLIPlanAndBackendReachability(t *testing.T) {
 	if got := sessionItems(st.Scans["local"]); len(got) != 0 {
 		t.Fatalf("session items with unreachable backend: %+v", got)
 	}
-	if !strings.Contains(st.Scans["local"].Sessions.Note, "备份后端连不上") {
+	if !strings.Contains(st.Scans["local"].Sessions.Note, "网盘连不上") {
 		t.Fatalf("note: %q", st.Scans["local"].Sessions.Note)
 	}
 }
@@ -104,7 +104,7 @@ func TestSessionArchiveRunsOnceAndAttributesReport(t *testing.T) {
 	for _, r := range rec.Items {
 		switch r.ID {
 		case "sessions-cold-claude":
-			if r.FreedBytes != 1228800 || !strings.Contains(r.Note, "被引用") {
+			if r.FreedBytes != 1228800 || !strings.Contains(r.Note, "还在用") {
 				t.Fatalf("claude result: %+v", r)
 			}
 		case "sessions-cold-codex":
@@ -134,7 +134,7 @@ func TestSessionArchiveRefusalIsAnError(t *testing.T) {
 			if err == nil || rec != nil || len(st.History) != 0 {
 				t.Fatalf("err=%v rec=%+v history=%d", err, rec, len(st.History))
 			}
-			if name == "backend" && !strings.Contains(err.Error(), "备份后端连不上") {
+			if name == "backend" && !strings.Contains(err.Error(), "网盘连不上") {
 				t.Fatalf("err = %v", err)
 			}
 		})
@@ -274,7 +274,7 @@ func TestColdSessionsNeedExplicitSelection(t *testing.T) {
 	if strings.Join(ids, ",") != "sessions-cold-claude,sessions-cold-codex,sessions-cold-other" && strings.Join(ids, ",") != "sessions-cold-codex,sessions-cold-claude,sessions-cold-other" {
 		t.Fatalf("record items: %v", ids)
 	}
-	if last := rec.Items[len(rec.Items)-1]; last.FreedBytes != 2048 || !strings.Contains(last.Note, "1 个其他 Agent") {
+	if last := rec.Items[len(rec.Items)-1]; last.FreedBytes != 2048 || !strings.Contains(last.Note, "1 个其他 AI 助手") {
 		t.Fatalf("other agents: %+v", last)
 	}
 }

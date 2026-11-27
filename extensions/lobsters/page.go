@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
+
+const maxQueryChars = 200
 
 type pageState struct {
 	Filter  string `json:"f,omitempty"`
@@ -20,7 +23,19 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || len(st.StoryID) > 32 || len(st.Query) > 200 {
+	if err := r.DecodeState(&st); err != nil || len(st.StoryID) > 32 || utf8.RuneCountInString(st.Query) > maxQueryChars {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Filter != "" && st.Filter != "hot" && st.Filter != "new" {
+		return pageState{}, errors.New("invalid page state")
+	}
+	switch st.Mode {
+	case "", "list":
+	case "detail":
+		if err := validID(st.StoryID); err != nil {
+			return pageState{}, errors.New("invalid page state")
+		}
+	default:
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -41,7 +56,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Mode = r.Values["q"], "list"
+		st.Query, st.Mode = clipText(r.Values["q"], maxQueryChars), "list"
 	case "filter":
 		if r.Values["filter"] != "hot" && r.Values["filter"] != "new" {
 			return nil, errors.New("invalid feed")
@@ -79,14 +94,36 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if err != nil {
 		return nil, err
 	}
-	items = filterStories(items, a.cfg, nil, st.Query, 0)
+	items = filterStories(items, a.currentConfig(), nil, st.Query, 0)
 	v := &wire.View{Title: t.hot, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
 	v.Filter = &wire.Filter{Name: "filter", Title: t.read, Value: st.Filter, Action: wire.Action{ID: "filter"}, Choices: []wire.Choice{{Value: "hot", Title: t.hot}, {Value: "new", Title: t.newest}}}
-	section := wire.Section{Title: fmt.Sprintf(t.results, len(items))}
+	seen := make(map[string]struct{}, min(len(items), maxViewItems))
+	var rows []wire.Component
 	for _, item := range items {
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "story-" + item.ShortID, Title: clipText(item.Title, 2000), Subtitle: fmt.Sprintf("%d · %d comments · %s", item.Score, item.CommentCount, strings.Join(item.Tags, ", ")), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ShortID}}})
+		if validID(item.ShortID) != nil {
+			continue
+		}
+		if _, dup := seen[item.ShortID]; dup {
+			continue
+		}
+		seen[item.ShortID] = struct{}{}
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			title = item.ShortID
+		}
+		rows = append(rows, wire.Component{
+			Type:     wire.ComponentRow,
+			Key:      "story-" + item.ShortID,
+			Title:    clipText(title, 2000),
+			Subtitle: clipText(fmt.Sprintf("%d · %d comments · %s", item.Score, item.CommentCount, strings.Join(item.Tags, ", ")), 2000),
+			Action:   &wire.Action{ID: "detail", Values: map[string]string{"id": item.ShortID}},
+		})
+		if len(rows) >= maxViewItems {
+			break
+		}
 	}
-	if len(items) == 0 {
+	section := wire.Section{Title: fmt.Sprintf(t.results, len(rows)), Items: rows}
+	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noStories})
 	}
 	v.Sections = []wire.Section{section}
@@ -95,6 +132,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 
 // httpsLink reports whether a link component can carry raw: the view check refuses the whole view for any other.
 func httpsLink(raw string) bool {
+	if raw == "" || utf8.RuneCountInString(raw) > wire.StringMost || strings.ContainsAny(raw, "\x00\r\n") {
+		return false
+	}
 	u, err := url.Parse(raw)
 	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
 }
@@ -102,10 +142,10 @@ func httpsLink(raw string) bool {
 func detailView(r *ext.UIRequest, st pageState, item story) *wire.View {
 	t := textsFor(r.Locale)
 	items := []wire.Component{
-		{Type: wire.ComponentText, Text: fmt.Sprintf("%d points · %d comments · by %s", item.Score, item.CommentCount, item.Submitter)},
+		{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%d points · %d comments · by %s", item.Score, item.CommentCount, item.Submitter), 2000)},
 	}
-	if len(item.Tags) > 0 {
-		items = append(items, wire.Component{Type: wire.ComponentText, Text: strings.Join(item.Tags, ", "), Style: wire.TextStyleSecondary})
+	if tags := strings.TrimSpace(strings.Join(item.Tags, ", ")); tags != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(tags, 2000), Style: wire.TextStyleSecondary})
 	}
 	if httpsLink(item.URL) {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: item.URL})
@@ -114,25 +154,28 @@ func detailView(r *ext.UIRequest, st pageState, item story) *wire.View {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.discussion, URL: item.CommentsURL})
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Title, 2000), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.read, Items: items}}}
+	v := &wire.View{Title: clipText(strings.TrimSpace(item.Title), 2000), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.read, Items: items}}}
 	used := len(items)
 	if item.DescriptionPlain != "" {
-		description := capComponents(textComponents(item.DescriptionPlain), maxDescriptionItems)
-		used += len(description)
-		v.Sections = append(v.Sections, wire.Section{Title: t.description, Items: description})
+		if description := capComponents(textComponents(item.DescriptionPlain), maxDescriptionItems); len(description) > 0 {
+			used += len(description)
+			v.Sections = append(v.Sections, wire.Section{Title: t.description, Items: description})
+		}
 	}
-	if len(item.Comments) > 0 {
+	if len(item.Comments) > 0 && maxViewItems-used > 0 {
 		section := wire.Section{Title: t.comments}
 		for _, c := range item.Comments {
 			if c.IsDeleted || c.IsModerated {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: strings.Repeat("  ", min(c.Depth, 8)) + c.User + " · " + fmt.Sprint(c.Score), Style: wire.TextStyleSecondary})
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(strings.Repeat("  ", min(c.Depth, 8))+c.User+" · "+fmt.Sprint(c.Score), 2000), Style: wire.TextStyleSecondary})
 			section.Items = append(section.Items, textComponents(c.Text)...)
 		}
 		if len(section.Items) > 0 {
 			section.Items = capComponents(section.Items, maxViewItems-used)
-			v.Sections = append(v.Sections, section)
+			if len(section.Items) > 0 {
+				v.Sections = append(v.Sections, section)
+			}
 		}
 	}
 	return v
@@ -147,6 +190,9 @@ const (
 
 // capComponents keeps the first n components and shows the cut on the last one.
 func capComponents(items []wire.Component, n int) []wire.Component {
+	if n <= 0 {
+		return nil
+	}
 	if len(items) <= n {
 		return items
 	}

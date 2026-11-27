@@ -18,7 +18,14 @@ export function languageFor(config: Config, locale = ""): Language {
   if (config.language && config.language !== "auto") return config.language as Language;
   return locale.toLowerCase().startsWith("ja") ? "ja" : locale.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
-export const clip = (text: string, most: number) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
 /** API snippets may contain presentation markup. Treat it as data, never JSX or HTML. */
 export function plain(text: string): string {
@@ -44,7 +51,7 @@ export function titleKey(value: unknown): string {
   // MediaWiki refuses # < > [ ] { } | and controls in a title, and an & only where it forms an HTML entity: ? and a plain &
   // belong to titles such as "What Is Life?" and "AT&T". Paths and links percent-encode both.
   if (/[<>]|&(#[0-9]+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/.test(value)) throw new ReadError("invalid");
-  if (!title || title.length > 255 || /[\u0000-\u001f\u007f#<>[\]{}|]/.test(title) || Array.from(title).length > 255) throw new ReadError("invalid");
+  if (!title || title.length > 255 || /[\u0000-\u001f\u007f#<>[\]{}|]/.test(title) || new TextEncoder().encode(title).byteLength > 255) throw new ReadError("invalid");
   return title.replaceAll(" ", "_");
 }
 export function articleURL(language: Language, title: string) {
@@ -78,8 +85,12 @@ export interface Feed {
   stale?: ReadError;
 }
 export function parseArticle(raw: unknown, language: Language): Article {
-  const value = object(raw), canonical = titleKey(value.titles && typeof value.titles === "object" && !Array.isArray(value.titles)
-    ? (value.titles as Record<string, unknown>).canonical : value.title);
+  const value = object(raw);
+  let canonical: string;
+  try {
+    canonical = titleKey(value.titles && typeof value.titles === "object" && !Array.isArray(value.titles)
+      ? (value.titles as Record<string, unknown>).canonical : value.title);
+  } catch { throw new ReadError("bad_answer"); }
   const title = plain(string(value.normalizedtitle || value.title));
   return {
     title: canonical,

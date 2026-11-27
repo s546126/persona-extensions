@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/graph"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 )
@@ -37,6 +38,9 @@ type Query struct {
 	// Categories are the categories the asker names (scene 3, unified memory design v2 §3.3b): an entry in a category
 	// is given only when every one of its categories is named. Empty: general entries only.
 	Categories []string
+	// Today (optional YYYY-MM-DD) overrides the reference date for ephemeral (14/30d) and ops_runbook (45/60d)
+	// decay. When empty, Search falls back to the latest day in st.ActiveDays.
+	Today string
 }
 
 // Hit is one entry line of an answer.
@@ -49,19 +53,45 @@ type Hit struct {
 	Text   string
 	Score  float64
 	Cats   []string // the entry's categories (shown, so the asker knows what it was given)
+	Hop    int      // 0: direct match; 1: 1-hop expanded via entity skeleton
+	Via    string   // non-empty for 1-hop hits ("<entity>→<neighbor>")
+	Quotes []string // up to 2 deduplicated L0 user original quote slices (<=80 runes, with date)
 }
 
 // Result is an answer, with what it counted (for the curator's per-day counts; the query itself is not kept).
 type Result struct {
-	Hits []Hit
-	Pool int // entries searched
+	Hits     []Hit
+	Entities []EntityContext // 1-hop structural skeleton & anchored rules for matched entities
+	Pool     int             // entries searched
 }
 
 var statusWeight = map[entry.Status]float64{entry.Stable: 1, entry.Shifting: 0.8, entry.Candidate: 0.7, entry.Dormant: 0.5}
 
+func referenceDay(st *store.State, q Query) string {
+	if q.Today != "" {
+		return q.Today
+	}
+	if st != nil && len(st.ActiveDays) > 0 {
+		return st.ActiveDays[len(st.ActiveDays)-1]
+	}
+	return ""
+}
+
+func contactName(st *store.State, person string) string {
+	if st == nil || person == "" {
+		return ""
+	}
+	if k := st.Contacts[person]; k != nil && k.Manual != "removed" {
+		return graph.CanonicalName(k.Name, "person")
+	}
+	return ""
+}
+
 // usable is the pool's gate: live, its categories all named by the look-up (none: general entries only), not a
-// card's evaluation or inferred part (whatever is named), not life content when the user chose "work only".
-func usable(st *store.State, e *entry.Entry, cats []string) bool {
+// card's evaluation or inferred part (whatever is named), not life content when the user chose "work only",
+// not an expired ephemeral entry (>= 14d), not a stopped noise predicate (about/same_circle), and not generic
+// nameless HR chitchat.
+func usable(st *store.State, e *entry.Entry, cats []string, today string) bool {
 	if !e.Live() || !e.Named(cats) {
 		return false
 	}
@@ -74,11 +104,26 @@ func usable(st *store.State, e *entry.Entry, cats []string) bool {
 	if e.Domain == entry.Life && st.Onboarding != nil && st.Onboarding.Use == entry.Work {
 		return false
 	}
+	if !e.Pinned && e.User == nil {
+		if e.Facet == entry.World && graph.IsStoppedPredicate(e.Predicate) {
+			return false
+		}
+		if e.Facet == entry.People && entry.IsGenericPeopleNoise(e, contactName(st, e.Person)) {
+			return false
+		}
+	}
+	if today != "" && entry.EphemeralExpiredRecall(e, today) {
+		return false
+	}
 	return true
 }
 
-// Line is what an entry says in an answer: the user's own wording, else its exit wording, else its text.
-func Line(e *entry.Entry) string {
+// Line is what an entry says in an answer: the user's own wording, else its exit wording, else its text; with when
+// its rule does not hold (Exception) when that is not in it already.
+func Line(e *entry.Entry) string { return Head(e) + Exception(e) }
+
+// Head is Line without the exception.
+func Head(e *entry.Entry) string {
 	if e.Export != nil {
 		if e.Export.User != "" {
 			return e.Export.User
@@ -90,16 +135,58 @@ func Line(e *entry.Entry) string {
 	return e.Shown()
 }
 
-// names are the names an entry is about: its object, subject, target, scopes and card's person.
+// exceptionMost is the longest exception a line carries, in characters.
+const exceptionMost = 60
+
+// Exception is "（例外：<when the rule does not hold>）" for a rule, a way of working or a choice that has one and whose
+// line does not say it already; "" otherwise, and for what the user worded themselves. 0.2.6: the exception was read
+// into its own field and dropped at every exit, so "do not stop to ask" stood without "only when it is live, public
+// or deletes data".
+func Exception(e *entry.Entry) string {
+	x := strings.TrimSpace(e.Exception)
+	if x == "" || e.User != nil || (e.Export != nil && e.Export.User != "") {
+		return ""
+	}
+	switch e.Facet {
+	case entry.Interaction, entry.Tools, entry.Workflow, entry.Judgement:
+	default:
+		return ""
+	}
+	x = strings.TrimRight(x, "。.；;")
+	if strings.Contains(Head(e), x) {
+		return ""
+	}
+	if r := []rune(x); len(r) > exceptionMost {
+		x = string(r[:exceptionMost]) + "…"
+	}
+	return "（例外：" + x + "）"
+}
+
+// names are the canonical names an entry is about: its object, subject, target, scopes and card's person,
+// enriched with canonical names of merged graph entities when available.
 func names(st *store.State, e *entry.Entry) []string {
 	var out []string
+	seen := map[string]bool{}
+	idx := getSkeletonIdx(st)
 	add := func(s string) {
-		s = strings.TrimSpace(s)
-		for _, p := range []string{"project:", "person:", "system:", "object:"} {
-			s = strings.TrimPrefix(s, p)
+		clean := graph.CanonicalName(s, "")
+		if clean == "" {
+			return
 		}
-		if s != "" {
-			out = append(out, s)
+		q := norm.Q(clean)
+		if q != "" && !seen[q] {
+			seen[q] = true
+			out = append(out, clean)
+		}
+		if idx != nil && q != "" {
+			for _, id := range idx.byNorm[q] {
+				if cn := graphNodeName(idx.g, id); cn != "" {
+					if cq := norm.Q(cn); cq != "" && !seen[cq] {
+						seen[cq] = true
+						out = append(out, cn)
+					}
+				}
+			}
 		}
 	}
 	add(e.Object)
@@ -109,8 +196,8 @@ func names(st *store.State, e *entry.Entry) []string {
 		add(s.Name)
 	}
 	if e.Person != "" {
-		if k := st.Contacts[e.Person]; k != nil && k.Manual != "removed" && k.Name != "" {
-			out = append(out, k.Name)
+		if cn := contactName(st, e.Person); cn != "" {
+			add(cn)
 		}
 	}
 	return out
@@ -161,10 +248,11 @@ func terms(text string) []string {
 // seen. Hits below a fifth of the query covered are left out.
 func Search(st *store.State, q Query) Result {
 	var res Result
-	qq := norm.Q(q.Text)
+	qq := graph.NormKey(q.Text, "")
 	if qq == "" {
 		return res
 	}
+	today := referenceDay(st, q)
 	qb := bigrams(qq)
 	words := terms(q.Text)
 	limit := q.Limit
@@ -175,17 +263,23 @@ func Search(st *store.State, q Query) Result {
 	type cand struct {
 		e     *entry.Entry
 		score float64
+		hop   int
+		via   string
 	}
 	var cs []cand
+	directIDs := map[string]bool{}
 	for _, e := range st.Entries {
 		if len(q.Facets) > 0 && !slices.Contains(q.Facets, e.Facet) {
 			continue
 		}
-		if !usable(st, e, q.Categories) {
+		if !usable(st, e, q.Categories, today) {
 			continue
 		}
 		res.Pool++
 		ns := names(st, e)
+		if o := graph.CanonicalName(e.Impact.Object, ""); o != "" {
+			ns = append(ns, o)
+		}
 		body := norm.Q(Line(e) + " " + e.Situation + " " + e.Choice + " " + strings.Join(ns, " "))
 		s := cover(qb, bigrams(body))
 		if strings.Contains(body, qq) {
@@ -208,7 +302,19 @@ func Search(st *store.State, q Query) Result {
 		if e.Pinned {
 			w = 1
 		}
-		cs = append(cs, cand{e, s * w})
+		if today != "" {
+			w *= entry.OpsRunbookWeight(e, today)
+		}
+		directIDs[e.ID] = true
+		cs = append(cs, cand{e: e, score: s * w})
+	}
+	entities, hopCands := expandEntities(st, q, qq, words, today)
+	res.Entities = entities
+	for id, hc := range hopCands {
+		if directIDs[id] {
+			continue
+		}
+		cs = append(cs, cand{e: hc.e, score: hc.score, hop: 1, via: hc.via})
 	}
 	sort.SliceStable(cs, func(i, j int) bool {
 		if cs[i].score != cs[j].score {
@@ -233,7 +339,8 @@ func Search(st *store.State, q Query) Result {
 		if seen[t] {
 			continue
 		}
-		h := Hit{ID: c.e.ID, Facet: c.e.Facet, Status: c.e.Status, Last: c.e.Last, Kinds: c.e.Kinds, Text: t, Score: c.score, Cats: c.e.Cats()}
+		h := Hit{ID: c.e.ID, Facet: c.e.Facet, Status: c.e.Status, Last: c.e.Last, Kinds: c.e.Kinds, Text: t, Score: c.score,
+			Cats: c.e.Cats(), Hop: c.hop, Via: c.via, Quotes: UserQuotes(c.e, quotesPerEntity)}
 		if size+len(Format(h)) > MostBytes {
 			continue
 		}
@@ -264,7 +371,11 @@ func Format(h Hit) string {
 	if len(h.Cats) > 0 {
 		cats = "；分类 " + strings.Join(h.Cats, "/")
 	}
-	return fmt.Sprintf("- [%s·%s] %s（最后 %s%s%s）id:%s\n", facetName[h.Facet], st, h.Text, h.Last, kinds, cats, h.ID)
+	via := ""
+	if h.Hop > 0 && h.Via != "" {
+		via = "；1跳 " + h.Via
+	}
+	return fmt.Sprintf("- [%s·%s] %s（最后 %s%s%s%s）id:%s\n", facetName[h.Facet], st, h.Text, h.Last, kinds, cats, via, h.ID)
 }
 
 // FacetOf parses a facet name as the tool takes it (the internal names).

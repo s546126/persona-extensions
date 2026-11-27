@@ -95,13 +95,22 @@ const maxViewEntries = 250
 // replacing it, and reports whether the last batch was full and the cap still leaves room to show more.
 func (a *app) collectEntries(ctx context.Context, view, query string, offset int) ([]entry, bool, error) {
 	var out []entry
+	seen := map[int64]bool{}
 	more := false
 	for pos := 0; pos <= offset && len(out) < maxViewEntries; pos += 50 {
 		batch, err := a.client.entries(ctx, view, query, pos)
 		if err != nil {
 			return nil, false, err
 		}
-		out = append(out, batch.Entries...)
+		for _, item := range batch.Entries {
+			if item.ID > 0 {
+				if seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+			}
+			out = append(out, item)
+		}
 		more = len(batch.Entries) == 50
 		if !more {
 			break
@@ -155,13 +164,14 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if st.View == "search" {
 		v.Filter.Value = "unread"
 	}
-	section := wire.Section{Title: fmt.Sprintf(t.results, len(entries))}
+	rows := make([]wire.Component, 0, len(entries))
 	for _, item := range entries {
 		if item.ID <= 0 || item.Title == "" {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "entry-" + strconv.FormatInt(item.ID, 10), Title: clipText(item.Title, 1800), Subtitle: clipText(item.Feed.Title+" · "+item.Author+" · "+item.PublishedAt, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": strconv.FormatInt(item.ID, 10)}}})
+		rows = append(rows, wire.Component{Type: wire.ComponentRow, Key: "entry-" + strconv.FormatInt(item.ID, 10), Title: clipText(item.Title, 1800), Subtitle: clipText(item.Feed.Title+" · "+item.Author+" · "+item.PublishedAt, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": strconv.FormatInt(item.ID, 10)}}})
 	}
+	section := wire.Section{Title: fmt.Sprintf(t.results, len(rows)), Items: rows}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noEntries})
 	}
@@ -174,19 +184,23 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 
 func detailView(r *ext.UIRequest, st pageState, item entry, text string) *wire.View {
 	t := textsFor(r.Locale)
+	title := clipText(strings.TrimSpace(item.Title), 1800)
+	if title == "" {
+		title = fmt.Sprintf("#%d", item.ID)
+	}
 	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(t.feed+": "+item.Feed.Title+" · "+t.author+": "+item.Author, 1800)}}
 	if link := safeArticleLink(item.URL); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}
 	if item.Status != "read" {
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.markRead, Action: &wire.Action{ID: "read", Confirm: t.markRead + "\n" + item.Title}})
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.markRead, Action: &wire.Action{ID: "read", Confirm: clipText(t.markRead+"\n"+title, 1800)}})
 	}
 	bookmarkTitle := t.bookmark
 	if item.Starred {
 		bookmarkTitle = t.unbookmark
 	}
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: bookmarkTitle, Action: &wire.Action{ID: "bookmark", Confirm: bookmarkTitle + "\n" + item.Title}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: bookmarkTitle, Action: &wire.Action{ID: "bookmark", Confirm: clipText(bookmarkTitle+"\n"+title, 1800)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
 	if text != "" {
 		v.Sections = append(v.Sections, wire.Section{Title: t.article, Items: textComponents(text)})
 	} else {

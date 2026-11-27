@@ -84,7 +84,7 @@ func mediaURL(m Media) (string, error) {
 	if m.URL != "" {
 		u, err := url.Parse(m.URL)
 		if err != nil || u.Scheme != "https" || u.User != nil || (u.Port() != "" && u.Port() != "443") || !tencentHost(u.Hostname()) {
-			return "", &Error{Code: CodeProtocol, Msg: "media URL is not a Tencent HTTPS URL"}
+			return "", &Error{Code: CodeProtocol, Msg: "media URL is not a Tencent HTTPS URL (" + formatURLDiag("media_url", u, err, false) + ")"}
 		}
 		return u.String(), nil
 	}

@@ -54,7 +54,7 @@ func templateRowsOf(v *wire.View) []wire.Component {
 	return out
 }
 
-// wantTemplateRows asserts a row per template, in order: its icon, name, about and number of types.
+// wantTemplateRows asserts a row per template, in order: its icon, name, about and the names of its types.
 func wantTemplateRows(t *testing.T, v *wire.View) {
 	t.Helper()
 	rows := templateRowsOf(v)
@@ -64,10 +64,11 @@ func wantTemplateRows(t *testing.T, v *wire.View) {
 	}
 	for i, tp := range all {
 		r := rows[i]
-		value := ""
-		if len(tp.Types) > 0 {
-			value = fmt.Sprintf("%d 类", len(tp.Types))
+		var names []string
+		for _, ty := range tp.Types {
+			names = append(names, ty.Name)
 		}
+		value := strings.Join(names, " · ")
 		if r.Action.ID != "new:"+tp.Key || r.Title != tp.Name || r.Subtitle != tp.About || r.Value != value || r.Icon != iconName(tp.Icon) {
 			t.Fatalf("row of %s = %+v", tp.Key, r)
 		}
@@ -122,7 +123,7 @@ func TestWelcomeRowsOpenTheForm(t *testing.T) {
 		if got := decode(t, res.View); got.C != tp.Key {
 			t.Fatalf("new:%s = %+v", tp.Key, got)
 		}
-		if _, ok := buttonTitled(res.View, "创建"); !ok {
+		if _, ok := buttonTitled(res.View, "创建空间"); !ok {
 			t.Fatalf("form of %s has no create", tp.Key)
 		}
 	}
@@ -142,7 +143,7 @@ func TestCreateFormOfEveryTemplate(t *testing.T) {
 			for _, ty := range tp.Types {
 				names = append(names, ty.Name)
 			}
-			brings := "包含：" + strings.Join(names, "、")
+			brings := "里面有这几个分类：" + strings.Join(names, "、")
 			if len(tp.Types) > 0 && (len(captions) != 1 || captions[0] != brings) {
 				t.Fatalf("captions = %v, want %q", captions, brings)
 			}
@@ -150,17 +151,17 @@ func TestCreateFormOfEveryTemplate(t *testing.T) {
 				t.Fatalf("captions of a template without types = %v", captions)
 			}
 			name := fieldNamed(t, v, "name")
-			if name.Kind != wire.FieldKindText || name.Label != "名称" || name.Value != tp.Name {
+			if name.Kind != wire.FieldKindText || name.Label != "空间名称" || name.Value != tp.Name {
 				t.Fatalf("name field = %+v", name)
 			}
 			samples, ok := fieldOf(v, "samples")
 			if ok != (len(tp.Samples) > 0) {
 				t.Fatalf("samples field present = %v, template has %d samples", ok, len(tp.Samples))
 			}
-			if ok && (samples.Kind != wire.FieldKindToggle || samples.Value != "true" || samples.Label != "带示例记录") {
+			if ok && (samples.Kind != wire.FieldKindToggle || samples.Value != "true" || samples.Label != "先放几条示例（之后可以删）") {
 				t.Fatalf("samples field = %+v", samples)
 			}
-			create, ok := buttonTitled(v, "创建")
+			create, ok := buttonTitled(v, "创建空间")
 			if !ok || create.Action.ID != "create:"+tp.Key || !create.Action.Submit {
 				t.Fatalf("create = %+v", create)
 			}
@@ -254,8 +255,8 @@ func TestCreateRefusals(t *testing.T) {
 		toast  string
 	}{
 		{"a name past the limit", s, "create:" + tp.Key, map[string]string{"name": strings.Repeat("长", kernel.MaxName+1)}, ""},
-		{"an unknown template", s, "create:nope", nil, "没有模板「nope」"},
-		{"an unknown template's form", s, "new:nope", nil, "没有模板「nope」"},
+		{"an unknown template", s, "create:nope", nil, "找不到模板「nope」。请从模板列表里重新选一个"},
+		{"an unknown template's form", s, "new:nope", nil, "找不到模板「nope」。请从模板列表里重新选一个"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,7 +312,7 @@ func TestNewSpaceAtEveryVersion(t *testing.T) {
 			if !fieldNamedOK(res.View, "name") || !fieldNamedOK(res.View, "samples") {
 				t.Fatalf("v%d: form fields = %v", version, fieldNamesOf(res.View))
 			}
-			create, _ := buttonTitled(res.View, "创建")
+			create, _ := buttonTitled(res.View, "创建空间")
 			res = do(decode(t, res.View), create.Action.ID, formOf(res.View, map[string]string{"samples": "false"}))
 			sp := spaceNamed(t, st, tp.Name)
 			if sp == nil || len(sp.Entities) != 0 || decode(t, res.View) != (state{S: sp.ID}) {
@@ -330,7 +331,7 @@ func TestCreateReadsTheSamplesSwitchStrictly(t *testing.T) {
 		a := newApp(st)
 		before := state{S: firstSpace(t, st), C: tp.Key}
 		res := act(t, a, before, "create:"+tp.Key, map[string]string{"name": "我的空间", "samples": v})
-		if !strings.Contains(res.Toast, "只能是 true 或 false") || decode(t, res.View) != before {
+		if !strings.Contains(res.Toast, "开关没有读懂") || decode(t, res.View) != before {
 			t.Fatalf("samples %q: toast %q, state %+v", v, res.Toast, decode(t, res.View))
 		}
 		if spaceNamed(t, st, "我的空间") != nil {
@@ -466,5 +467,102 @@ func TestDefaultNameFitsTheLimit(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("the default name beside a name at the limit is refused: %v", err)
+	}
+}
+
+// The overview keeps each button in the card it acts on: a section of buttons alone is drawn as a card of its own, an
+// empty frame around them. The settings and new-space buttons sit in the header's card, the settings fold opens right
+// under it, and the type list ends with the button that adds a type; a space with no types adds one from its empty
+// state only.
+func TestOverviewButtonsSitInTheirCards(t *testing.T) {
+	for _, tc := range []struct {
+		template string
+		types    bool
+	}{{"blank", false}, {"project", true}} {
+		for _, fold := range []string{"", "space"} {
+			t.Run(tc.template+"/"+fold, func(t *testing.T) {
+				st := storeWith(t, true, tc.template)
+				v := drawPage(t, newApp(st), state{S: firstSpace(t, st), F: fold}, 5)
+				for i, s := range v.Sections {
+					only := len(s.Items) > 0
+					for _, it := range s.Items {
+						only = only && it.Type == wire.ComponentButton
+					}
+					if only {
+						t.Fatalf("section %d holds only buttons: %+v", i, s.Items)
+					}
+				}
+				head := v.Sections[0].Items
+				titles := []string{}
+				for _, it := range head {
+					if it.Type == wire.ComponentButton {
+						titles = append(titles, it.Title)
+					}
+				}
+				if fmt.Sprint(titles) != "[空间设置 新建空间]" {
+					t.Fatalf("header card buttons = %v", titles)
+				}
+				if fold == "space" && !fieldNamedOK(&wire.View{Sections: v.Sections[1:2]}, "about") {
+					t.Fatalf("the settings fold is not right under the header card: %+v", v.Sections[1])
+				}
+				adds := 0
+				for _, s := range v.Sections {
+					for _, it := range s.Items {
+						if (it.Type == wire.ComponentButton && it.Title == "新建分类") || (it.Button != nil && it.Button.Title == "新建分类") {
+							adds++
+						}
+					}
+				}
+				if adds != 1 {
+					t.Fatalf("%d 新建分类 buttons", adds)
+				}
+				if tc.types {
+					var types *wire.Section
+					for i := range v.Sections {
+						if v.Sections[i].Title == "分类" {
+							types = &v.Sections[i]
+						}
+					}
+					if types == nil {
+						t.Fatal("no 分类 section")
+					}
+					last := types.Items[len(types.Items)-1]
+					if last.Type != wire.ComponentButton || last.Title != "新建分类" {
+						t.Fatalf("the type list ends with %+v", last)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestTemplateRowsNameTheirTypes checks a template row names its types rather than counting them, from the template
+// data, and that a template with many types shows the first three and how many there are.
+func TestTemplateRowsNameTheirTypes(t *testing.T) {
+	reading, ok := templates.Get("reading")
+	if !ok {
+		t.Fatal("no reading template")
+	}
+	if got := templateTypeNames(reading); got != "书 · 笔记 · 剪藏 · 主题" {
+		t.Fatalf("reading row = %q", got)
+	}
+	for _, r := range templateRowsOf(drawPage(t, newApp(storeWith(t, true)), state{}, 5)) {
+		if strings.Contains(r.Value, "个分类") {
+			t.Fatalf("row %s still counts its types: %q", r.Title, r.Value)
+		}
+	}
+	many := templates.Template{}
+	for _, n := range []string{"甲", "乙", "丙", "丁", "戊", "己"} {
+		many.Types = append(many.Types, kernel.Type{Name: n})
+	}
+	if got := templateTypeNames(many); got != "甲 · 乙 · 丙 等 6 个" {
+		t.Fatalf("six types = %q", got)
+	}
+	many.Types = many.Types[:4]
+	if got := templateTypeNames(many); got != "甲 · 乙 · 丙 · 丁" {
+		t.Fatalf("four types = %q", got)
+	}
+	if got := templateTypeNames(templates.Template{}); got != "" {
+		t.Fatalf("no types = %q", got)
 	}
 }

@@ -5,8 +5,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { connect, type Program } from "@persona/extension";
-import type { Snapshot } from "@persona/extension/ui";
-import { Fixture, interaction, until } from "./fixtures.ts";
+import { Renderer, type Snapshot } from "@persona/extension/ui";
+import { Crates } from "../src/service.ts";
+import { page } from "../src/page.tsx";
+import { searchPath } from "../src/model.ts";
+import { Fixture, interaction, serde, until } from "./fixtures.ts";
 async function setup(initialize = true) {
   const bundle = await import(pathToFileURL(resolve("build/crates.mjs")).href);
   const fixture = new Fixture(), frames: any[] = [];
@@ -130,5 +133,87 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     const pure = h.bundle.snapshotPage(local);
     const view = await pure.render({ contribution: "crates", locale: "en", ui_version: 1, hub: {}, state: h.bundle.encodeState({ q: "serde", found: true }) });
     assert.ok(JSON.stringify(view).includes("serde@1.0.229"));
+  } finally { h.p.close(); }
+});
+
+test("large direct renders, oversized text/state, duplicate crates, and invalid dates stay within CheckView budgets", async () => {
+  const h = await setup();
+  try {
+    const local = new Crates(h.fixture.fetch, {}, { locale: "en", now: () => h.fixture.clock, limits: { gap: 0 } });
+    const manyCrates = Array.from({ length: 120 }, (_, i) => ({
+      name: i < 2 ? "dup_crate" : `crate_${i}_${"c".repeat(48)}`,
+      version: "1.0.0",
+      description: "D".repeat(2500),
+      license: "L".repeat(2500),
+      url: `https://crates.io/crates/crate_${i}`,
+      updated: "not-a-valid-date",
+      recentDownloads: i,
+    }));
+    const renderer = new Renderer({ authorize: () => false });
+    try {
+      const rendered = renderer.mount(page({
+        service: local,
+        state: { q: "q".repeat(17000), found: true },
+        loaded: { kind: "results", result: { crates: manyCrates, total: manyCrates.length, at: h.fixture.clock } },
+        locale: "en",
+        uiVersion: 7,
+      })).view;
+      const totalItems = rendered.sections.reduce((sum, s) => sum + s.items.length, 0);
+      assert.ok(totalItems <= 300, `expected <= 300 items, got ${totalItems}`);
+      assert.ok(new TextEncoder().encode(rendered.state ?? "").byteLength <= 16384);
+      const keys = new Set<string>();
+      for (const section of rendered.sections) {
+        if (section.key) {
+          assert.ok(Array.from(section.key).length <= 128);
+          assert.ok(!keys.has(section.key), `duplicate section key ${section.key}`);
+          keys.add(section.key);
+        }
+        if (section.title) assert.ok(Array.from(section.title).length <= 2000);
+        if (section.footer) assert.ok(Array.from(section.footer).length <= 2000);
+        for (const item of section.items) {
+          if (item.key) {
+            assert.ok(Array.from(item.key).length <= 128);
+            assert.ok(!keys.has(item.key), `duplicate item key ${item.key}`);
+            keys.add(item.key);
+          }
+          if (item.type === "text") assert.ok(Array.from(item.text).length >= 1 && Array.from(item.text).length <= 2000);
+          if (item.type === "field" && item.value) assert.ok(Array.from(item.value).length <= 2000);
+          if ("action" in item && item.action?.id) assert.ok(Array.from(item.action.id).length <= 128);
+          if ("action" in item && item.action?.push?.state) assert.ok(new TextEncoder().encode(item.action.push.state).byteLength <= 16384);
+        }
+      }
+    } finally { renderer.dispose(); }
+  } finally { h.p.close(); }
+});
+
+test("manual refresh resets after navigating to a new search and RPC rejects explicit limit: 0", async () => {
+  const h = await setup();
+  try {
+    const serdePath = searchPath("serde", 12);
+    const tokioPath = searchPath("tokio", 12);
+    h.fixture.put(tokioPath, { crates: [{ ...serde, id: "tokio", name: "tokio", default_version: "1.40.0", description: "Async runtime" }], meta: { total: 1 } });
+    await h.call("ui.page.mount", { session: "nav", params: { contribution: "crates", locale: "en", ui_version: 5 } });
+    let snapshot = await settled(h, "nav", "crates-welcome-text");
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "crates-submit", { query: "serde" }) });
+    snapshot = await settled(h, "nav", "serde@1.0.229");
+    assert.equal(h.fixture.hits.get(serdePath), 1);
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "crates-submit", { query: "tokio" }) });
+    snapshot = await settled(h, "nav", "tokio@1.40.0");
+    assert.equal(h.fixture.hits.get(tokioPath), 1);
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "crates-refresh") });
+    await until(async () => h.fixture.hits.get(tokioPath) ?? 0, count => count === 2);
+    snapshot = await settled(h, "nav", "tokio@1.40.0");
+
+    // Navigating back to cached "serde" must reuse cache (still hit 1).
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "crates-submit", { query: "serde" }) });
+    snapshot = await settled(h, "nav", "serde@1.0.229");
+    assert.equal(h.fixture.hits.get(serdePath), 1);
+
+    // End-to-end RPC ExactJSON: explicit limit: 0 must be rejected as invalid.
+    const zeroLimit = await h.call("connector.tools.call", { name: "crates_search", args: { query: "serde", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
   } finally { h.p.close(); }
 });

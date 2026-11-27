@@ -241,8 +241,9 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 	if len(f.updates["pinned"]) != 1 {
 		t.Fatal("restart repeated pin")
 	}
-	key, _ := json.Marshal(pinArgs{MemoID: "memo-1", Pinned: true})
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(key), Status: "pending", StartedAt: time.Now()}})
+	pinned := true
+	key, _ := json.Marshal(pinArgs{MemoID: "memo-1", Pinned: &pinned})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "memos_toggle_pin:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

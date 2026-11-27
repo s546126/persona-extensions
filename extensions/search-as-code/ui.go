@@ -126,7 +126,7 @@ func (d draw) homeView(p page) *wire.View {
 	recipes := d.st.allRecipes()
 
 	v := &wire.View{
-		Title: "代码化搜索",
+		Title: pageTitle,
 		State: ext.EncodeState(p),
 	}
 
@@ -136,14 +136,14 @@ func (d draw) homeView(p page) *wire.View {
 	}
 	v.Filter = &wire.Filter{
 		Name:    "scope",
-		Title:   "检索范围",
+		Title:   "搜哪些内容",
 		Choices: scopeChoices,
 		Value:   scope,
 		Action:  wire.Action{ID: "scope"},
 	}
 
 	v.Search = &wire.Search{
-		Placeholder: "输入自然语言复杂查询、算子过滤（如 project:persona without:tools）或 |> 搜索代码…",
+		Placeholder: "想找什么？例如：上次 429 报错是怎么修好的",
 		Value:       p.Query,
 		Action:      wire.Action{ID: "search"},
 	}
@@ -152,10 +152,10 @@ func (d draw) homeView(p page) *wire.View {
 		Name:  "tab",
 		Value: tab,
 		Items: []wire.Tab{
-			{Value: "results", Title: "证据与结果", Badge: countBadge(res.TotalMatches)},
-			{Value: "code", Title: "代码与轨迹", Badge: countBadge(len(res.StepTraces))},
-			{Value: "recipes", Title: "搜索配方", Badge: countBadge(len(recipes))},
-			{Value: "sources", Title: "会话与数据源"},
+			{Value: "results", Title: "结果", Badge: countBadge(res.TotalMatches)},
+			{Value: "recipes", Title: "常用搜索", Badge: countBadge(len(recipes))},
+			{Value: "sources", Title: "搜哪些地方"},
+			{Value: "code", Title: "高级：怎么搜的"},
 		},
 		Action: wire.Action{ID: "tab"},
 	}
@@ -176,49 +176,53 @@ func (d draw) homeView(p page) *wire.View {
 
 func (d draw) resultsSections(p page, res *ExecutionResult, recipes []*Recipe) []wire.Section {
 	var secs []wire.Section
+	fresh := p.Query == "" && p.RecipeID == ""
 
-	// 1. Execution overview + generated Search-as-Code preview
+	// 1. What this is for and how to start, until the user searched for something, or while there is nothing to
+	// search yet.
+	ready := readinessOf(res, d.fleet != nil)
+	if fresh || ready != readyToShow {
+		secs = append(secs, introSection())
+	}
+	// Nothing read at all: say what is missing and what to do instead of a row of zeros.
+	if ready != readyToShow {
+		return append(secs, d.setupSections(res, ready)...)
+	}
+
+	// 2. Where this result came from: how much was searched, on how many computers.
 	stats := []wire.Stat{
-		{Label: "命中结果", Value: strconv.Itoa(res.TotalMatches), Tone: toneIf(res.TotalMatches > 0, wire.TonePositive)},
-		{Label: "扫描会话", Value: strconv.Itoa(res.ScannedSessions) + coldNote(res.ScannedArchived, res.ScannedUnconfirmed, res.ArchivedOmitted)},
+		{Label: "找到", Value: fmt.Sprintf("%d 段", res.TotalMatches), Tone: toneIf(res.TotalMatches > 0, wire.TonePositive)},
+		{Label: "搜了", Value: fmt.Sprintf("%d 段聊天", res.ScannedSessions) + coldNote(res.ScannedArchived, res.ScannedUnconfirmed, res.ArchivedOmitted)},
 	}
 	if len(res.Machines) > 0 {
 		stats = append(stats, machinesStat(res.Machines))
 	}
-	stats = append(stats, []wire.Stat{
-		{Label: "算子步骤", Value: fmt.Sprintf("%d 步", len(res.StepTraces))},
-		{Label: "执行耗时", Value: fmt.Sprintf("%d ms", res.TotalDurationMs)},
-	}...)
-	overview := wire.Section{
-		Title: res.Program.Title,
-		Items: []wire.Component{
-			{Type: wire.ComponentStatGrid, Key: "res-stats", Stats: stats},
-			{
-				Type:     wire.ComponentCode,
-				Key:      "res-code-preview",
-				Path:     "search_program.sac",
-				Language: "elixir",
-				Text:     res.Program.CodeListing,
-			},
-		},
+	stats = append(stats, wire.Stat{Label: "用时", Value: durationLabel(res.TotalDurationMs)})
+	var recipe *Recipe
+	if p.RecipeID != "" {
+		recipe = d.st.recipe(p.RecipeID)
 	}
-	secs = append(secs, overview)
+	secs = append(secs, wire.Section{
+		Title:  resultTitle(res, recipe),
+		Footer: "想看每一步是怎么搜的，打开「高级：怎么搜的」。",
+		Items:  []wire.Component{{Type: wire.ComponentStatGrid, Key: "res-stats", Stats: stats}},
+	})
 
-	// 2. Quick recipe chips/rows when no manual query is active
+	// 3. Saved searches to try with one tap, while no words are typed.
 	if p.Query == "" {
 		recSec := wire.Section{
-			Title:  "常用复杂搜索配方（一键运行）",
-			Footer: "每个配方都是一段可组合的多步 Search-as-Code 流水线：支持过滤工具噪音、跨会话文件关联与按项目/模型聚合。",
+			Title:  "常用搜索（点一下就搜）",
+			Footer: "也可以在「常用搜索」里把自己常搜的存起来。",
 		}
 		for _, r := range recipes[:min(len(recipes), 4)] {
 			badgeText := scopeLabels[r.Scope]
 			if p.RecipeID == r.ID {
-				badgeText = "当前运行"
+				badgeText = "正在看"
 			}
 			recSec.Items = append(recSec.Items, wire.Component{
 				Type:     wire.ComponentRow,
 				Key:      "quick-rec-" + r.ID,
-				Icon:     cmp.Or(r.Icon, "code"),
+				Icon:     cmp.Or(r.Icon, "search"),
 				Title:    r.Name,
 				Subtitle: r.Description,
 				Badge:    &wire.Badge{Text: badgeText, Tone: toneIf(p.RecipeID == r.ID, wire.TonePositive)},
@@ -228,48 +232,45 @@ func (d draw) resultsSections(p page, res *ExecutionResult, recipes []*Recipe) [
 		secs = append(secs, recSec)
 	}
 
-	// 3. Group aggregations (from group_by)
+	// 4. Nothing matched.
+	if len(res.Hits) == 0 {
+		empty := wire.Component{
+			Type:   wire.ComponentEmpty,
+			Icon:   "search",
+			Title:  "没找到相关的聊天",
+			Detail: "换几个词试试，或者把上面的「搜哪些内容」换成「全部」。一直什么都搜不到的话，到「搜哪些地方」看看有没有找到聊天记录。",
+			Button: &wire.EmptyButton{Title: "清空重搜", Action: wire.Action{ID: "reset"}},
+		}
+		secs = append(secs, wire.Section{Title: "找到的聊天", Items: []wire.Component{empty}})
+		return secs
+	}
+
+	// 5. How the hits spread over projects (or computers, models).
 	if len(res.Groups) > 0 {
+		field := res.Groups[0].Field
 		grpStats := make([]wire.Stat, 0, min(len(res.Groups), wire.StatsMost))
 		for _, g := range res.Groups[:min(len(res.Groups), wire.StatsMost)] {
-			val := fmt.Sprintf("%d 条", g.Count)
+			val := fmt.Sprintf("%d 段", g.Count)
 			tone := wire.ToneNeutral
 			if g.ErrorCount > 0 {
-				val += fmt.Sprintf(" (%d 异常)", g.ErrorCount)
+				val += fmt.Sprintf("（%d 段有报错）", g.ErrorCount)
 				tone = wire.ToneCaution
 			}
 			grpStats = append(grpStats, wire.Stat{
-				Label: clipRunes(g.Key, 20),
+				Label: clipRunes(groupKeyLabel(field, g.Key), 20),
 				Value: val,
 				Tone:  tone,
 			})
 		}
 		secs = append(secs, wire.Section{
-			Title: fmt.Sprintf("聚合分布（group_by %s）", res.Groups[0].Field),
+			Title: "按" + groupFieldLabel(field) + "分",
 			Items: []wire.Component{{Type: wire.ComponentStatGrid, Key: "grp-stats", Stats: grpStats}},
 		})
 	}
 
-	// 4. Ranked Evidence Hits
-	if len(res.Hits) == 0 {
-		secs = append(secs, wire.Section{
-			Title: "匹配结果",
-			Items: []wire.Component{{
-				Type:   wire.ComponentEmpty,
-				Icon:   "search",
-				Title:  "没有匹配的会话或代码片段",
-				Detail: "试试切换顶部「检索范围」（如切到「全部」或「纯对话」），调整关键词，或在「会话与数据源」中检查扫描目录。",
-				Button: &wire.EmptyButton{
-					Title:  "重置搜索条件",
-					Action: wire.Action{ID: "reset"},
-				},
-			}},
-		})
-		return secs
-	}
-
+	// 6. The hits, most relevant first.
 	hitSec := wire.Section{
-		Title: fmt.Sprintf("结构化证据卡片 · %d 条", len(res.Hits)),
+		Title: fmt.Sprintf("找到的聊天 · %d 段", len(res.Hits)),
 	}
 	shownHits := res.Hits[:min(len(res.Hits), maxShownHits)]
 	for i, h := range shownHits {
@@ -279,40 +280,37 @@ func (d draw) resultsSections(p page, res *ExecutionResult, recipes []*Recipe) [
 		} else if h.ErrorCount > 0 {
 			icon = "warning"
 		}
-		metaParts := []string{cmp.Or(h.Project, "workspace"), h.Harness}
+		metaParts := []string{cmp.Or(h.Project, "未归入项目"), harnessLabel(h.Harness)}
 		if len(res.Machines) > 0 || h.Machine != "" {
-			metaParts = append([]string{"🖥 " + machineLabel(h.Machine, h.MachineName)}, metaParts...)
+			metaParts = append([]string{"电脑 " + machineTitle(machineLabel(h.Machine, h.MachineName))}, metaParts...)
 		}
 		if h.Model != "" {
 			metaParts = append(metaParts, h.Model)
 		}
 		if h.Branch != "" {
-			metaParts = append(metaParts, "⎇ "+h.Branch)
+			metaParts = append(metaParts, "分支 "+h.Branch)
 		}
 		if h.TurnCount > 0 {
-			metaParts = append(metaParts, fmt.Sprintf("%d 轮对话", h.TurnCount))
+			metaParts = append(metaParts, fmt.Sprintf("%d 条消息", h.TurnCount))
 		}
 		archived := h.Location == locationArchived
 		cold := archived || h.Location == locationUnconfirmed
 		if cold && h.ErrorCount > 0 {
-			metaParts = append(metaParts, fmt.Sprintf("%d 异常", h.ErrorCount))
+			metaParts = append(metaParts, fmt.Sprintf("%d 处报错", h.ErrorCount))
 		}
-		badge := &wire.Badge{
-			Text: fmt.Sprintf("%.1f 分", h.Score),
-			Tone: wire.ToneNeutral,
-		}
+		var badge *wire.Badge
 		if h.ErrorCount > 0 {
 			badge = &wire.Badge{
-				Text: fmt.Sprintf("%d 异常", h.ErrorCount),
+				Text: fmt.Sprintf("%d 处报错", h.ErrorCount),
 				Tone: wire.ToneDanger,
 			}
 		}
 		if cold {
 			icon = "cloud"
-			badge = &wire.Badge{Text: h.Location, Tone: wire.ToneCaution}
+			badge = &wire.Badge{Text: locationLabel(h.Location), Tone: wire.ToneCaution}
 		}
 		if h.Cached && !cold {
-			badge = &wire.Badge{Text: "离线缓存", Tone: wire.ToneCaution}
+			badge = &wire.Badge{Text: "离线副本", Tone: wire.ToneCaution}
 		}
 		restoring := archived && d.st.restoreRunning(h.EntryID)
 		if restoring {
@@ -336,16 +334,11 @@ func (d draw) resultsSections(p page, res *ExecutionResult, recipes []*Recipe) [
 		}
 		hitSec.Items = append(hitSec.Items, row)
 		for j, sn := range h.Snippets[:min(len(h.Snippets), 2)] {
-			prefix := fmt.Sprintf("[%s", sn.Role)
-			if sn.Line > 0 {
-				prefix += fmt.Sprintf(" L%d", sn.Line)
-			}
-			prefix += "] "
 			hitSec.Items = append(hitSec.Items, wire.Component{
 				Type:  wire.ComponentText,
 				Key:   fmt.Sprintf("hit-snip-%d-%d", i, j),
 				Style: wire.TextStyleSecondary,
-				Text:  prefix + sn.Text,
+				Text:  snippetPrefix(sn) + sn.Text,
 			})
 		}
 		if len(h.Correlated) > 0 {
@@ -357,15 +350,55 @@ func (d draw) resultsSections(p page, res *ExecutionResult, recipes []*Recipe) [
 				Type:  wire.ComponentText,
 				Key:   fmt.Sprintf("hit-corr-%d", i),
 				Style: wire.TextStyleCaption,
-				Text:  "关联上下文：" + strings.Join(corrNames, " ； "),
+				Text:  "相关的其他聊天：" + strings.Join(corrNames, "；"),
 			})
 		}
 	}
+	hitSec.Footer = "点一段聊天看前后经过。"
 	if len(res.Hits) > maxShownHits {
-		hitSec.Footer = fmt.Sprintf("显示前 %d 条最高分证据（共 %d 条）。可在搜索框或流水线中使用 limit(n=...) 调整。", maxShownHits, len(res.Hits))
+		hitSec.Footer = fmt.Sprintf("只显示最相关的 %d 段（共 %d 段）。换几个更具体的词可以缩小范围。", maxShownHits, len(res.Hits))
 	}
 	secs = append(secs, hitSec)
 	return secs
+}
+
+// noSessionsDetail says where chats are read from and what to do when none were found.
+const noSessionsDetail = "这里会自动读取这台电脑上 Claude Code（~/.claude/projects）和 Codex（~/.codex/sessions）的聊天记录。先用它们聊几次再回来；记录放在别的文件夹的话，到「搜哪些地方」把文件夹填上；在别的电脑上的话，到「" + settingsPlace + "」的「" + machinesSetting + "」里选上那台电脑。"
+
+// introSection says what the page is for, gives one example and the ways to start a search.
+func introSection() wire.Section {
+	return wire.Section{
+		Title: "这是做什么的",
+		Items: []wire.Component{
+			{
+				Type: wire.ComponentText,
+				Key:  "intro-what",
+				Text: "在你以前和 Claude Code、Codex 的聊天记录里找东西。比如想知道「上次那个 429 报错是怎么修好的？」，在上面的搜索框输入「429」，就能找到当时的聊天，还会标出是哪个项目、哪台电脑上的。",
+			},
+			{
+				Type:  wire.ComponentText,
+				Key:   "intro-how",
+				Style: wire.TextStyleSecondary,
+				Text:  "怎么开始：在上面的搜索框里输入几个词；或者点下面的常用搜索；也可以直接对 Persona 助手说「帮我在以前的聊天记录里找找……」，它读之前会先问你。",
+			},
+		},
+	}
+}
+
+// snippetPrefix says who said a snippet ("你：", "文件 第 3 行：").
+func snippetPrefix(sn EvidenceSnippet) string {
+	if sn.Role == "File" && sn.Line > 0 {
+		return fmt.Sprintf("文件 第 %d 行：", sn.Line)
+	}
+	return roleLabel(sn.Role) + "："
+}
+
+// durationLabel is a run's duration in plain words.
+func durationLabel(ms int64) string {
+	if ms < 1000 {
+		return "不到 1 秒"
+	}
+	return fmt.Sprintf("%.1f 秒", float64(ms)/1000)
 }
 
 func (d draw) codeAndTraceSections(p page, res *ExecutionResult) []wire.Section {
@@ -373,11 +406,11 @@ func (d draw) codeAndTraceSections(p page, res *ExecutionResult) []wire.Section 
 
 	// 1. Step Execution Trace Table
 	cols := []wire.TableColumn{
-		{Title: "#"},
-		{Title: "算子调用"},
-		{Title: "输入 → 输出", Align: "end"},
-		{Title: "耗时", Align: "end"},
-		{Title: "执行轨迹说明"},
+		{Title: "第几步"},
+		{Title: "步骤"},
+		{Title: "进 → 留下", Align: "end"},
+		{Title: "用时", Align: "end"},
+		{Title: "做了什么"},
 	}
 	rows := make([][]string, 0, len(res.StepTraces))
 	for _, tr := range res.StepTraces {
@@ -394,8 +427,8 @@ func (d draw) codeAndTraceSections(p page, res *ExecutionResult) []wire.Section 
 		})
 	}
 	secs = append(secs, wire.Section{
-		Title:  "算子执行轨迹（Step Trace）",
-		Footer: "每一步算子在本地沙箱中顺序流式执行，记录输入集规模、过滤后输出集规模与单步耗时。",
+		Title:  "这次是怎么搜的",
+		Footer: "给想自己调整搜索的人看。每次搜索都会变成上面这样几步，按顺序执行：表里记着每一步进来多少条、留下多少条、花了多久。",
 		Items: []wire.Component{
 			{
 				Type:     wire.ComponentCode,
@@ -416,15 +449,15 @@ func (d draw) codeAndTraceSections(p page, res *ExecutionResult) []wire.Section 
 	if len(res.Machines) > 0 {
 		rows := make([][]string, 0, len(res.Machines))
 		for _, m := range res.Machines {
-			rows = append(rows, []string{m.Name, machineStatusLabel(m.Status), strconv.Itoa(m.Sessions), strconv.Itoa(m.Hits), fmt.Sprintf("%d ms", m.DurationMs), m.Note})
+			rows = append(rows, []string{machineTitle(m.Name), machineStatusLabel(m.Status), strconv.Itoa(m.Sessions), strconv.Itoa(m.Hits), durationLabel(m.DurationMs), m.Note})
 		}
 		secs = append(secs, wire.Section{
-			Title:  "各电脑的检索（fan_out）",
-			Footer: "在线的电脑经 nodes.call 在本机执行同一段流水线，只回传排好序的证据片段；离线的电脑检索 hub 上已同步的纯对话索引。",
+			Title:  "每台电脑的情况",
+			Footer: "在线的电脑在它自己那里搜，只把找到的片段传回来；不在线的电脑，搜的是之前同步过来的精简副本。",
 			Items: []wire.Component{{
 				Type:    wire.ComponentTable,
 				Key:     "trace-machines",
-				Columns: []wire.TableColumn{{Title: "电脑"}, {Title: "状态"}, {Title: "会话", Align: "end"}, {Title: "命中", Align: "end"}, {Title: "耗时", Align: "end"}, {Title: "说明"}},
+				Columns: []wire.TableColumn{{Title: "电脑"}, {Title: "状态"}, {Title: "搜了几段", Align: "end"}, {Title: "找到", Align: "end"}, {Title: "用时", Align: "end"}, {Title: "说明"}},
 				Rows:    rows,
 			}},
 		})
@@ -432,40 +465,40 @@ func (d draw) codeAndTraceSections(p page, res *ExecutionResult) []wire.Section 
 
 	// 2. Interactive Search-as-Code Pipeline Runner & Recipe Saver
 	secs = append(secs, wire.Section{
-		Title:  "编写或调整 Search-as-Code 流水线",
-		Footer: "支持算子：scan_sessions、scan_files、where、exclude_tools、match_regex、correlate、dedup、group_by、rank、limit，使用 |> 串联；scan_sessions / where 的 machine= 与搜索框里的 machine:<电脑> 只检索指定电脑，group_by(field=\"machine\") 按电脑聚合。",
+		Title:  "自己写搜索步骤",
+		Footer: "一行一步，用 |> 连起来。能用的步骤：scan_sessions（搜聊天）、scan_files（搜代码文件夹）、where（按项目、模型、时间筛选）、exclude_tools（去掉命令和工具输出）、match_regex（按规则匹配）、correlate（找提到同一文件的其他聊天）、dedup（去重）、group_by（分组）、rank（排序）、limit（最多几条）。加 machine=\"电脑\" 只搜那台电脑。",
 		Items: []wire.Component{
 			{
 				Type:        wire.ComponentField,
 				Name:        "custom_code",
-				Label:       "Search-as-Code 程序代码",
+				Label:       "搜索步骤",
 				Kind:        wire.FieldKindText,
 				Value:       res.Program.CodeListing,
 				Placeholder: `scan_sessions(query="timeout", scope="conversation") |> exclude_tools() |> correlate(by="file") |> group_by(field="project") |> rank(by="relevance_freshness") |> limit(n=20)`,
 			},
 			{
 				Type:   wire.ComponentButton,
-				Title:  "运行此 Search-as-Code 程序",
+				Title:  "按这些步骤搜",
 				Action: &wire.Action{ID: "run-code", Submit: true},
 			},
 			{
 				Type:   wire.ComponentButton,
-				Title:  "保存为可复用搜索配方",
-				Action: pushPage(page{Scope: p.Scope, Query: res.Program.CodeListing, Mode: modeRecipeEdit}, "保存搜索配方"),
+				Title:  "存为常用搜索",
+				Action: pushPage(page{Scope: p.Scope, Query: res.Program.CodeListing, Mode: modeRecipeEdit}, "存为常用搜索"),
 			},
 		},
 	})
 
 	// 3. Recent Runs History
 	if len(d.st.History) > 0 {
-		histSec := wire.Section{Title: "最近执行的搜索程序"}
+		histSec := wire.Section{Title: "最近搜过的", Footer: "点一条再搜一次。"}
 		for i, h := range d.st.History[:min(len(d.st.History), 8)] {
 			histSec.Items = append(histSec.Items, wire.Component{
 				Type:     wire.ComponentRow,
 				Key:      fmt.Sprintf("hist-%d", i),
 				Icon:     "clock",
 				Title:    clipRunes(h.Title, 80),
-				Subtitle: fmt.Sprintf("%s · %d 步算子 · %d 条命中 · %d ms", scopeLabels[h.Scope], h.StepCount, h.TotalMatches, h.TotalDurationMs),
+				Subtitle: fmt.Sprintf("%s · 找到 %d 段 · %s", scopeLabels[h.Scope], h.TotalMatches, durationLabel(h.TotalDurationMs)),
 				Value:    d.formatTime(h.RanAt),
 				Action:   &wire.Action{ID: "rerun-history", Values: map[string]string{"i": strconv.Itoa(i)}},
 			})
@@ -478,49 +511,41 @@ func (d draw) codeAndTraceSections(p page, res *ExecutionResult) []wire.Section 
 
 func (d draw) recipesSections(p page, recipes []*Recipe) []wire.Section {
 	listSec := wire.Section{
-		Title:  "已保存的复杂搜索代码配方",
-		Footer: "点按任意配方即可运行对应的多步 Search-as-Code 程序；也可以新建或编辑自定义配方。",
+		Title:  "常用搜索",
+		Footer: "点一下就按它搜。也可以新建自己常用的搜索，或者改一改已有的。",
 	}
 	for _, r := range recipes {
-		tag := "自定义配方"
+		tag := "我建的"
 		if r.Builtin {
-			tag = "预置配方"
+			tag = "自带"
 		}
 		listSec.Items = append(listSec.Items,
 			wire.Component{
 				Type:     wire.ComponentRow,
 				Key:      "rec-row-" + r.ID,
-				Icon:     cmp.Or(r.Icon, "code"),
+				Icon:     cmp.Or(r.Icon, "search"),
 				Title:    r.Name,
-				Subtitle: fmt.Sprintf("%s · 默认范围：%s · %s", r.ID, scopeLabels[r.Scope], r.Description),
+				Subtitle: fmt.Sprintf("%s · 搜：%s", r.Description, scopeLabels[r.Scope]),
 				Badge:    &wire.Badge{Text: tag, Tone: toneIf(r.Builtin, wire.TonePositive)},
 				Action:   &wire.Action{ID: "run-recipe", Values: map[string]string{"id": r.ID}},
-			},
-			wire.Component{
-				Type:     wire.ComponentCode,
-				Key:      "rec-code-" + r.ID,
-				Path:     r.ID + ".sac",
-				Language: "elixir",
-				Text:     r.Code,
-			},
-			wire.Component{
-				Type:  wire.ComponentButton,
-				Key:   "rec-edit-" + r.ID,
-				Title: "编辑配方「" + r.Name + "」",
-				Action: pushPage(page{
-					Tab:          "recipes",
-					Scope:        p.Scope,
-					EditRecipeID: r.ID,
-					Mode:         modeRecipeEdit,
-				}, "编辑配方"),
+				Actions: []wire.RowAction{{
+					Title: "修改",
+					Icon:  "edit",
+					Action: *pushPage(page{
+						Tab:          "recipes",
+						Scope:        p.Scope,
+						EditRecipeID: r.ID,
+						Mode:         modeRecipeEdit,
+					}, "修改常用搜索"),
+				}},
 			},
 		)
 	}
 	listSec.Items = append(listSec.Items, wire.Component{
 		Type:   wire.ComponentButton,
 		Key:    "btn-new-recipe",
-		Title:  "＋ 新建 Search-as-Code 配方",
-		Action: pushPage(page{Tab: "recipes", Scope: p.Scope, Mode: modeRecipeEdit}, "新建搜索配方"),
+		Title:  "＋ 新建常用搜索",
+		Action: pushPage(page{Tab: "recipes", Scope: p.Scope, Mode: modeRecipeEdit}, "新建常用搜索"),
 	})
 	return []wire.Section{listSec}
 }
@@ -529,24 +554,34 @@ func (d draw) sourcesSections(p page) []wire.Section {
 	_, stats := loadSessions(d.st)
 
 	statItems := []wire.Stat{
-		{Label: "已索引会话", Value: strconv.Itoa(stats.TotalSessions), Tone: toneIf(stats.TotalSessions > 0, wire.TonePositive)},
-		{Label: "对话与事件轮次", Value: strconv.Itoa(stats.TotalTurns)},
-		{Label: "含异常会话", Value: strconv.Itoa(stats.ErrorSessions), Tone: toneIf(stats.ErrorSessions > 0, wire.ToneCaution)},
-		{Label: "会话源目录数", Value: strconv.Itoa(len(stats.SessionDirs))},
-		{Label: locationArchived + "会话", Value: strconv.Itoa(stats.ArchivedSessions)},
+		{Label: "找到的聊天", Value: fmt.Sprintf("%d 段", stats.TotalSessions), Tone: toneIf(stats.TotalSessions > 0, wire.TonePositive)},
+		{Label: "消息", Value: fmt.Sprintf("%d 条", stats.TotalTurns)},
+		{Label: "有报错的", Value: fmt.Sprintf("%d 段", stats.ErrorSessions), Tone: toneIf(stats.ErrorSessions > 0, wire.ToneCaution)},
+		{Label: "聊天记录文件夹", Value: fmt.Sprintf("%d 个", len(stats.SessionDirs))},
+		{Label: "已移到云端", Value: fmt.Sprintf("%d 段", stats.ArchivedSessions)},
 	}
 	if stats.UnconfirmedSessions > 0 {
-		statItems = append(statItems, wire.Stat{Label: locationUnconfirmed, Value: strconv.Itoa(stats.UnconfirmedSessions), Tone: wire.ToneCaution})
+		statItems = append(statItems, wire.Stat{Label: "可能没传完", Value: fmt.Sprintf("%d 段", stats.UnconfirmedSessions), Tone: wire.ToneCaution})
 	}
 	if stats.ArchivedOmitted > 0 {
-		statItems = append(statItems, wire.Stat{Label: "超出上限未扫描", Value: strconv.Itoa(stats.ArchivedOmitted), Tone: wire.ToneCaution})
+		statItems = append(statItems, wire.Stat{Label: "太多没搜", Value: fmt.Sprintf("%d 段", stats.ArchivedOmitted), Tone: wire.ToneCaution})
 	}
 
 	overview := wire.Section{
-		Title: "本机 Coding Agent 会话与代码库索引状态",
+		Title:  "这台电脑上的聊天记录",
+		Footer: "每次搜索都会重新读这些文件夹，不用手动刷新。",
 		Items: []wire.Component{
 			{Type: wire.ComponentStatGrid, Key: "src-stats", Stats: statItems},
 		},
+	}
+	if stats.TotalSessions == 0 {
+		overview.Items = append(overview.Items, wire.Component{
+			Type:   wire.ComponentEmpty,
+			Key:    "src-empty",
+			Icon:   "folder",
+			Title:  "这台电脑上还没找到聊天记录",
+			Detail: noSessionsDetail,
+		})
 	}
 	for i, dir := range stats.SessionDirs {
 		overview.Items = append(overview.Items, wire.Component{
@@ -554,8 +589,8 @@ func (d draw) sourcesSections(p page) []wire.Section {
 			Key:      fmt.Sprintf("sdir-%d", i),
 			Icon:     "folder",
 			Title:    shortenHome(dir),
-			Subtitle: "Agent 会话日志目录 (*.jsonl)",
-			Badge:    &wire.Badge{Text: "CASS 扫描源"},
+			Subtitle: "Claude Code / Codex 的聊天记录文件夹",
+			Badge:    &wire.Badge{Text: "聊天记录"},
 		})
 	}
 	for i, dir := range stats.ColdTextDirs {
@@ -564,8 +599,8 @@ func (d draw) sourcesSections(p page) []wire.Section {
 			Key:      fmt.Sprintf("cdir-%d", i),
 			Icon:     "cloud",
 			Title:    shortenHome(dir),
-			Subtitle: "disklessly 已上云会话的本机纯文本索引 (*.jsonl)",
-			Badge:    &wire.Badge{Text: locationArchived},
+			Subtitle: "聊天移到云端后，disklessly 在本机留下的文字索引",
+			Badge:    &wire.Badge{Text: "云端聊天"},
 		})
 	}
 	for i, dir := range stats.RepoDirs {
@@ -574,21 +609,21 @@ func (d draw) sourcesSections(p page) []wire.Section {
 			Key:      fmt.Sprintf("rdir-%d", i),
 			Icon:     "code",
 			Title:    shortenHome(dir),
-			Subtitle: "本地代码与文档仓库目录 (scan_files)",
-			Badge:    &wire.Badge{Text: "代码源"},
+			Subtitle: "代码文件夹：搜索时在词后面加 file:* 就会一起搜",
+			Badge:    &wire.Badge{Text: "代码"},
 		})
 	}
 
-	// Breakdown by Harness and Model
+	// How the chats spread over tools, models and projects.
 	var distRows [][]string
 	for h, cnt := range stats.ByHarness {
-		distRows = append(distRows, []string{"Harness", h, strconv.Itoa(cnt)})
+		distRows = append(distRows, []string{"工具", harnessLabel(h), strconv.Itoa(cnt)})
 	}
 	for m, cnt := range stats.ByModel {
-		distRows = append(distRows, []string{"Model", m, strconv.Itoa(cnt)})
+		distRows = append(distRows, []string{"模型", m, strconv.Itoa(cnt)})
 	}
 	for proj, cnt := range stats.ByProject {
-		distRows = append(distRows, []string{"Project", proj, strconv.Itoa(cnt)})
+		distRows = append(distRows, []string{"项目", proj, strconv.Itoa(cnt)})
 	}
 	slices.SortFunc(distRows, func(a, b []string) int {
 		if c := cmp.Compare(a[0], b[0]); c != 0 {
@@ -603,47 +638,47 @@ func (d draw) sourcesSections(p page) []wire.Section {
 	}
 	if len(distRows) > 0 {
 		secs = append(secs, wire.Section{
-			Title: "Harness / 模型 / 项目分布",
+			Title: "按工具、模型和项目分",
 			Items: []wire.Component{{
 				Type:    wire.ComponentTable,
 				Key:     "src-dist-table",
-				Columns: []wire.TableColumn{{Title: "维度"}, {Title: "名称"}, {Title: "会话数", Align: "end"}},
+				Columns: []wire.TableColumn{{Title: "按什么分"}, {Title: "名称"}, {Title: "聊天", Align: "end"}},
 				Rows:    distRows[:min(len(distRows), 20)],
 			}},
 		})
 	}
 
 	cfgSec := wire.Section{
-		Title:  "配置检索目录",
-		Footer: "默认自动扫描 ~/.claude/projects、~/.codex/sessions 与 disklessly 的已上云会话索引（<状态目录>/sessions/text）；你可以在此附加自定义会话目录、索引目录或本地代码仓库目录。",
+		Title:  "再加几个文件夹（一般不用填）",
+		Footer: "默认已经会搜 ~/.claude/projects、~/.codex/sessions，以及 disklessly 留在本机的云端聊天索引。只有聊天记录放在别处，或者想连代码一起搜时才需要填。多个文件夹用逗号隔开。",
 		Items: []wire.Component{
 			{
 				Type:        wire.ComponentField,
 				Name:        "session_dirs",
-				Label:       "额外会话目录（用逗号或分号分隔）",
+				Label:       "其他聊天记录文件夹",
 				Kind:        wire.FieldKindText,
 				Value:       shortenHomeList(d.st.SessionDirs),
-				Placeholder: "~/.claude/projects, ~/.codex/sessions",
+				Placeholder: "例如 ~/backup/claude-projects",
 			},
 			{
 				Type:        wire.ComponentField,
 				Name:        "repo_dirs",
-				Label:       "本地代码与文档目录（供 scan_files 检索）",
+				Label:       "代码文件夹（搜索时加 file:* 一起搜）",
 				Kind:        wire.FieldKindText,
 				Value:       shortenHomeList(d.st.RepoDirs),
-				Placeholder: "~/workspace/persona-hub",
+				Placeholder: "例如 ~/code/my-app",
 			},
 			{
 				Type:        wire.ComponentField,
 				Name:        "cold_text_dirs",
-				Label:       "额外已上云会话索引目录（disklessly 的 sessions/text，用逗号或分号分隔）",
+				Label:       "云端聊天的索引文件夹（disklessly 的 sessions/text）",
 				Kind:        wire.FieldKindText,
 				Value:       shortenHomeList(d.st.ColdTextDirs),
 				Placeholder: "~/.local/share/disklessly/sessions/text",
 			},
 			{
 				Type:   wire.ComponentButton,
-				Title:  "保存检索目录设置",
+				Title:  "保存文件夹",
 				Action: &wire.Action{ID: "save-sources", Submit: true},
 			},
 		},
@@ -678,13 +713,13 @@ func (d draw) hitDetailView(p page) *wire.View {
 	}
 	if hit == nil && sess == nil {
 		return &wire.View{
-			Title: "证据详情",
+			Title: "聊天详情",
 			State: ext.EncodeState(p),
 			Sections: []wire.Section{{Items: []wire.Component{{
 				Type:   wire.ComponentEmpty,
 				Icon:   "search",
-				Title:  "未找到该条命中记录",
-				Detail: "返回上一页重新执行搜索。",
+				Title:  "找不到这段聊天了",
+				Detail: "它可能已经被移走、删除，或者那台电脑还没同步过来。返回上一页重新搜一次。",
 			}}}},
 		}
 	}
@@ -733,35 +768,35 @@ func (d draw) hitDetailView(p page) *wire.View {
 	head := wire.Component{
 		Type:     wire.ComponentHeader,
 		Title:    clipRunes(title, 160),
-		Subtitle: fmt.Sprintf("%s · %s · 更新于 %s", cmp.Or(project, "workspace"), harness, d.formatTime(updatedAt)),
+		Subtitle: fmt.Sprintf("%s · %s · 更新于 %s", cmp.Or(project, "未归入项目"), harnessLabel(harness), d.formatTime(updatedAt)),
 		Facts: []wire.Fact{
-			{Label: "项目", Value: cmp.Or(project, "workspace")},
-			{Label: "Harness", Value: cmp.Or(harness, "claude-code")},
-			{Label: "模型", Value: cmp.Or(model, "default")},
+			{Label: "项目", Value: cmp.Or(project, "未归入项目")},
+			{Label: "工具", Value: harnessLabel(cmp.Or(harness, "claude-code"))},
+			{Label: "模型", Value: cmp.Or(model, "未知")},
 		},
 	}
 	if branch != "" {
 		head.Facts = append(head.Facts, wire.Fact{Label: "分支", Value: branch})
 	}
 	if machineID != "" || d.fleet != nil {
-		head.Facts = append(head.Facts, wire.Fact{Label: "电脑", Value: machineLabel(machineID, cmp.Or(machineName, sessMachineName(sess)))})
+		head.Facts = append(head.Facts, wire.Fact{Label: "电脑", Value: machineTitle(machineLabel(machineID, cmp.Or(machineName, sessMachineName(sess))))})
 	}
 	if hit != nil && hit.Cached {
-		head.Badges = append(head.Badges, wire.Badge{Text: "离线缓存", Tone: wire.ToneCaution})
+		head.Badges = append(head.Badges, wire.Badge{Text: "离线副本", Tone: wire.ToneCaution})
 	}
 	if sess != nil {
 		head.Facts = append(head.Facts,
-			wire.Fact{Label: "对话轮次", Value: strconv.Itoa(sess.TurnCount)},
-			wire.Fact{Label: "工具调用", Value: strconv.Itoa(sess.ToolCalls)},
+			wire.Fact{Label: "消息", Value: fmt.Sprintf("%d 条", sess.TurnCount)},
+			wire.Fact{Label: "运行命令和工具", Value: fmt.Sprintf("%d 次", sess.ToolCalls)},
 		)
 		if sess.ErrorCount > 0 {
-			head.Badges = []wire.Badge{{Text: fmt.Sprintf("%d 处异常", sess.ErrorCount), Tone: wire.ToneDanger}}
+			head.Badges = []wire.Badge{{Text: fmt.Sprintf("%d 处报错", sess.ErrorCount), Tone: wire.ToneDanger}}
 		}
 		if sess.Archived {
-			head.Badges = append(head.Badges, wire.Badge{Text: sessionLocation(sess), Tone: wire.ToneCaution})
-			head.Facts = append(head.Facts, wire.Fact{Label: "原路径", Value: cmp.Or(sess.FilePath, "未知")})
+			head.Badges = append(head.Badges, wire.Badge{Text: locationLabel(sessionLocation(sess)), Tone: wire.ToneCaution})
+			head.Facts = append(head.Facts, wire.Fact{Label: "原来的位置", Value: cmp.Or(sess.FilePath, "未知")})
 			if !sess.ArchivedAt.IsZero() {
-				head.Facts = append(head.Facts, wire.Fact{Label: "上云时间", Value: d.formatTime(sess.ArchivedAt)})
+				head.Facts = append(head.Facts, wire.Fact{Label: "移到云端的时间", Value: d.formatTime(sess.ArchivedAt)})
 			}
 		}
 	}
@@ -770,20 +805,20 @@ func (d draw) hitDetailView(p page) *wire.View {
 	switch {
 	case sess != nil && sess.Archived && sess.Unconfirmed:
 		secs = append(secs, wire.Section{
-			Title: "此会话" + locationUnconfirmed,
+			Title: "这段聊天可能没传完",
 			Items: []wire.Component{{
 				Type: wire.ComponentText,
 				Key:  "unconfirmed",
-				Text: "本机有 disklessly 写下的纯文本索引，但上传没有完成（索引里没有云端分段与上云时间），云端可能没有这个会话的副本，因此不提供恢复。可在终端运行 disklessly sessions status 查看。",
+				Text: "本机有 disklessly 留下的文字索引，但上传没有完成，云端可能没有这段聊天的副本，所以这里不提供恢复。想确认的话，在终端运行 disklessly sessions status。",
 			}},
 		})
 	case sess != nil && sess.Archived:
 		sec := wire.Section{
-			Title:  "此会话已上云",
-			Footer: "原文件已由 disklessly 移到云端，这里检索的是那台电脑保存的纯文本索引（仅用户与助手消息）。恢复在会话所在的电脑上进行，原文件回到原路径，可继续会话。",
+			Title:  "这段聊天已移到云端",
+			Footer: "原文件已被 disklessly 移到云端，这里搜的是那台电脑留下的文字（只有你和助手说的话）。点「恢复」会在它所在的电脑上把原文件放回原来的位置，之后可以接着聊。",
 		}
 		if d.st.restoreRunning(sess.EntryID) {
-			sec.Items = []wire.Component{{Type: wire.ComponentText, Key: "restoring", Text: "正在恢复，完成后在首页显示结果。"}}
+			sec.Items = []wire.Component{{Type: wire.ComponentText, Key: "restoring", Text: "正在恢复，好了以后在首页显示结果。"}}
 		} else {
 			sec.Items = []wire.Component{{
 				Type:   wire.ComponentButton,
@@ -796,13 +831,13 @@ func (d draw) hitDetailView(p page) *wire.View {
 	}
 
 	if len(snippets) > 0 {
-		snipSec := wire.Section{Title: "命中证据片段（带角色与行号归属）"}
+		snipSec := wire.Section{Title: "和搜索词有关的片段"}
 		for i, sn := range snippets {
 			snipSec.Items = append(snipSec.Items, wire.Component{
 				Type:     wire.ComponentRow,
 				Key:      fmt.Sprintf("det-snip-%d", i),
 				Icon:     roleIcon(sn.Role),
-				Title:    fmt.Sprintf("%s · 第 %d 行", sn.Role, max(sn.Line, 1)),
+				Title:    fmt.Sprintf("%s · 第 %d 行", roleLabel(sn.Role), max(sn.Line, 1)),
 				Subtitle: sn.Text,
 			})
 		}
@@ -811,8 +846,8 @@ func (d draw) hitDetailView(p page) *wire.View {
 
 	if sess != nil && len(sess.Turns) > 0 {
 		turnSec := wire.Section{
-			Title:  "会话上下文时间线（Without tools 降噪视图）",
-			Footer: "默认过滤繁杂的中间工具调用 JSON，保留 User 提问、Assistant 核心回答与 Error 异常现场。",
+			Title:  "聊天经过",
+			Footer: "已略去中间的命令和工具输出，只留下你的提问、助手的回答和报错。",
 		}
 		shown := 0
 		for i, tr := range sess.Turns {
@@ -824,7 +859,7 @@ func (d draw) hitDetailView(p page) *wire.View {
 				Type:     wire.ComponentRow,
 				Key:      fmt.Sprintf("turn-%d", i),
 				Icon:     roleIcon(sn.Role),
-				Title:    fmt.Sprintf("%s (L%d)", sn.Role, tr.Line),
+				Title:    fmt.Sprintf("%s（第 %d 行）", roleLabel(sn.Role), tr.Line),
 				Subtitle: clipRunes(tr.Text, 300),
 				Badge:    badgeIfError(tr.IsError, tr.ErrorKind),
 			})
@@ -839,8 +874,8 @@ func (d draw) hitDetailView(p page) *wire.View {
 
 	if len(files) > 0 {
 		fileSec := wire.Section{
-			Title:  "涉及的代码文件（点击跨会话溯源该文件）",
-			Footer: "点按任意文件名即可生成并执行针对该文件的跨会话 Search-as-Code 检索。",
+			Title:  "聊到的文件",
+			Footer: "点一个文件，找出所有聊到或改过它的聊天。",
 		}
 		for i, fp := range files[:min(len(files), 10)] {
 			fileSec.Items = append(fileSec.Items, wire.Component{
@@ -848,7 +883,7 @@ func (d draw) hitDetailView(p page) *wire.View {
 				Key:      fmt.Sprintf("file-%d", i),
 				Icon:     "file",
 				Title:    fp,
-				Subtitle: "点按检索所有修改或讨论过该文件的会话",
+				Subtitle: "找出所有聊到它的聊天",
 				Action:   &wire.Action{ID: "pivot-query", Values: map[string]string{"q": filepath.Base(fp)}},
 			})
 		}
@@ -856,7 +891,7 @@ func (d draw) hitDetailView(p page) *wire.View {
 	}
 
 	if len(correlated) > 0 {
-		corrSec := wire.Section{Title: "跨会话关联（correlate 算子发现）"}
+		corrSec := wire.Section{Title: "相关的其他聊天"}
 		for i, cr := range correlated {
 			corrPage := p
 			corrPage.HitID = cr.ID
@@ -892,14 +927,14 @@ func (d draw) recipeFormView(p page) *wire.View {
 	if codeVal == "" || !looksLikePipelineCode(codeVal) {
 		codeVal = "scan_sessions(query=\"\", scope=\"conversation\")\n|> exclude_tools()\n|> correlate(by=\"file\")\n|> group_by(field=\"project\")\n|> rank(by=\"relevance_freshness\")\n|> limit(n=25)"
 	}
-	title := "新建搜索配方"
+	title := "新建常用搜索"
 	if existing != nil {
 		idVal = existing.ID
 		nameVal = existing.Name
 		descVal = existing.Description
 		scopeVal = existing.Scope
 		codeVal = existing.Code
-		title = "编辑配方 · " + existing.Name
+		title = "修改常用搜索 · " + existing.Name
 	}
 
 	scopeChoices := make([]wire.Choice, len(scopes))
@@ -911,7 +946,7 @@ func (d draw) recipeFormView(p page) *wire.View {
 		{
 			Type:        wire.ComponentField,
 			Name:        "id",
-			Label:       "配方 ID（小写字母、数字、连字符）",
+			Label:       "代号（用来区分，小写字母开头，可用字母、数字和 -）",
 			Kind:        wire.FieldKindText,
 			Value:       idVal,
 			Placeholder: "例如 quota-debugging",
@@ -922,7 +957,7 @@ func (d draw) recipeFormView(p page) *wire.View {
 			Label:       "名称 *",
 			Kind:        wire.FieldKindText,
 			Value:       nameVal,
-			Placeholder: "例如 配额与网关报错排查",
+			Placeholder: "例如 网关报错排查",
 		},
 		{
 			Type:        wire.ComponentField,
@@ -930,12 +965,12 @@ func (d draw) recipeFormView(p page) *wire.View {
 			Label:       "说明",
 			Kind:        wire.FieldKindText,
 			Value:       descVal,
-			Placeholder: "一句话说明该搜索配方的用途",
+			Placeholder: "一句话说明用来找什么",
 		},
 		{
 			Type:    wire.ComponentField,
 			Name:    "recipe_scope",
-			Label:   "默认检索范围",
+			Label:   "搜哪些内容",
 			Kind:    wire.FieldKindChoice,
 			Choices: scopeChoices,
 			Value:   scopeVal,
@@ -943,14 +978,14 @@ func (d draw) recipeFormView(p page) *wire.View {
 		{
 			Type:        wire.ComponentField,
 			Name:        "code",
-			Label:       "Search-as-Code 流水线代码 *",
+			Label:       "搜索步骤 *（写法见「高级：怎么搜的」）",
 			Kind:        wire.FieldKindText,
 			Value:       codeVal,
 			Placeholder: `scan_sessions(query="", scope="conversation") |> exclude_tools() |> limit(n=25)`,
 		},
 		{
 			Type:   wire.ComponentButton,
-			Title:  "保存配方",
+			Title:  "保存",
 			Action: &wire.Action{ID: "save-recipe", Submit: true},
 		},
 	}
@@ -958,12 +993,12 @@ func (d draw) recipeFormView(p page) *wire.View {
 	if existing != nil && !existing.Builtin {
 		items = append(items, wire.Component{
 			Type:  wire.ComponentButton,
-			Title: "删除此配方",
+			Title: "删除这个常用搜索",
 			Role:  wire.ButtonRoleDestructive,
 			Action: &wire.Action{
 				ID:      "delete-recipe",
 				Values:  map[string]string{"id": existing.ID},
-				Confirm: "确认删除搜索配方「" + existing.Name + "」？",
+				Confirm: "确定删除常用搜索「" + existing.Name + "」？删除后不能找回。",
 			},
 		})
 	}
@@ -971,7 +1006,7 @@ func (d draw) recipeFormView(p page) *wire.View {
 	return &wire.View{
 		Title:    title,
 		State:    ext.EncodeState(p),
-		Sections: []wire.Section{{Title: "Search-as-Code 配方定义", Items: items}},
+		Sections: []wire.Section{{Title: "常用搜索", Footer: "存好以后，在「结果」和「常用搜索」里点一下就能按它搜。", Items: items}},
 	}
 }
 
@@ -991,7 +1026,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		a.mu.Unlock()
 		if f.hasRemote() {
 			f.syncAll(ctx)
-			res.Toast = "已同步在线电脑的会话索引"
+			res.Toast = "已同步在线电脑的聊天副本"
 		}
 		res.View, _ = a.render(ctx, &ext.UIRequest{UIParams: wire.UIParams{State: ext.EncodeState(p), TZ: r.TZ}})
 		return res, nil
@@ -1008,7 +1043,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		case "scope":
 			sc := strings.TrimSpace(r.Values["scope"])
 			if !isValidScope(sc) {
-				return fmt.Errorf("无效的检索范围 %q", sc)
+				return fmt.Errorf("没有「%s」这个范围", sc)
 			}
 			p.Scope = sc
 			p.RecipeID = ""
@@ -1050,7 +1085,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			id := strings.TrimSpace(r.Values["id"])
 			rec := st.recipe(id)
 			if rec == nil {
-				return fmt.Errorf("找不到搜索配方 %q", id)
+				return fmt.Errorf("找不到常用搜索「%s」", id)
 			}
 			p.RecipeID = rec.ID
 			p.Scope = rec.Scope
@@ -1060,7 +1095,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 				return err
 			}
 			run(st, prog)
-			res.Toast = "已执行配方「" + rec.Name + "」"
+			res.Toast = "已按「" + rec.Name + "」搜索"
 
 		case "run-code":
 			code := strings.TrimSpace(r.Values["custom_code"])
@@ -1073,12 +1108,12 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			p.RecipeID = ""
 			p.Tab = "results"
 			run(st, prog)
-			res.Toast = "执行完成"
+			res.Toast = "搜完了"
 
 		case "rerun-history":
 			idx, err := strconv.Atoi(r.Values["i"])
 			if err != nil || idx < 0 || idx >= len(st.History) {
-				return fmt.Errorf("无效的历史记录索引")
+				return fmt.Errorf("这条搜索记录已经不在了")
 			}
 			h := st.History[idx]
 			prog, err := CompileProgram(CompileInput{Code: h.Code, Scope: h.Scope})
@@ -1090,7 +1125,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			p.RecipeID = h.RecipeID
 			p.Tab = "results"
 			run(st, prog)
-			res.Toast = "已重跑历史搜索程序"
+			res.Toast = "已重新搜一次"
 
 		case "pivot-query":
 			q := strings.TrimSpace(r.Values["q"])
@@ -1105,7 +1140,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			}
 			run(st, prog)
 			res.Pop = true
-			res.Toast = "已关联检索：" + q
+			res.Toast = "已搜索「" + q + "」"
 
 		case "save-recipe":
 			rec, err := st.upsertRecipe(RecipeInput{
@@ -1122,7 +1157,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			p.EditRecipeID = ""
 			p.Tab = "recipes"
 			res.Pop = true
-			res.Toast = "已保存配方「" + rec.Name + "」"
+			res.Toast = "已保存常用搜索「" + rec.Name + "」"
 
 		case "delete-recipe":
 			id := cmp.Or(strings.TrimSpace(r.Values["id"]), p.EditRecipeID)
@@ -1133,13 +1168,13 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			p.EditRecipeID = ""
 			p.Tab = "recipes"
 			res.Pop = true
-			res.Toast = "已删除配方"
+			res.Toast = "已删除常用搜索"
 
 		case "save-sources":
 			st.SessionDirs = splitDirs(r.Values["session_dirs"])
 			st.RepoDirs = splitDirs(r.Values["repo_dirs"])
 			st.ColdTextDirs = splitDirs(r.Values["cold_text_dirs"])
-			res.Toast = "已更新检索目录"
+			res.Toast = "已保存文件夹，下次搜索就会用上"
 
 		case "open":
 			// Handled by Push on client
@@ -1150,7 +1185,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		return nil
 	})
 	if err != nil {
-		return nil, &ext.Error{Code: "invalid", Message: err.Error()}
+		return nil, &ext.Error{Code: "invalid", Message: actionFailure(r.Action, err)}
 	}
 	if pending != nil {
 		execRes := a.execute(ctx, scan, *pending, a.now())
@@ -1159,7 +1194,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil
 		})
 		if r.Action == "run-code" {
-			res.Toast = fmt.Sprintf("执行完成：%d 步算子，命中 %d 条", len(execRes.StepTraces), execRes.TotalMatches)
+			res.Toast = fmt.Sprintf("搜完了，找到 %d 段", execRes.TotalMatches)
 		}
 	}
 	if res.Pop {
@@ -1169,32 +1204,60 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	return res, err
 }
 
-// card is the Overview card: the first recipes and one line about the last run that was stored. Drawing it never runs
-// a pipeline: the hub draws the card every time Overview opens, and a scan of every session there (what
-// activeExecution does when the last run had a query) took seconds and held the store's read lock meanwhile.
+// card is the Overview card: what this is for, the first saved searches and one line about the last run that was
+// stored. Drawing it never runs a pipeline: the hub draws the card every time Overview opens, and a scan of every
+// session there (what activeExecution does when the last run had a query) took seconds and held the store's read
+// lock meanwhile.
 func (a *app) card(_ context.Context, _ *ext.UIRequest) (*wire.View, error) {
 	var items []wire.Component
+	a.mu.Lock()
+	f := a.fleet
+	a.mu.Unlock()
 	err := a.db().read(func(st *State) {
 		res := st.LastRun
+		// Nothing to search yet, or the last search read nothing: say why instead of the quick searches.
+		if line, intro := cardSetupText(res, f.hasRemote(), chatFoldersEmpty(st), f.selectedCount()); line != "" {
+			if intro {
+				items = append(items, cardIntro())
+			}
+			items = append(items, wire.Component{Type: wire.ComponentText, Key: "card-setup", Text: line})
+			return
+		}
+		if res == nil || res.ScannedSessions == 0 {
+			items = append(items, cardIntro())
+		}
 		for i, rec := range st.allRecipes()[:min(len(st.allRecipes()), 3)] {
 			items = append(items, wire.Component{
 				Type:     wire.ComponentRow,
 				Key:      fmt.Sprintf("card-rec-%d", i),
-				Icon:     cmp.Or(rec.Icon, "code"),
+				Icon:     cmp.Or(rec.Icon, "search"),
 				Title:    rec.Name,
-				Subtitle: fmt.Sprintf("%s · %s", scopeLabels[rec.Scope], clipRunes(rec.Description, 44)),
+				Subtitle: clipRunes(rec.Description, 44),
 			})
 		}
 		if res != nil && res.ScannedSessions > 0 {
+			what := "上次搜索"
+			if q := strings.TrimSpace(res.Program.Query); q != "" && !looksLikePipelineCode(q) {
+				what = "上次搜「" + clipRunes(q, 20) + "」"
+			}
 			items = append(items, wire.Component{
 				Type:  wire.ComponentText,
 				Key:   "card-summary",
 				Style: wire.TextStyleCaption,
-				Text:  fmt.Sprintf("已索引 %d 个%s Agent 会话%s · 最近流水线命中 %d 条（%d ms）", res.ScannedSessions, machinesNote(res.Machines), archivedNote(res.ScannedArchived), res.TotalMatches, res.TotalDurationMs),
+				Text:  fmt.Sprintf("%s：搜了%s %d 段聊天%s，找到 %d 段", what, machinesNote(res.Machines), res.ScannedSessions, archivedNote(res.ScannedArchived), res.TotalMatches),
 			})
 		}
 	})
 	return &wire.View{Sections: []wire.Section{{Items: items}}}, err
+}
+
+// cardIntro is the card's line about what this is for.
+func cardIntro() wire.Component {
+	return wire.Component{
+		Type: wire.ComponentText,
+		Key:  "card-intro",
+		Text: "在以前和 Claude Code、Codex 的聊天记录里找东西。点开输入几个词就能搜，也可以直接问 Persona 助手。",
+	}
 }
 
 // restoreAction restores an archived session on the computer that holds it (machine: "" for the hub's).
@@ -1227,12 +1290,12 @@ func (a *app) runRestore(ctx context.Context, r *ext.UIRequest, p page) (*wire.A
 		}
 		rec := findArchivedSession(st, entryID)
 		if rec == nil {
-			res.Toast = fmt.Sprintf("本机没有已上云会话 %s（可能已恢复，或来自其他设备）", entryID)
+			res.Toast = "这台电脑上找不到这段云端聊天：可能已经恢复过，或者它在别的电脑上。重新搜一次再看。"
 			return nil
 		}
 		st.setRestore(RestoreNotice{EntryID: entryID, Title: rec.Title, Path: rec.FilePath, Running: true, StartedAt: now.UTC()})
 		dirs, started = slices.Clone(st.ColdTextDirs), true
-		res.Toast = "正在从云端恢复到 " + rec.FilePath + "，完成后在本页显示结果"
+		res.Toast = "正在从云端恢复到 " + rec.FilePath + "，好了以后在本页显示结果"
 		return nil
 	})
 	if err != nil {
@@ -1275,12 +1338,12 @@ func (a *app) runRemoteRestore(ctx context.Context, r *ext.UIRequest, p page, ma
 	a.mu.Unlock()
 	res := &wire.ActionResult{}
 	if f == nil || !validEntryID.MatchString(entryID) {
-		res.Toast = "无法在那台电脑上恢复：它不在要检索的电脑里"
+		res.Toast = remoteRestoreRefused
 		return res, nil
 	}
 	// The action carries the computer from when the page was drawn: it must still be a picked one.
 	if _, ok := f.pickedRemote(ctx, machine); !ok {
-		res.Toast = "无法在那台电脑上恢复：它不在要检索的电脑里"
+		res.Toast = remoteRestoreRefused
 		return res, nil
 	}
 	title, path := entryID, ""
@@ -1299,7 +1362,7 @@ func (a *app) runRemoteRestore(ctx context.Context, r *ext.UIRequest, p page, ma
 		}
 		st.setRestore(RestoreNotice{EntryID: entryID, Machine: machine, Title: title, Path: path, Running: true, StartedAt: now.UTC()})
 		started = true
-		res.Toast = "正在那台电脑上从云端恢复，完成后在本页显示结果"
+		res.Toast = "正在那台电脑上从云端恢复，好了以后在本页显示结果"
 		return nil
 	})
 	if err != nil {
@@ -1332,42 +1395,45 @@ func (a *app) runRemoteRestore(ctx context.Context, r *ext.UIRequest, p page, ma
 	return res, err
 }
 
+// remoteRestoreRefused: the computer of a restore is not among the picked ones (any more).
+const remoteRestoreRefused = "没法在那台电脑上恢复：它不在要搜的电脑里了。到「" + settingsPlace + "」的「" + machinesSetting + "」里重新选上它，再试一次。"
+
 // machinesSection lists the computers a search reaches, with their sync state; a row searches that computer.
 func (d draw) machinesSection() wire.Section {
 	sec := wire.Section{
-		Title:  "要检索的电脑",
-		Footer: "在扩展设置的「要检索的电脑」里选择。在线的电脑实时检索（在那台电脑上执行流水线，只回传证据片段）；离线时检索 hub 上已同步的纯对话索引（每 15 分钟同步一次）。点按一台电脑只检索它。",
+		Title:  "要搜的电脑",
+		Footer: "在「" + settingsPlace + "」的「" + machinesSetting + "」里选。在线的电脑当场在它那里搜，只把找到的片段传回来；不在线的，搜之前同步过来的精简副本（每 15 分钟同步一次，只有你和助手说的话）。点一台电脑就只搜它；右边是在搜索框里只搜它的写法。",
 	}
 	for i, m := range d.fleet.statuses(d.ctx) {
 		row := wire.Component{
 			Type:   wire.ComponentRow,
 			Key:    fmt.Sprintf("machine-%d", i),
 			Icon:   "link",
-			Title:  m.Name,
+			Title:  machineTitle(m.Name),
 			Action: &wire.Action{ID: "pivot-query", Values: map[string]string{"q": "machine:" + m.Key}},
 		}
 		switch {
 		case m.Local:
-			row.Subtitle = "hub 所在的电脑 · 直接读取本机会话"
+			row.Subtitle = "运行 Persona 的这台电脑 · 直接读它的聊天记录"
 			row.Badge = &wire.Badge{Text: "本机", Tone: wire.TonePositive}
 		case m.Online:
-			row.Subtitle = "在线 · 实时检索"
+			row.Subtitle = "在线 · 当场搜"
 			row.Badge = &wire.Badge{Text: "在线", Tone: wire.TonePositive}
 		default:
-			row.Subtitle = "离线"
-			row.Badge = &wire.Badge{Text: "离线", Tone: wire.ToneCaution}
+			row.Subtitle = "不在线"
+			row.Badge = &wire.Badge{Text: "不在线", Tone: wire.ToneCaution}
 		}
 		if !m.Local {
 			if m.SyncedAt.IsZero() {
-				row.Subtitle += " · 尚未同步索引"
+				row.Subtitle += " · 还没同步过，不在线时搜不到它"
 			} else {
-				row.Subtitle += fmt.Sprintf(" · 已同步 %d 个会话的索引（%s）", m.CachedSessions, d.formatTime(m.SyncedAt))
+				row.Subtitle += fmt.Sprintf(" · 已同步 %d 段聊天（%s）", m.CachedSessions, d.formatTime(m.SyncedAt))
 			}
 		}
 		row.Value = "machine:" + m.Key
 		sec.Items = append(sec.Items, row)
 	}
-	sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Key: "sync-machines", Title: "立即同步在线电脑的索引", Action: &wire.Action{ID: "sync-machines"}})
+	sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Key: "sync-machines", Title: "现在同步在线的电脑", Action: &wire.Action{ID: "sync-machines"}})
 	return sec
 }
 
@@ -1385,9 +1451,9 @@ func machinesStat(runs []MachineRun) wire.Stat {
 	}
 	v := fmt.Sprintf("%d 台", len(runs))
 	if cached > 0 || missing > 0 {
-		v += fmt.Sprintf("（%d 台离线）", cached+missing)
+		v += fmt.Sprintf("（%d 台不在线）", cached+missing)
 	}
-	return wire.Stat{Label: "检索电脑", Value: v, Tone: toneIf(cached+missing > 0, wire.ToneCaution)}
+	return wire.Stat{Label: "搜了几台电脑", Value: v, Tone: toneIf(cached+missing > 0, wire.ToneCaution)}
 }
 
 func machineStatusLabel(status string) string {
@@ -1397,13 +1463,13 @@ func machineStatusLabel(status string) string {
 	case machineOnline:
 		return "在线"
 	case machineCached:
-		return "离线 · 缓存索引"
+		return "不在线 · 搜的是同步过的副本"
 	default:
-		return "离线 · 无索引"
+		return "不在线 · 没有副本，没搜到"
 	}
 }
 
-// machinesNote is "N 台电脑上的" for a search of several computers, else "本机".
+// machinesNote is " N 台电脑上的" for a search of several computers, else "本机".
 func machinesNote(runs []MachineRun) string {
 	if len(runs) == 0 {
 		return "本机"
@@ -1423,7 +1489,7 @@ func (d draw) restoreSection() []wire.Section {
 	if len(d.st.Restores) == 0 {
 		return nil
 	}
-	sec := wire.Section{Title: "会话恢复"}
+	sec := wire.Section{Title: "会话恢复", Footer: "从云端取回的聊天放回原来的位置后，就能在 Claude Code 或 Codex 里接着聊。"}
 	for i, n := range d.st.Restores {
 		row := wire.Component{
 			Type:     wire.ComponentRow,
@@ -1439,12 +1505,12 @@ func (d draw) restoreSection() []wire.Section {
 			row.Icon, row.Badge = "check", &wire.Badge{Text: "已恢复", Tone: wire.TonePositive}
 			row.Value = d.formatTime(n.At)
 			if n.Resume != "" {
-				row.Subtitle = n.Path + " · 可运行 " + n.Resume
+				row.Subtitle = n.Path + " · 接着聊：运行 " + n.Resume
 			}
 		default:
 			row.Icon, row.Badge = "warning", &wire.Badge{Text: "恢复失败", Tone: wire.ToneDanger}
 			row.Value = d.formatTime(n.At)
-			row.Subtitle = n.Message
+			row.Subtitle = restoreFailure(n.Message)
 		}
 		sec.Items = append(sec.Items, row)
 	}
@@ -1463,7 +1529,7 @@ func archivedNote(n int) string {
 	if n <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("（含 %d 个%s）", n, locationArchived)
+	return fmt.Sprintf("（含 %d 段已移到云端的）", n)
 }
 
 func countBadge(n int) string {
@@ -1499,7 +1565,7 @@ func badgeIfError(isErr bool, kind string) *wire.Badge {
 	if !isErr {
 		return nil
 	}
-	return &wire.Badge{Text: cmp.Or(kind, "error"), Tone: wire.ToneDanger}
+	return &wire.Badge{Text: errorKindLabel(kind), Tone: wire.ToneDanger}
 }
 
 func shortenHome(p string) string {

@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
+
+const maxProjectNameChars = 500
 
 type pageState struct {
 	Mode        string `json:"m,omitempty"`
@@ -24,9 +28,18 @@ type pageState struct {
 	Description string `json:"b,omitempty"`
 }
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "projects", "detail", "create", "review-create":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Skip < 0 || len(st.IssueID) > 100 || len(st.ProjectID) > 100 || len(st.ProjectName) > 1000 || len(st.DraftID) > 128 || len([]rune(st.Summary)) > maxSummaryChars || len(st.Description) > 31000 {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || st.Skip < 0 || len(st.IssueID) > 100 || len(st.ProjectID) > 100 || utf8.RuneCountInString(st.ProjectName) > maxProjectNameChars || len(st.DraftID) > 128 || len([]rune(st.Summary)) > maxSummaryChars || utf8.RuneCountInString(st.Description) > maxDescriptionChars {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -69,7 +82,13 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, err
 		}
 		st.ProjectID, st.Summary, st.Description, st.Mode = in.ProjectID, in.Summary, in.Description, "review-create"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("issue draft exceeds page state limit")
+		}
 	case "confirm-create":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		raw, _ := json.Marshal(createArgs{ProjectID: st.ProjectID, Summary: st.Summary, Description: st.Description})
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "youtrack_create_issue", raw)
 		if err != nil {
@@ -123,11 +142,20 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.projects}
+		seen := map[string]bool{}
 		for _, project := range projects {
-			if project.Archived || project.ID == "" || project.Name == "" {
+			if project.Archived || project.ID == "" || project.Name == "" || seen[project.ID] {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "project-" + project.ID, Title: clipText(project.Name, 1800), Subtitle: project.ShortName, Action: &wire.Action{ID: "create", Push: &wire.Push{Title: t.create, State: ext.EncodeState(pageState{Mode: "create", ProjectID: project.ID, ProjectName: project.Name, DraftID: randomID()})}}})
+			seen[project.ID] = true
+			row := wire.Component{Type: wire.ComponentRow, Key: boundedKey("project-", project.ID), Title: clipText(project.Name, 1800), Subtitle: clipText(project.ShortName, 500)}
+			if validResourceID(project.ID) == nil {
+				row.Action = &wire.Action{ID: "create", Push: &wire.Push{Title: t.create, State: ext.EncodeState(pageState{Mode: "create", ProjectID: project.ID, ProjectName: clipText(project.Name, maxProjectNameChars), DraftID: randomID()})}}
+			}
+			section.Items = append(section.Items, row)
+			if len(section.Items) >= maxViewRecords {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noProjects})
@@ -155,11 +183,20 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return nil, err
 	}
 	section := wire.Section{Title: t.issues}
+	seenIssues := map[string]bool{}
 	for _, item := range items {
-		if item.ID == "" || item.Summary == "" {
+		if item.ID == "" || item.Summary == "" || seenIssues[item.ID] {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "issue-" + item.ID, Title: clipText(item.Summary, 1800), Subtitle: clipText(item.IDReadable+" · "+item.Project.Name, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
+		seenIssues[item.ID] = true
+		row := wire.Component{Type: wire.ComponentRow, Key: boundedKey("issue-", item.ID), Title: clipText(item.Summary, 1800), Subtitle: clipText(item.IDReadable+" · "+item.Project.Name, 1800)}
+		if validResourceID(item.ID) == nil {
+			row.Action = &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}
+		}
+		section.Items = append(section.Items, row)
+		if len(section.Items) >= maxViewRecords {
+			break
+		}
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noIssues})
@@ -184,16 +221,16 @@ func (a *app) createView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 		if st.Description != "" {
 			items = append(items, textComponents(st.Description)...)
 		}
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Summary}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: clipText(t.create+"\n"+st.Summary, wire.StringMost)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}, nil
 	}
 	if err := validResourceID(st.ProjectID); err != nil {
 		return nil, err
 	}
-	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: st.ProjectName, Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "project_id", Label: t.project, Value: st.ProjectID},
-		{Type: wire.ComponentField, Kind: "text", Name: "summary", Label: t.summary, Value: st.Summary},
-		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: st.Description},
+	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: clipText(st.ProjectName, 1800), Items: []wire.Component{
+		{Type: wire.ComponentField, Kind: "text", Name: "project_id", Label: t.project, Value: clipText(st.ProjectID, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "summary", Label: t.summary, Value: clipText(st.Summary, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: clipText(st.Description, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}, nil
@@ -209,7 +246,11 @@ func detailView(r *ext.UIRequest, st pageState, item issue, comments []comment) 
 		{Type: wire.ComponentText, Text: clipText(t.project+": "+item.Project.Name+" · "+t.reporter+": "+reporter, 1800)},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}
-	v := &wire.View{Title: clipText(item.IDReadable+" "+item.Summary, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.issues, Items: items}}}
+	title := clipText(strings.TrimSpace(item.IDReadable+" "+item.Summary), 1800)
+	if title == "" {
+		title = clipText(item.ID, 1800)
+	}
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.issues, Items: items}}}
 	if item.Description != "" {
 		v.Sections = append(v.Sections, wire.Section{Title: t.description, Items: capComponents(textComponents(clipText(item.Description, 60000)), maxDescriptionItems)})
 	}
@@ -277,6 +318,15 @@ func textComponents(text string) []wire.Component {
 		out = append(out, wire.Component{Type: wire.ComponentText, Text: " ", Style: wire.TextStyleSecondary})
 	}
 	return out
+}
+
+func boundedKey(prefix, id string) string {
+	key := prefix + id
+	if len(key) <= 128 && utf8.RuneCountInString(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "k-" + hex.EncodeToString(sum[:16])
 }
 
 func randomID() string {

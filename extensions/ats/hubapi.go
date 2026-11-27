@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,11 +24,17 @@ type hubMachine struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Online bool   `json:"online"`
+	// OS is darwin, linux or windows ("" not known yet); Trust is "pending" until the owner confirms the computer.
+	OS    string `json:"os,omitempty"`
+	Trust string `json:"trust,omitempty"`
 }
 
 // hubSession is what the dispatcher reads of a session in the hub's list.
 type hubSession struct {
 	SessionID           string `json:"session_id"`
+	Model               string `json:"model,omitempty"`
+	Launcher            string `json:"launcher,omitempty"`
+	Cwd                 string `json:"cwd,omitempty"`
 	State               string `json:"state"` // needs_you | working | unread | idle | offline | unknown
 	Starting            bool   `json:"starting"`
 	StartError          string `json:"start_error"`
@@ -63,16 +70,24 @@ type sessionRequest struct {
 	Async          bool   `json:"async"`
 }
 
+type interactionResolution struct {
+	Approve  *bool  `json:"approve,omitempty"`
+	Feedback string `json:"feedback,omitempty"`
+}
+
 type hubAPI interface {
 	Machines(ctx context.Context) ([]hubMachine, error)
 	CreateSession(ctx context.Context, req sessionRequest) (string, error)
 	// Session returns nil when the hub no longer lists the session.
 	Session(ctx context.Context, machineID, sessionID string) (*hubSession, error)
 	LastReply(ctx context.Context, machineID, sessionID string) (string, error)
+	SendMessage(ctx context.Context, machineID, sessionID, text string) error
 	Interrupt(ctx context.Context, machineID, sessionID string) error
 	AttachTodo(ctx context.Context, todoID, machineID, sessionID string) error
+	DetachTodo(ctx context.Context, todoID, machineID, sessionID string) error
 	// Interactions lists the cards sessions wait for the user with.
 	Interactions(ctx context.Context) ([]hubInteraction, error)
+	ResolveInteraction(ctx context.Context, id string, res interactionResolution) error
 }
 
 // nodeCaller calls the extension's program on a computer.
@@ -86,6 +101,18 @@ type hubClient struct {
 	token           string
 	client          *http.Client
 	syncStartClient *http.Client
+}
+
+type hubAPIError struct {
+	Method  string
+	Path    string
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *hubAPIError) Error() string {
+	return fmt.Sprintf("%s %s: HTTP %d (%s) %s", e.Method, e.Path, e.Status, e.Code, e.Message)
 }
 
 func sessionStartTimeout(agentType string) time.Duration {
@@ -150,7 +177,13 @@ func (c *hubClient) doWithClient(ctx context.Context, client *http.Client, metho
 		if e.Code == "" {
 			e.Code = fmt.Sprintf("http_%d", resp.StatusCode)
 		}
-		return fmt.Errorf("%s %s: %s %s", method, strings.SplitN(path, "?", 2)[0], e.Code, firstLinePreview(e.Error, 200))
+		return &hubAPIError{
+			Method:  method,
+			Path:    strings.SplitN(path, "?", 2)[0],
+			Status:  resp.StatusCode,
+			Code:    e.Code,
+			Message: firstLinePreview(e.Error, 200),
+		}
 	}
 	if out == nil || len(raw) == 0 {
 		return nil
@@ -199,33 +232,82 @@ func sessionPath(machineID, sessionID string) string {
 	return "/api/v1/sessions/" + url.PathEscape(machineID) + "/" + url.PathEscape(sessionID)
 }
 
-// LastReply is the text the agent ended its latest turn with.
+// LastReply is the text the agent ended its latest turn with. When the hub's light item list clipped a long
+// message (full_size > 0), it fetches the complete unclipped item from /items/{iid}/full.
 func (c *hubClient) LastReply(ctx context.Context, machineID, sessionID string) (string, error) {
 	var out struct {
 		Items []struct {
-			Role string `json:"role"`
-			Kind string `json:"kind"`
-			Text string `json:"text"`
+			ID       string `json:"id"`
+			Role     string `json:"role"`
+			Kind     string `json:"kind"`
+			Text     string `json:"text"`
+			FullSize int    `json:"full_size"`
 		} `json:"items"`
 	}
 	if err := c.do(ctx, http.MethodGet, sessionPath(machineID, sessionID)+"/items?turns=1", nil, &out); err != nil {
 		return "", err
 	}
-	for i := len(out.Items) - 1; i >= 0; i-- {
-		if it := out.Items[i]; it.Role == "assistant" && it.Kind == "text" {
-			return it.Text, nil
+	resolveText := func(id, text string, fullSize int) string {
+		if fullSize > 0 && id != "" {
+			var full struct {
+				Text string `json:"text"`
+				Item *struct {
+					Text string `json:"text"`
+				} `json:"item"`
+			}
+			if err := c.do(ctx, http.MethodGet, sessionPath(machineID, sessionID)+"/items/"+url.PathEscape(id)+"/full", nil, &full); err == nil {
+				if full.Text != "" {
+					return full.Text
+				}
+				if full.Item != nil && full.Item.Text != "" {
+					return full.Item.Text
+				}
+			}
 		}
+		return text
 	}
-	return "", nil
+	var fallback string
+	for i := len(out.Items) - 1; i >= 0; i-- {
+		it := out.Items[i]
+		if it.Role != "assistant" || it.Kind != "text" {
+			continue
+		}
+		txt := resolveText(it.ID, it.Text, it.FullSize)
+		trimmed := strings.TrimSpace(txt)
+		if strings.HasPrefix(trimmed, "<closeout") && strings.HasSuffix(trimmed, "</closeout>") {
+			if fallback == "" {
+				fallback = txt
+			}
+			continue
+		}
+		return txt, nil
+	}
+	return fallback, nil
+}
+
+func (c *hubClient) SendMessage(ctx context.Context, machineID, sessionID, text string) error {
+	return c.do(ctx, http.MethodPost, sessionPath(machineID, sessionID)+"/messages", map[string]string{"text": text}, nil)
 }
 
 func (c *hubClient) Interrupt(ctx context.Context, machineID, sessionID string) error {
 	return c.do(ctx, http.MethodPost, sessionPath(machineID, sessionID)+"/interrupt", nil, nil)
 }
 
+func todoAgentPath(todoID, machineID, sessionID string) string {
+	return "/api/v1/todos/" + url.PathEscape(todoID) + "/agents/" + url.PathEscape(machineID) + "/" + url.PathEscape(sessionID)
+}
+
 func (c *hubClient) AttachTodo(ctx context.Context, todoID, machineID, sessionID string) error {
-	path := "/api/v1/todos/" + url.PathEscape(todoID) + "/agents/" + url.PathEscape(machineID) + "/" + url.PathEscape(sessionID)
-	return c.do(ctx, http.MethodPut, path, nil, nil)
+	return c.do(ctx, http.MethodPut, todoAgentPath(todoID, machineID, sessionID), nil, nil)
+}
+
+func (c *hubClient) DetachTodo(ctx context.Context, todoID, machineID, sessionID string) error {
+	err := c.do(ctx, http.MethodDelete, todoAgentPath(todoID, machineID, sessionID), nil, nil)
+	var apiErr *hubAPIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 func (c *hubClient) Interactions(ctx context.Context) ([]hubInteraction, error) {
@@ -234,6 +316,10 @@ func (c *hubClient) Interactions(ctx context.Context) ([]hubInteraction, error) 
 	}
 	err := c.do(ctx, http.MethodGet, "/api/v1/interactions", nil, &out)
 	return out.Interactions, err
+}
+
+func (c *hubClient) ResolveInteraction(ctx context.Context, id string, res interactionResolution) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/interactions/"+url.PathEscape(id)+"/resolve", res, nil)
 }
 
 // rpcNodes calls the node program through the hub's nodes.call.

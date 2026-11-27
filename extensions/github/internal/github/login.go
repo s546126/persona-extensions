@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,7 +31,8 @@ const deviceScopes = "repo"
 // deviceLogin is what is kept in the hub's secrets for GitHub. Hubs before #1089 also kept the user's own OAuth
 // App's client_id: it is no longer read and is dropped at the next save; a token granted to it still works.
 type deviceLogin struct {
-	Token string `json:"token,omitempty"`
+	Token         string                        `json:"token,omitempty"`
+	InboxMessages map[string]inboxMessageRecord `json:"inbox_messages,omitempty"`
 }
 
 // devicePending is a device code waiting for the user.
@@ -42,13 +44,22 @@ type devicePending struct {
 
 // UseSecrets gives the connector the hub's store for its sign-in (the device flow's token).
 func (c *Connector) UseSecrets(s connector.Secrets) {
+	c.saving.Lock()
+	defer c.saving.Unlock()
 	c.mu.Lock()
 	c.secrets = s
+	c.dev, c.devLoaded = deviceLogin{}, false
 	c.mu.Unlock()
 }
 
 // deviceState is what the secrets keep, read once.
 func (c *Connector) deviceState(ctx context.Context) deviceLogin {
+	c.saving.Lock()
+	defer c.saving.Unlock()
+	return c.loadDevice(ctx)
+}
+
+func (c *Connector) loadDevice(ctx context.Context) deviceLogin {
 	c.mu.Lock()
 	s, loaded, d := c.secrets, c.devLoaded, c.dev
 	c.mu.Unlock()
@@ -59,23 +70,38 @@ func (c *Connector) deviceState(ctx context.Context) deviceLogin {
 	if err != nil {
 		return d
 	}
-	_ = json.Unmarshal(raw, &d)
+	if len(raw) != 0 {
+		if err := json.Unmarshal(raw, &d); err != nil {
+			return d
+		}
+	}
 	c.mu.Lock()
 	c.dev, c.devLoaded = d, true
 	c.mu.Unlock()
 	return d
 }
 
-func (c *Connector) saveDevice(ctx context.Context, d deviceLogin) error {
+// Serialize changes to the shared sealed record, without caching a write that the store rejected.
+func (c *Connector) saveDevice(ctx context.Context, change func(*deviceLogin)) error {
+	c.saving.Lock()
+	defer c.saving.Unlock()
+	d := c.loadDevice(ctx)
 	c.mu.Lock()
 	s := c.secrets
-	c.dev, c.devLoaded = d, true
+	d.InboxMessages = maps.Clone(d.InboxMessages)
+	change(&d)
 	c.mu.Unlock()
 	if s == nil {
 		return errors.New("no secrets store")
 	}
 	raw, _ := json.Marshal(d)
-	return s.Save(ctx, raw)
+	if err := s.Save(ctx, raw); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.dev, c.devLoaded = d, true
+	c.mu.Unlock()
+	return nil
 }
 
 // viaDevice says whether the token in use is the device flow's.
@@ -169,12 +195,11 @@ func (c *Connector) pollDevice(ctx context.Context) (connector.Prompt, error) {
 	default:
 		return c.restartDevice(ctx, "GitHub 没有授权（"+r.Error+"）")
 	}
-	d := deviceLogin{Token: r.AccessToken}
-	if err := c.saveDevice(ctx, d); err != nil {
+	if err := c.saveDevice(ctx, func(d *deviceLogin) { d.Token = r.AccessToken }); err != nil {
 		return connector.Prompt{}, err
 	}
 	c.mu.Lock()
-	c.token, c.pending = d.Token, nil
+	c.token, c.pending = r.AccessToken, nil
 	c.mu.Unlock()
 	c.check(ctx)
 	st := c.Status(ctx)
@@ -213,8 +238,7 @@ func (c *Connector) forgetDevice(ctx context.Context) error {
 	if d.Token == "" {
 		return nil
 	}
-	d.Token = ""
-	return c.saveDevice(ctx, d)
+	return c.saveDevice(ctx, func(d *deviceLogin) { d.Token = "" })
 }
 
 // postForm posts to GitHub's web host (the device flow is not the API's), answers as JSON.

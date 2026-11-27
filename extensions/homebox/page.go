@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -27,9 +28,18 @@ type pageState struct {
 	Quantity     float64 `json:"u,omitempty"`
 }
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "detail", "create", "review-create":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Page < 0 || len([]rune(st.Query)) > maxQueryChars || len(st.EntityID) > 128 || len(st.EntityTypeID) > 128 || len(st.LocationID) > 128 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len([]rune(st.Description)) > maxDescriptionChars || st.Quantity < 0 || st.Quantity > 1000000 {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || st.Page < 0 || len([]rune(st.Query)) > maxQueryChars || len(st.EntityID) > 128 || len(st.EntityTypeID) > 128 || len(st.LocationID) > 128 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len([]rune(st.Description)) > maxDescriptionChars || math.IsNaN(st.Quantity) || math.IsInf(st.Quantity, 0) || st.Quantity < 0 || st.Quantity > 1000000 {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -67,6 +77,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if st.Mode == "review-create" {
 			st.Mode = "create"
 		} else {
+			if !validEntityID(r.Values["entity_type_id"]) || !validEntityID(r.Values["location_id"]) {
+				return nil, errors.New("valid entity type and location UUIDs are required")
+			}
 			st = pageState{Mode: "create", EntityTypeID: r.Values["entity_type_id"], LocationID: r.Values["location_id"], DraftID: randomID()}
 		}
 	case "review-create":
@@ -127,7 +140,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "create" || st.Mode == "review-create" {
-		return createView(r, st), nil
+		return createView(r, st)
 	}
 	if st.Mode == "detail" {
 		item, err := a.client.entity(ctx, st.EntityID)
@@ -150,9 +163,14 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	v := &wire.View{Title: t.inventory, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
 	section := wire.Section{Title: fmt.Sprintf(t.results, page.Total)}
+	seen := map[string]bool{}
 	for _, item := range page.Items {
-		if !validEntityID(item.ID) || item.Name == "" || item.Archived {
+		if !validEntityID(item.ID) || strings.TrimSpace(item.Name) == "" || item.Archived || seen[item.ID] {
 			continue
+		}
+		seen[item.ID] = true
+		if len(section.Items) >= maxViewRecords {
+			break
 		}
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "entity-" + item.ID, Title: clipText(item.Name, 1800), Subtitle: clipText(fmt.Sprintf("%g · %s · %s", item.Quantity, item.AssetID, locationName(item)), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 	}
@@ -192,36 +210,49 @@ func (a *app) createChoices(ctx context.Context, locale string) (wire.Section, e
 		return wire.Section{Title: t.create, Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.noCreateChoices}}}, nil
 	}
 	section := wire.Section{Title: t.create}
-	for i, location := range flat {
-		if i >= 20 {
+	seen := map[string]bool{}
+	subtitle := clipText(typeChoice.Name, 500)
+	for _, location := range flat {
+		if !validEntityID(location.ID) || strings.TrimSpace(location.Name) == "" || seen[location.ID] {
+			continue
+		}
+		seen[location.ID] = true
+		if len(section.Items) >= 20 {
 			break
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "create-" + location.ID, Title: clipText(location.Name, 1800), Subtitle: typeChoice.Name, Action: &wire.Action{ID: "create", Values: map[string]string{"entity_type_id": typeChoice.ID, "location_id": location.ID}, Push: &wire.Push{Title: t.create, State: ext.EncodeState(pageState{Mode: "create", EntityTypeID: typeChoice.ID, LocationID: location.ID, DraftID: randomID()})}}})
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "create-" + location.ID, Title: clipText(location.Name, 1800), Subtitle: subtitle, Action: &wire.Action{ID: "create", Values: map[string]string{"entity_type_id": typeChoice.ID, "location_id": location.ID}, Push: &wire.Push{Title: t.create, State: ext.EncodeState(pageState{Mode: "create", EntityTypeID: typeChoice.ID, LocationID: location.ID, DraftID: randomID()})}}})
+	}
+	if len(section.Items) == 0 {
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noCreateChoices})
 	}
 	return section, nil
 }
 
-func createView(r *ext.UIRequest, st pageState) *wire.View {
+func createView(r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
 	if st.Mode == "review-create" {
+		in := createArgs{EntityTypeID: st.EntityTypeID, LocationID: st.LocationID, Name: st.Name, Description: st.Description, Quantity: st.Quantity}
+		if err := in.validate(); err != nil {
+			return nil, err
+		}
 		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(st.Name, 1800)}, {Type: wire.ComponentText, Text: fmt.Sprintf("%g", st.Quantity)}}
 		if st.Description != "" {
 			items = append(items, textComponents(st.Description)...)
 		}
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Name}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
-		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: clipText(t.create+"\n"+st.Name, wire.StringMost)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
+		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}, nil
 	}
 	quantity := ""
 	if st.Quantity > 0 {
 		quantity = fmt.Sprintf("%g", st.Quantity)
 	}
 	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: st.Name},
-		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: st.Description},
+		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: clipText(st.Name, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: clipText(st.Description, wire.StringMost)},
 		{Type: wire.ComponentField, Kind: "text", Name: "quantity", Label: t.quantity, Value: quantity},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
-	}}}}
+	}}}}, nil
 }
 
 const (
@@ -241,12 +272,21 @@ func capComponents(items []wire.Component, n int) []wire.Component {
 func detailView(r *ext.UIRequest, st pageState, item entity) *wire.View {
 	t := textsFor(r.Locale)
 	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%g · %s · %s", item.Quantity, item.AssetID, locationName(item)), 1800)}, {Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}}}
-	for label, value := range map[string]string{t.serial: item.SerialNumber, t.model: item.ModelNumber, t.manufacturer: item.Manufacturer, t.warranty: item.WarrantyDetails + " " + item.WarrantyExpires} {
-		if strings.TrimSpace(value) != "" {
-			items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(label+": "+value, 1800)})
+	for _, field := range []struct{ label, value string }{
+		{t.serial, item.SerialNumber},
+		{t.model, item.ModelNumber},
+		{t.manufacturer, item.Manufacturer},
+		{t.warranty, item.WarrantyDetails + " " + item.WarrantyExpires},
+	} {
+		if strings.TrimSpace(field.value) != "" {
+			items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(field.label+": "+strings.TrimSpace(field.value), 1800)})
 		}
 	}
-	v := &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.inventory, Items: items}}}
+	title := clipText(item.Name, 1800)
+	if title == "" {
+		title = clipText(item.ID, 1800)
+	}
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.inventory, Items: items}}}
 	used := len(items)
 	if item.Description != "" {
 		desc := capComponents(textComponents(clipText(item.Description, 12000)), maxDescriptionItems)

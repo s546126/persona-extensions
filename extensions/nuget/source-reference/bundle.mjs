@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "nuget", name: "NuGet Packages", version: "0.1.4", icon: "assets/icon.png", description: "Search .NET packages on the official NuGet JSON APIs. Compare current stable versions, licenses, release dates, target frameworks, dependencies and project links. Get an exact-version dotnet add command without executing it.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/nuget/README.md", tags: ["Development", ".NET", "NuGet", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/nuget.mjs", sha256: "" } }, contributes: { connectors: [{ id: "nuget", name: "NuGet Packages", capabilities: ["status", "tools"], hosts: ["azuresearch-usnc.nuget.org", "api.nuget.org", "nuget.azure.cn"], agent_tools: ["nuget_*"] }], ui: [{ id: "nuget", title: "NuGet Packages", placement: "nav_page", icon: "code" }] }, permissions: { network: ["azuresearch-usnc.nuget.org", "api.nuget.org", "nuget.azure.cn"] } };
+var persona_extension_default = { manifest_version: 1, id: "nuget", name: "NuGet Packages", version: "0.1.5", icon: "assets/icon.png", description: "Search .NET packages on the official NuGet JSON APIs. Compare current stable versions, licenses, release dates, target frameworks, dependencies and project links. Get an exact-version dotnet add command without executing it.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/nuget/README.md", tags: ["Development", ".NET", "NuGet", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/nuget.mjs", sha256: "" } }, contributes: { connectors: [{ id: "nuget", name: "NuGet Packages", capabilities: ["status", "tools"], hosts: ["azuresearch-usnc.nuget.org", "api.nuget.org", "nuget.azure.cn"], agent_tools: ["nuget_*"] }], ui: [{ id: "nuget", title: "NuGet Packages", placement: "nav_page", icon: "code" }] }, permissions: { network: ["azuresearch-usnc.nuget.org", "api.nuget.org", "nuget.azure.cn"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 1 << 20, fresh: 15 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 250 });
@@ -779,14 +779,39 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, raw, most = 128) {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
+function packageActionID(id) {
+  return boundedID("package:", id, 128);
+}
 function packageID(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value) || value.includes("..")) throw new ReadError("invalid");
   return value;
 }
 function queryText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -798,6 +823,9 @@ function versionText(value) {
 function searchPath(query, limit = 12) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
   return `/query?${new URLSearchParams({ q: queryText(query), take: String(limit) })}`;
+}
+function packageSearchPath(id) {
+  return `/query?${new URLSearchParams({ q: packageID(id), take: "20" })}`;
 }
 function registrationPath(id, version) {
   return `/v3/registration5-semver1/${packageID(id).toLowerCase()}/${versionText(version).toLowerCase()}.json`;
@@ -835,7 +863,7 @@ function optionalHTTPSURL(value) {
     throw new ReadError("bad_answer");
   }
   if (url.protocol !== "https:") return void 0;
-  if (url.username || url.password || url.port) throw new ReadError("bad_answer");
+  if (url.username || url.password || url.port || url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function httpsURL(value) {
@@ -846,7 +874,7 @@ function httpsURL(value) {
   } catch {
     throw new ReadError("bad_answer");
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.port) throw new ReadError("bad_answer");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function date(value) {
@@ -857,13 +885,14 @@ function date(value) {
 }
 function license(value) {
   const license2 = clip(oneLine(string(value, "See license link")), 120);
-  if (!license2 || /[\u0000-\u001f\u007f]/u.test(license2)) throw new ReadError("bad_answer");
+  if (!license2 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(license2)) throw new ReadError("bad_answer");
   return license2;
 }
 function summary(value) {
   const item = object(value), id = packageID(item.id), version = versionText(item.version);
   const licenseValue = item.licenseExpression ?? item.license ?? (item.licenseUrl ? "See license link" : void 0);
-  return { id, version, description: clip(oneLine(string(item.description, "")), 500), license: license(licenseValue), url: `https://www.nuget.org/packages/${id}/${version}`, ...optionalHTTPSURL(item.projectUrl) ? { projectURL: optionalHTTPSURL(item.projectUrl) } : {}, ...optionalHTTPSURL(item.licenseUrl) ? { licenseURL: optionalHTTPSURL(item.licenseUrl) } : {}, ...item.totalDownloads == null ? {} : { totalDownloads: integer(item.totalDownloads) }, ...date(item.published) ? { published: date(item.published) } : {} };
+  const projectURL = optionalHTTPSURL(item.projectUrl), licenseURL = optionalHTTPSURL(item.licenseUrl), published = date(item.published);
+  return { id, version, description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), license: license(licenseValue), url: `https://www.nuget.org/packages/${id}/${version}`, ...projectURL ? { projectURL } : {}, ...licenseURL ? { licenseURL } : {}, ...item.totalDownloads == null ? {} : { totalDownloads: integer(item.totalDownloads) }, ...published ? { published } : {} };
 }
 function parseSearch(raw, at) {
   const root2 = object(raw), total = integer(root2.totalHits, 1e12), seen = /* @__PURE__ */ new Set();
@@ -896,14 +925,15 @@ function parseNuspec(raw, id, version, listed) {
   const groups = Array.from(dependenciesBlock.matchAll(/<group\b[^>]*targetFramework="([^"]+)"[^>]*>/gi)).map((match) => {
     const start = match.index ?? 0, opening = match[0];
     if (opening.endsWith("/>")) return [match[1], ""];
-    const end = dependenciesBlock.indexOf("</group>", start + opening.length);
+    const rest = dependenciesBlock.slice(start + opening.length);
+    const end = rest.search(/<\/group\s*>/i);
     if (end < 0) throw new ReadError("bad_answer");
-    return [match[1], dependenciesBlock.slice(start + opening.length, end)];
+    return [match[1], rest.slice(0, end)];
   });
   const frameworks = [];
   let dependencies = 0;
   for (const [rawFramework, body] of groups.slice(0, 40)) {
-    const framework = clip(oneLine(rawFramework), 100);
+    const framework = clip(oneLine(rawFramework.replace(/[\ud800-\udfff]/gu, "")), 100);
     if (frameworks.includes(framework)) throw new ReadError("bad_answer");
     frameworks.push(framework);
     dependencies += Array.from((body ?? "").matchAll(/<dependency\b[^>]*\bid="[^"]+"/gi)).length;
@@ -1042,7 +1072,11 @@ var ja_default = {
 var textsFor = (locale = "") => locale.toLowerCase().startsWith("ja") ? ja_default : locale.toLowerCase().startsWith("zh") ? zh_Hans_default : en_default;
 var fmt = (text, values) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ""));
 var number = (value) => new Intl.NumberFormat("en-US").format(value);
-var dateText = (value) => value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "";
+var dateText = (value) => {
+  if (!value) return "";
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(time) : "";
+};
 function errorText(error, locale = "") {
   const t = textsFor(locale);
   if (!(error instanceof ReadError)) return t.network;
@@ -1087,18 +1121,26 @@ var Nuget = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    if (item && this.monotonic() - item.used < fresh) {
-      item.used = this.monotonic();
+    const nowMono = this.monotonic();
+    if (item && nowMono - item.saved < fresh) {
+      item.used = nowMono;
       return item;
     }
     return void 0;
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
+    if (bytes > this.limits.cacheBytes) {
+      if (old) {
+        this.bytes -= old.bytes;
+        this.cache.delete(path);
+      }
+      return;
+    }
     if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    const nowMono = this.monotonic();
+    this.cache.set(path, { raw, at, saved: nowMono, used: nowMono, bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       let oldest;
@@ -1116,10 +1158,40 @@ var Nuget = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    let finalURL;
+    try {
+      finalURL = new URL(response.url || `${origin}${path}`);
+    } catch {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("bad_answer");
+    }
+    if (finalURL.protocol !== "https:" || finalURL.username || finalURL.password || finalURL.port || !["azuresearch-usnc.nuget.org", "api.nuget.org", "nuget.azure.cn"].includes(finalURL.hostname)) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("bad_answer");
+    }
+    if (!finalURL.pathname.endsWith(".nuspec") && !finalURL.pathname.endsWith(".json") && finalURL.pathname !== "/query") {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("bad_answer");
+    }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
-    const finalURL = new URL(response.url || `${origin}${path}`);
-    if (finalURL.protocol !== "https:" || finalURL.username || finalURL.password || finalURL.port || !["azuresearch-usnc.nuget.org", "api.nuget.org", "nuget.azure.cn"].includes(finalURL.hostname)) throw new ReadError("bad_answer");
-    if (!finalURL.pathname.endsWith(".nuspec") && !finalURL.pathname.endsWith(".json") && finalURL.pathname !== "/query") throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
     const cancel = () => {
@@ -1135,7 +1207,8 @@ var Nuget = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1156,9 +1229,6 @@ var Nuget = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     if (xml) return text;
     try {
       return JSON.parse(text);
@@ -1171,6 +1241,7 @@ var Nuget = class {
     const key = origin + path, cached = this.cached(key, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(key, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1197,9 +1268,16 @@ var Nuget = class {
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        if (request.signal.aborted) {
+          const aborted = cancellation(request.signal);
+          if (aborted instanceof ReadError) {
+            this.lastError = { code: aborted.code, status: aborted.status, at: this.monotonic() };
+            throw aborted;
+          }
+          throw error instanceof Error && error.name === "AbortError" ? error : aborted;
+        }
         const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1216,7 +1294,7 @@ var Nuget = class {
       const old = this.cache.get(key);
       if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
         old.used = this.monotonic();
-        return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+        return { raw: old.raw, at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
       }
       throw error;
     }
@@ -1227,7 +1305,7 @@ var Nuget = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 12, refresh = false, signal) {
@@ -1238,7 +1316,10 @@ var Nuget = class {
   }
   async package(id, refresh = false, signal) {
     id = packageID(id);
-    const found = await this.search(id, 20, refresh, signal);
+    const searchRd = await this.read("https://azuresearch-usnc.nuget.org", packageSearchPath(id), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
+      parseSearch(raw, at);
+    });
+    const found = { ...parseSearch(searchRd.raw, searchRd.at), stale: searchRd.stale };
     const exact = found.packages.find((pkg) => pkg.id.toLowerCase() === id.toLowerCase());
     if (!exact) throw new ReadError("not_found");
     id = exact.id;
@@ -1290,14 +1371,36 @@ ${pkg.licenseURL}` : ""}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const field of ["query", "name"]) for (const token of exact.fieldValues(field)) {
+      if (token.raw === "null") {
+        delete args[field];
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[field] = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = Number(limit);
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1308,23 +1411,34 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "nuget_search" && name !== "nuget_package") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "nuget_search") {
-      const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(query, limit, false, request.signal);
-      return clip((result.packages.length ? result.packages.map((pkg, index) => summaryLine(pkg, index, service.locale)).join("\n") : t.empty) + `
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result2 = await service.search(query, limit, false, request.signal);
+      return clip((result2.packages.length ? result2.packages.map((pkg, index) => summaryLine(pkg, index, service.locale)).join("\n") : t.empty) + `
+${t.attribution}${result2.stale ? `
+${errorText(result2.stale, service.locale)}` : ""}`, 29999);
+    }
+    const result = await service.package(packageID(args.name), false, request.signal);
+    return clip(detailText(result.package, service.locale) + `
 ${t.attribution}${result.stale ? `
 ${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    if (name === "nuget_package") {
-      const result = await service.package(packageID(args.name), false, request.signal);
-      return clip(detailText(result.package, service.locale) + `
-${t.attribution}${result.stale ? `
-${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1356,20 +1470,51 @@ var jsx = createElement;
 var jsxs = createElement;
 
 // src/page.tsx
+var TEXT_MAX = 2e3;
+var KEY_MAX = 128;
+var ITEMS_MAX = 300;
+var STATE_MAX = 16384;
+var FRAME_MAX = 512 * 1024;
+var URL_MAX = 4096;
+var utf8 = new TextEncoder();
+var byteLength = (text) => utf8.encode(text).byteLength;
+function safeLinkURL(value) {
+  if (typeof value !== "string" || !value) return void 0;
+  let link;
+  try {
+    link = new URL(value);
+  } catch {
+    return void 0;
+  }
+  if (link.protocol !== "https:" || link.username || link.password || link.port || link.href.length > URL_MAX) return void 0;
+  return link.href;
+}
+function uniqueKey(used, prefix, raw) {
+  let key = boundedID(prefix, raw, KEY_MAX);
+  let attempt = 2;
+  while (used.has(key)) {
+    key = boundedID(prefix, `${raw}#${attempt}`, KEY_MAX);
+    attempt++;
+  }
+  used.add(key);
+  return key;
+}
 var initialState = { q: "", found: false };
 function summaryState(value) {
   if (value == null) return void 0;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("invalid");
   const raw = value, id = packageID(raw.id);
-  const summary2 = { id, version: typeof raw.version === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,99}$/.test(raw.version) ? raw.version : (() => {
+  const version = typeof raw.version === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,99}$/.test(raw.version) ? raw.version : (() => {
     throw new ReadError("invalid");
-  })(), description: clip(typeof raw.description === "string" ? raw.description : "", 500), license: clip(typeof raw.license === "string" ? raw.license : "", 120), url: `https://www.nuget.org/packages/${id}/${raw.version}` };
+  })();
+  if (raw.description != null && (typeof raw.description !== "string" || /[\ud800-\udfff]/u.test(raw.description))) throw new ReadError("invalid");
+  if (raw.license != null && (typeof raw.license !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(raw.license))) throw new ReadError("invalid");
+  const summary2 = { id, version, description: clip(typeof raw.description === "string" ? raw.description : "", 500), license: clip(typeof raw.license === "string" ? raw.license : "", 120), url: `https://www.nuget.org/packages/${id}/${version}` };
   for (const field of ["projectURL", "licenseURL"]) {
     if (raw[field] == null) continue;
-    if (typeof raw[field] !== "string") throw new ReadError("invalid");
-    const link = new URL(raw[field]);
-    if (link.protocol !== "https:" || link.username || link.password || link.port) throw new ReadError("invalid");
-    summary2[field] = link.href;
+    const link = safeLinkURL(raw[field]);
+    if (!link) throw new ReadError("invalid");
+    summary2[field] = link;
   }
   if (raw.published != null) {
     if (typeof raw.published !== "string" || !Number.isFinite(Date.parse(raw.published))) throw new ReadError("invalid");
@@ -1382,19 +1527,32 @@ function summaryState(value) {
   return summary2;
 }
 function readState(raw) {
-  if (typeof raw !== "string" || raw.length > 1e4) return initialState;
+  if (typeof raw !== "string" || byteLength(raw) > STATE_MAX) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value) || typeof value.found !== "boolean") return initialState;
-    return { q: queryText(value.q), found: value.found, package: summaryState(value.package) };
+    if (!value.found && (value.q === "" || value.q == null) && value.package == null) return initialState;
+    return { q: queryText(value.q), found: value.found, ...value.package == null ? {} : { package: summaryState(value.package) } };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+var encodeState = (state) => {
+  const encoded = JSON.stringify(state);
+  if (byteLength(encoded) <= STATE_MAX) return encoded;
+  const slim = JSON.stringify({ q: state.q, found: state.found });
+  return byteLength(slim) <= STATE_MAX ? slim : JSON.stringify(initialState);
+};
+function safeState(state) {
+  try {
+    return readState(JSON.stringify(state));
+  } catch {
+    return initialState;
+  }
+}
 function packageTransition(state, result, id) {
   if (!id.startsWith("package:")) return state;
-  const pkg = result.packages.find((candidate) => id === `package:${candidate.id}`);
+  const pkg = result.packages.find((candidate) => id === packageActionID(candidate.id) || id === `package:${candidate.id}`);
   return pkg ? { q: state.q, found: true, package: pkg } : state;
 }
 function transition(state, id, values = {}) {
@@ -1434,71 +1592,101 @@ async function loadPage(service, state, refresh, signal) {
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale);
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "nuget", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2800), style }, key);
-  const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "nuget-query"),
-    /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "nuget-submit")
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), stateJSON = encodeState(state), t = textsFor(props.locale ?? service.locale);
+  const act = (id, next, title) => {
+    const cleanTitle = title ? clip(title, TEXT_MAX) : void 0;
+    return props.action?.(id, next, cleanTitle) ?? (next && uiVersion >= 3 ? { id, push: { ui: "nuget", state: encodeState(next), ...cleanTitle ? { title: cleanTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, TEXT_MAX), style }, key);
+  const search = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, TEXT_MAX), children: [
+    /* @__PURE__ */ jsx(Field, { name: "query", label: clip(t.search, TEXT_MAX), kind: "text", placeholder: clip(t.searchHint, TEXT_MAX), value: state.q }, "nuget-query"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.searchAction, TEXT_MAX), action: act("search") }, "nuget-submit")
   ] }, "nuget-search");
   const attribution = /* @__PURE__ */ jsx(Section, { children: text("nuget-license", t.attribution, "caption") }, "nuget-attribution");
   const footer = /* @__PURE__ */ jsxs(Section, { children: [
-    /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "nuget-refresh"),
-    state.package ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "nuget-back") : null,
-    /* @__PURE__ */ jsx(Button, { title: t.home, action: act("home") }, "nuget-home")
+    /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "nuget-refresh"),
+    state.package ? /* @__PURE__ */ jsx(Button, { title: clip(t.back, TEXT_MAX), action: act("back") }, "nuget-back") : null,
+    /* @__PURE__ */ jsx(Button, { title: clip(t.home, TEXT_MAX), action: act("home") }, "nuget-home")
   ] }, "nuget-footer");
   const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("nuget-stale-text", errorText(error, props.locale ?? service.locale)) }, "nuget-stale") : null;
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "nuget-loading-indicator") }, "nuget-loading"),
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, TEXT_MAX) }, "nuget-loading-indicator") }, "nuget-loading"),
     attribution
   ] }, "nuget");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
       text("nuget-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "nuget-retry")
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "nuget-retry")
     ] }, "nuget-error"),
     attribution
   ] }, "nuget");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("nuget-welcome-text", t.welcome, "body") }, "nuget-welcome"),
     attribution
   ] }, "nuget");
   if (loaded.kind === "detail") {
     const pkg = loaded.result.package;
-    return /* @__PURE__ */ jsxs(View, { title: pkg.id, state: encodeState(state), children: [
+    const pkgURL = safeLinkURL(pkg.url), projectURL = safeLinkURL(pkg.projectURL), licenseURL = safeLinkURL(pkg.licenseURL);
+    const hasLinks = Boolean(pkgURL || projectURL || licenseURL);
+    return /* @__PURE__ */ jsxs(View, { title: clip(pkg.id, TEXT_MAX), state: stateJSON, children: [
       search,
-      /* @__PURE__ */ jsxs(Section, { title: pkg.id, footer: [fmt(t.license, { license: pkg.license }), pkg.published ? fmt(t.published, { version: pkg.version, date: dateText(pkg.published) }) : `v${pkg.version}`].join(" \xB7 "), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(pkg.id, TEXT_MAX), footer: clip([fmt(t.license, { license: pkg.license }), pkg.published ? fmt(t.published, { version: pkg.version, date: dateText(pkg.published) }) : `v${pkg.version}`].join(" \xB7 "), TEXT_MAX), children: [
         text("nuget-description", pkg.description, "body"),
         pkg.totalDownloads !== void 0 ? text("nuget-downloads", fmt(t.downloads, { count: number(pkg.totalDownloads) })) : null,
         text("nuget-dependencies", fmt(t.dependencies, { count: pkg.dependencies })),
         text("nuget-frameworks", `${t.frameworks}: ${pkg.frameworks.join(" \xB7 ")}`),
         !pkg.listed ? text("nuget-unlisted", t.listed, "caption") : null
       ] }, "nuget-detail"),
-      /* @__PURE__ */ jsxs(Section, { title: t.install, children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(t.install, TEXT_MAX), children: [
         text("nuget-install-command", pkg.install, "body"),
         text("nuget-install-hint", t.installHint, "caption")
       ] }, "nuget-install"),
-      /* @__PURE__ */ jsxs(Section, { children: [
-        /* @__PURE__ */ jsx(Link, { title: t.openPackage, url: pkg.url }, "nuget-package-link"),
-        pkg.projectURL ? /* @__PURE__ */ jsx(Link, { title: t.openProject, url: pkg.projectURL }, "nuget-project-link") : null,
-        pkg.licenseURL ? /* @__PURE__ */ jsx(Link, { title: t.openLicense, url: pkg.licenseURL }, "nuget-license-link") : null
-      ] }, "nuget-links"),
+      hasLinks ? /* @__PURE__ */ jsxs(Section, { children: [
+        pkgURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openPackage, TEXT_MAX), url: pkgURL }, "nuget-package-link") : null,
+        projectURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openProject, TEXT_MAX), url: projectURL }, "nuget-project-link") : null,
+        licenseURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openLicense, TEXT_MAX), url: licenseURL }, "nuget-license-link") : null
+      ] }, "nuget-links") : null,
       stale(loaded.result.stale),
       footer,
       attribution
     ] }, "nuget");
   }
-  return /* @__PURE__ */ jsxs(View, { title: `${t.title}: ${clip(state.q, 100)}`, state: encodeState(state), children: [
+  const usedKeys = /* @__PURE__ */ new Set(["nuget-search", "nuget-query", "nuget-submit", "nuget-result-count", "nuget-total-results", "nuget-empty-results", "nuget-empty", "nuget-stale", "nuget-stale-text", "nuget-footer", "nuget-refresh", "nuget-back", "nuget-home", "nuget-attribution", "nuget-license"]);
+  const reservedItems = 2 + 1 + (loaded.result.stale ? 1 : 0) + (state.package ? 3 : 2) + 1;
+  let remainingItems = Math.max(0, ITEMS_MAX - reservedItems);
+  let remainingBytes = FRAME_MAX - byteLength(stateJSON) - 8192;
+  const cards = [];
+  for (const pkg of loaded.result.packages) {
+    const pkgURL = safeLinkURL(pkg.url);
+    const neededItems = pkgURL ? 3 : 2;
+    if (neededItems > remainingItems) break;
+    const sectionKey = uniqueKey(usedKeys, "package-", pkg.id);
+    const descKey = uniqueKey(usedKeys, "description-", pkg.id);
+    const openKey = uniqueKey(usedKeys, "open-", pkg.id);
+    const linkKey = pkgURL ? uniqueKey(usedKeys, "link-", pkg.id) : "";
+    const title = clip(`${pkg.id}@${pkg.version}`, TEXT_MAX);
+    const cardFooter = clip([fmt(t.license, { license: pkg.license }), pkg.totalDownloads !== void 0 ? fmt(t.downloads, { count: number(pkg.totalDownloads) }) : "", pkg.published ? dateText(pkg.published) : ""].filter(Boolean).join(" \xB7 "), TEXT_MAX);
+    const description = clip(pkg.description || t.unknown, TEXT_MAX);
+    const nextState = { ...state, package: pkg };
+    const nextStateJSON = uiVersion >= 3 ? encodeState(nextState) : "";
+    const actionID = packageActionID(pkg.id);
+    const estimatedBytes = byteLength(sectionKey) + byteLength(descKey) + byteLength(openKey) + byteLength(linkKey) + byteLength(title) + byteLength(cardFooter) + byteLength(description) + byteLength(nextStateJSON) + byteLength(actionID) + (pkgURL ? byteLength(pkgURL) : 0) + 512;
+    if (estimatedBytes > remainingBytes) break;
+    remainingItems -= neededItems;
+    remainingBytes -= estimatedBytes;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, footer: cardFooter, children: [
+      text(descKey, description, "body"),
+      /* @__PURE__ */ jsx(Button, { title: clip(t.details, TEXT_MAX), action: act(actionID, nextState, pkg.id) }, openKey),
+      pkgURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openPackage, TEXT_MAX), url: pkgURL }, linkKey) : null
+    ] }, sectionKey));
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(`${t.title}: ${clip(state.q, 100)}`, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("nuget-total-results", fmt(t.results, { total: number(loaded.result.total) }), "caption") }, "nuget-result-count"),
-    loaded.result.packages.length ? loaded.result.packages.map((pkg) => /* @__PURE__ */ jsxs(Section, { title: `${pkg.id}@${pkg.version}`, footer: [fmt(t.license, { license: pkg.license }), pkg.totalDownloads !== void 0 ? fmt(t.downloads, { count: number(pkg.totalDownloads) }) : "", pkg.published ? dateText(pkg.published) : ""].filter(Boolean).join(" \xB7 "), children: [
-      text(`description-${pkg.id}`, pkg.description, "body"),
-      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(`package:${pkg.id}`, { ...state, package: pkg }, pkg.id) }, `open-${pkg.id}`),
-      /* @__PURE__ */ jsx(Link, { title: t.openPackage, url: pkg.url }, `link-${pkg.id}`)
-    ] }, `package-${pkg.id}`)) : /* @__PURE__ */ jsx(Section, { children: text("nuget-empty", t.empty) }, "nuget-empty-results"),
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("nuget-empty", t.empty) }, "nuget-empty-results"),
     stale(loaded.result.stale),
     footer,
     attribution
@@ -1529,8 +1717,12 @@ function Root(options) {
         if (id === "refresh") setRefresh((previous) => previous + 1);
         else if (id.startsWith("package:")) {
           if (loaded.kind !== "results") return;
+          setRefresh(0);
           setState((previous) => packageTransition(previous, loaded.result, id));
-        } else setState((previous) => transition(previous, id, values));
+        } else {
+          setRefresh(0);
+          setState((previous) => transition(previous, id, values));
+        }
       }, { submit: true });
     }
   });

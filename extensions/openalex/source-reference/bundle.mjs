@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "openalex", name: "OpenAlex \u7814\u7A76\u68C0\u7D22", version: "0.1.4", icon: "assets/icon.png", description: "\u6309\u4E3B\u9898\u3001\u6807\u9898\u6216 DOI \u641C\u7D22 OpenAlex \u8BBA\u6587\uFF0C\u67E5\u770B\u5E74\u4EFD\u3001\u5F15\u7528\u91CF\u3001\u5F00\u653E\u83B7\u53D6\u72B6\u6001\u548C\u539F\u59CB\u94FE\u63A5\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/openalex/README.md", tags: ["\u7814\u7A76", "\u8BBA\u6587", "OpenAlex"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/openalex.mjs", sha256: "" } }, contributes: { connectors: [{ id: "openalex", name: "OpenAlex", capabilities: ["status", "tools"], hosts: ["api.openalex.org"], agent_tools: ["openalex_*"] }], ui: [{ id: "research", title: "\u7814\u7A76\u68C0\u7D22", placement: "nav_page", icon: "doc" }] }, permissions: { network: ["api.openalex.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "openalex", name: "OpenAlex \u7814\u7A76\u68C0\u7D22", version: "0.1.5", icon: "assets/icon.png", description: "\u6309\u4E3B\u9898\u3001\u6807\u9898\u6216 DOI \u641C\u7D22 OpenAlex \u8BBA\u6587\uFF0C\u67E5\u770B\u5E74\u4EFD\u3001\u5F15\u7528\u91CF\u3001\u5F00\u653E\u83B7\u53D6\u72B6\u6001\u548C\u539F\u59CB\u94FE\u63A5\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/openalex/README.md", tags: ["\u7814\u7A76", "\u8BBA\u6587", "OpenAlex"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/openalex.mjs", sha256: "" } }, contributes: { connectors: [{ id: "openalex", name: "OpenAlex", capabilities: ["status", "tools"], hosts: ["api.openalex.org"], agent_tools: ["openalex_*"] }], ui: [{ id: "research", title: "\u7814\u7A76\u68C0\u7D22", placement: "nav_page", icon: "doc" }] }, permissions: { network: ["api.openalex.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 2 << 20, fresh: 60 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 200 });
@@ -779,11 +779,33 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, raw, most = 128) {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 function queryText(value) {
   if (typeof value !== "string") throw new ReadError("invalid");
-  if (/[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 200) throw new ReadError("invalid");
   return query;
@@ -827,7 +849,7 @@ function httpsURL(value) {
   } catch {
     throw new ReadError("bad_answer");
   }
-  if (url.protocol !== "https:" || url.username || url.password) throw new ReadError("bad_answer");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function openAccessURL(value) {
@@ -841,13 +863,13 @@ function parseWorks(raw, at) {
     const work = object(rawWork), id = workID(work.id);
     if (seen.has(id)) throw new ReadError("bad_answer");
     seen.add(id);
-    const title = clip(oneLine(string(work.display_name)), 600);
+    const title = clip(oneLine(string(work.display_name).replace(/[\ud800-\udfff]/gu, "")), 600);
     if (!title) throw new ReadError("bad_answer");
     const year = work.publication_year == null ? void 0 : integer(work.publication_year, 2200);
     const access = object(work.open_access ?? {}), isOA = boolean(access.is_oa ?? false);
     const location = work.primary_location == null ? {} : object(work.primary_location);
-    const source = location.source == null ? "" : clip(oneLine(string(object(location.source).display_name)), 300);
-    const license = location.license == null ? "" : clip(oneLine(string(location.license)), 100);
+    const source = location.source == null ? "" : clip(oneLine(string(object(location.source).display_name).replace(/[\ud800-\udfff]/gu, "")), 300);
+    const license = location.license == null ? "" : clip(oneLine(string(location.license).replace(/[\ud800-\udfff]/gu, "")), 100);
     const oaURL = openAccessURL(access.oa_url);
     return {
       id,
@@ -855,7 +877,7 @@ function parseWorks(raw, at) {
       ...year === void 0 ? {} : { year },
       citations: integer(work.cited_by_count ?? 0),
       openAccess: isOA,
-      oaStatus: clip(oneLine(string(access.oa_status, isOA ? "open" : "closed")), 50),
+      oaStatus: clip(oneLine(string(access.oa_status, isOA ? "open" : "closed").replace(/[\ud800-\udfff]/gu, "")), 50),
       doi: httpsURL(work.doi),
       ...oaURL ? { oaURL } : {},
       source,
@@ -970,7 +992,17 @@ function errorText(error, locale = "") {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 function readTime(at, timeZone = "Local", locale = "en") {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? void 0 : timeZone }).format(at);
+  if (!Number.isFinite(at)) return "";
+  const opts = { year: "numeric", month: "short", day: "numeric" };
+  try {
+    return new Intl.DateTimeFormat(locale, { ...opts, timeZone: timeZone === "Local" ? void 0 : timeZone }).format(at);
+  } catch {
+    try {
+      return new Intl.DateTimeFormat("en", { ...opts, timeZone: "UTC" }).format(at);
+    } catch {
+      return new Date(at).toISOString().slice(0, 10);
+    }
+  }
 }
 
 // src/service.ts
@@ -1009,16 +1041,31 @@ var OpenAlex = class {
   queue = Promise.resolve();
   lastOK;
   lastError;
+  touch(path, item) {
+    this.cache.delete(path);
+    this.cache.set(path, item);
+  }
   cached(path, fresh) {
     const item = this.cache.get(path);
-    return item && this.monotonic() - item.used < fresh ? { raw: item.raw, at: item.at } : void 0;
+    if (!item || this.monotonic() - item.saved >= fresh) return void 0;
+    this.touch(path, item);
+    return { raw: item.raw, at: item.at };
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    if (bytes > this.limits.cacheBytes) {
+      if (old) {
+        this.bytes -= old.bytes;
+        this.cache.delete(path);
+      }
+      return;
+    }
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    this.cache.set(path, { raw, at, saved: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       const oldest = this.cache.keys().next().value;
@@ -1040,6 +1087,21 @@ var OpenAlex = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1056,7 +1118,8 @@ var OpenAlex = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1077,20 +1140,18 @@ var OpenAlex = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal) {
+  async read(path, fresh, signal, validate) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1111,14 +1172,22 @@ var OpenAlex = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
+        validate(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        if (request.signal.aborted) {
+          const aborted = cancellation(request.signal);
+          if (aborted instanceof ReadError) {
+            this.lastError = { code: aborted.code, status: aborted.status, at: this.monotonic() };
+            throw aborted;
+          }
+          throw error instanceof Error && error.name === "AbortError" ? error : aborted;
+        }
         const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1132,8 +1201,11 @@ var OpenAlex = class {
       return await run;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
-      const old = this.cached(path, Infinity);
-      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+      const old = this.cache.get(path);
+      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
+        this.touch(path, old);
+        return { raw: old.raw, at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
+      }
       throw error;
     }
   }
@@ -1143,11 +1215,13 @@ var OpenAlex = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 20, refresh = false, signal) {
-    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal);
+    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
+      parseWorks(raw, at);
+    });
     return { ...parseWorks(rd.raw, rd.at), stale: rd.stale };
   }
   cacheStats() {
@@ -1173,14 +1247,36 @@ function line(work, index) {
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const token of exact.fieldValues("query")) {
+      if (token.raw === "null") {
+        delete args.query;
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args.query = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = limit;
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1191,16 +1287,26 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "openalex_search") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
-    if (name === "openalex_search") {
-      if (typeof args.query !== "string") throw new ReadError("invalid");
-      const limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(args.query, limit, false, request.signal);
-      return clip(result.works.length ? result.works.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29999);
+    const query = queryText(args.query);
+    let limit = 10;
+    if (args.limit != null) {
+      if (typeof args.limit === "bigint") {
+        if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+        limit = Number(args.limit);
+      } else {
+        if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+        limit = args.limit;
+      }
     }
-    throw unknownMethod(`connector.tools.${name}`);
+    const result = await service.search(query, limit, false, request.signal);
+    return clip(result.works.length ? result.works.map(line).join("\n").trim() : fmt(t.results, { query }) + "\n" + t.empty, 29999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1232,19 +1338,58 @@ var jsx = createElement;
 var jsxs = createElement;
 
 // src/page.tsx
+var TEXT_MAX = 2e3;
+var KEY_MAX = 128;
+var ITEMS_MAX = 300;
+var STATE_MAX = 16384;
+var FRAME_MAX = 512 * 1024;
+var URL_MAX = 4096;
+var utf8 = new TextEncoder();
+var byteLength = (text) => utf8.encode(text).byteLength;
+function safeLinkURL(value) {
+  if (typeof value !== "string" || !value) return void 0;
+  let link;
+  try {
+    link = new URL(value);
+  } catch {
+    return void 0;
+  }
+  if (link.protocol !== "https:" || link.username || link.password || link.port || link.href.length > URL_MAX) return void 0;
+  return link.href;
+}
+function uniqueKey(used, prefix, raw) {
+  let key = boundedID(prefix, raw, KEY_MAX);
+  let attempt = 2;
+  while (used.has(key)) {
+    key = boundedID(prefix, `${raw}#${attempt}`, KEY_MAX);
+    attempt++;
+  }
+  used.add(key);
+  return key;
+}
 var initialState = { q: "", found: false };
 function readState(raw) {
-  if (typeof raw !== "string" || raw.length > 2e3) return initialState;
+  if (typeof raw !== "string" || byteLength(raw) > STATE_MAX) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value) || typeof value.q !== "string" || typeof value.found !== "boolean") return initialState;
-    const q = clip(value.q.trim(), 200);
-    return q ? { q, found: value.found } : initialState;
+    if (!value.found && value.q === "") return initialState;
+    return { q: queryText(value.q), found: value.found };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+var encodeState = (state) => {
+  const encoded = JSON.stringify(state);
+  return byteLength(encoded) <= STATE_MAX ? encoded : JSON.stringify(initialState);
+};
+function safeState(state) {
+  try {
+    return readState(JSON.stringify(state));
+  } catch {
+    return initialState;
+  }
+}
 function transition(state, id, values = {}) {
   let fields2;
   if (typeof values === "string") {
@@ -1257,8 +1402,13 @@ function transition(state, id, values = {}) {
   if (!values || typeof values !== "object" || Array.isArray(values)) return state;
   fields2 = values;
   if (id === "search") {
-    const query = typeof fields2.query === "string" ? clip(fields2.query.trim(), 200) : "";
-    return query ? { q: query, found: true } : state;
+    if (typeof fields2.query !== "string" || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\ud800-\udfff]/u.test(fields2.query)) return state;
+    try {
+      const query = queryText(clip(oneLine(fields2.query), 200));
+      return { q: query, found: true };
+    } catch {
+      return state;
+    }
   }
   if (id === "home") return initialState;
   return state;
@@ -1276,41 +1426,69 @@ async function loadPage(service, state, refresh, signal) {
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "research", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 4e3), style }, key);
-  const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "openalex-query"),
-    /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "openalex-submit")
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), stateJSON = encodeState(state), t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
+  const act = (id, next, title) => {
+    const cleanTitle = title ? clip(title, TEXT_MAX) : void 0;
+    return props.action?.(id, next, cleanTitle) ?? (next && uiVersion >= 3 ? { id, push: { ui: "research", state: encodeState(next), ...cleanTitle ? { title: cleanTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, TEXT_MAX), style }, key);
+  const search = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, TEXT_MAX), children: [
+    /* @__PURE__ */ jsx(Field, { name: "query", label: clip(t.search, TEXT_MAX), kind: "text", placeholder: clip(t.searchHint, TEXT_MAX), value: state.q }, "openalex-query"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.searchAction, TEXT_MAX), action: act("search") }, "openalex-submit")
   ] }, "openalex-search");
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "openalex-loading-indicator") }, "openalex-loading")
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, TEXT_MAX) }, "openalex-loading-indicator") }, "openalex-loading")
   ] }, "openalex");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
       text("openalex-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "openalex-retry")
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "openalex-retry")
     ] }, "openalex-error")
   ] }, "openalex");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("openalex-welcome-text", t.welcome, "body") }, "openalex-welcome"),
     /* @__PURE__ */ jsx(Section, { children: text("openalex-license", t.attribution, "caption") }, "openalex-attribution")
   ] }, "openalex");
   const result = loaded.result;
-  return /* @__PURE__ */ jsxs(View, { title: fmt(t.results, { query: clip(state.q, 100) }), state: encodeState(state), children: [
+  const usedKeys = /* @__PURE__ */ new Set(["openalex-search", "openalex-query", "openalex-submit", "openalex-empty-results", "openalex-empty", "openalex-footer", "openalex-refresh", "openalex-home", "openalex-attribution", "openalex-license"]);
+  const reservedItems = 2 + 2 + 1;
+  let remainingItems = Math.max(0, ITEMS_MAX - reservedItems);
+  let remainingBytes = FRAME_MAX - byteLength(stateJSON) - 8192;
+  const cards = [];
+  for (const work of result.works) {
+    const workLink = safeLinkURL(work.id), oaLink = safeLinkURL(work.oaURL), doiLink = safeLinkURL(work.doi);
+    const neededItems = (work.license ? 1 : 0) + (oaLink ? 1 : 0) + (workLink ? 1 : 0) + (doiLink ? 1 : 0);
+    if (neededItems === 0 || neededItems > remainingItems) break;
+    const sectionKey = uniqueKey(usedKeys, "work-", work.id);
+    const licenseKey = work.license ? uniqueKey(usedKeys, "license-", work.id) : "";
+    const fulltextKey = oaLink ? uniqueKey(usedKeys, "fulltext-", work.id) : "";
+    const workLinkKey = workLink ? uniqueKey(usedKeys, "work-link-", work.id) : "";
+    const doiKey = doiLink ? uniqueKey(usedKeys, "doi-", work.id) : "";
+    const title = clip(work.title, TEXT_MAX);
+    const cardFooter = clip([work.source, work.year ? fmt(t.year, { year: work.year }) : "", fmt(t.citations, { count: work.citations.toLocaleString("en-US") }), work.openAccess ? t.openAccess : t.closedAccess].filter(Boolean).join(" \xB7 "), TEXT_MAX);
+    const licenseText = work.license ? clip(work.license, TEXT_MAX) : "";
+    const estimatedBytes = byteLength(sectionKey) + byteLength(licenseKey) + byteLength(fulltextKey) + byteLength(workLinkKey) + byteLength(doiKey) + byteLength(title) + byteLength(cardFooter) + byteLength(licenseText) + (oaLink ? byteLength(oaLink) : 0) + (workLink ? byteLength(workLink) : 0) + (doiLink ? byteLength(doiLink) : 0) + 512;
+    if (estimatedBytes > remainingBytes) break;
+    remainingItems -= neededItems;
+    remainingBytes -= estimatedBytes;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, footer: cardFooter, children: [
+      work.license ? text(licenseKey, licenseText, "caption") : null,
+      oaLink ? /* @__PURE__ */ jsx(Link, { title: clip(t.openFulltext, TEXT_MAX), url: oaLink }, fulltextKey) : null,
+      workLink ? /* @__PURE__ */ jsx(Link, { title: clip(t.openWork, TEXT_MAX), url: workLink }, workLinkKey) : null,
+      doiLink ? /* @__PURE__ */ jsx(Link, { title: clip(t.openDOI, TEXT_MAX), url: doiLink }, doiKey) : null
+    ] }, sectionKey));
+  }
+  const readAt = readTime(result.at, tz, props.locale ?? service.locale);
+  const footerText = clip(`${readAt ? fmt(t.readAt, { at: readAt }) : ""}${result.stale ? `${readAt ? " \xB7 " : ""}${errorText(result.stale, props.locale ?? service.locale)}` : ""}`, TEXT_MAX);
+  return /* @__PURE__ */ jsxs(View, { title: clip(fmt(t.results, { query: clip(state.q, 100) }), TEXT_MAX), state: stateJSON, children: [
     search,
-    result.works.length ? result.works.map((work) => /* @__PURE__ */ jsxs(Section, { title: work.title, footer: [work.source, work.year ? fmt(t.year, { year: work.year }) : "", fmt(t.citations, { count: work.citations.toLocaleString("en-US") }), work.openAccess ? t.openAccess : t.closedAccess].filter(Boolean).join(" \xB7 "), children: [
-      work.license ? text(`license-${work.id}`, work.license, "caption") : null,
-      work.oaURL ? /* @__PURE__ */ jsx(Link, { title: t.openFulltext, url: work.oaURL }, `fulltext-${work.id}`) : null,
-      /* @__PURE__ */ jsx(Link, { title: t.openWork, url: work.id }, `work-link-${work.id}`),
-      work.doi ? /* @__PURE__ */ jsx(Link, { title: t.openDOI, url: work.doi }, `doi-${work.id}`) : null
-    ] }, `work-${work.id}`)) : /* @__PURE__ */ jsx(Section, { children: text("openalex-empty", t.empty) }, "openalex-empty-results"),
-    /* @__PURE__ */ jsxs(Section, { footer: `${fmt(t.readAt, { at: readTime(result.at, tz, props.locale ?? service.locale) })}${result.stale ? ` \xB7 ${errorText(result.stale, props.locale ?? service.locale)}` : ""}`, children: [
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "openalex-refresh"),
-      /* @__PURE__ */ jsx(Button, { title: t.search, action: act("home") }, "openalex-home")
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("openalex-empty", t.empty) }, "openalex-empty-results"),
+    /* @__PURE__ */ jsxs(Section, { footer: footerText, children: [
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "openalex-refresh"),
+      /* @__PURE__ */ jsx(Button, { title: clip(t.search, TEXT_MAX), action: act("home") }, "openalex-home")
     ] }, "openalex-footer"),
     /* @__PURE__ */ jsx(Section, { children: text("openalex-license", t.attribution, "caption") }, "openalex-attribution")
   ] }, "openalex");
@@ -1337,7 +1515,10 @@ function Root(options) {
       }
       return callback((values) => {
         if (id === "refresh") setRefresh((previous) => previous + 1);
-        else setState((previous) => transition(previous, id, values));
+        else {
+          setRefresh(0);
+          setState((previous) => transition(previous, id, values));
+        }
       }, { submit: true });
     }
   });

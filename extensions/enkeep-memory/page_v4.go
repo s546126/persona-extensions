@@ -187,7 +187,8 @@ func sourceRows(st *store.State) []*entry.SourceStatus {
 		out = append(out, s)
 	}
 	order := map[string]int{entry.SrcAssistant: 1, entry.SrcAsk: 2, entry.SrcAgent: 3, entry.SrcTools: 4, entry.SrcTodo: 5,
-		entry.SrcMemory: 6, entry.SrcAbout: 7, entry.SrcChat: 8, entry.SrcKB: 9, entry.SrcRecording: 11}
+		entry.SrcMemory: 6, entry.SrcAbout: 7, entry.SrcChat: 8, entry.SrcKB: 9, entry.SrcRecording: 11,
+		entry.SrcLedger: 12, entry.SrcSent: 13}
 	sort.Slice(out, func(i, j int) bool {
 		if order[out[i].Code] != order[out[j].Code] {
 			return order[out[i].Code] < order[out[j].Code]

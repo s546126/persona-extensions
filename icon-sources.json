@@ -33,6 +33,22 @@
       "license_file": "assets/LICENSE",
       "attribution": "LINUX DO. Official icon asset, with the upstream repository license notice preserved in each package. Trademark rights are separate from copyright licensing."
     },
+    "lucide": {
+      "repository": "https://github.com/lucide-icons/lucide",
+      "revision": "f620c85e3b8ecb7c9089de19df7e7b7ff3863efd",
+      "license": "ISC AND MIT",
+      "license_url": "https://raw.githubusercontent.com/lucide-icons/lucide/f620c85e3b8ecb7c9089de19df7e7b7ff3863efd/LICENSE",
+      "license_file": "assets/LICENSE",
+      "attribution": "Lucide Contributors and Cole Bemis. Gamepad 2 artwork from the Lucide icon set, with the upstream license notice."
+    },
+    "magpie-usage": {
+      "repository": "https://github.com/yetone/magpie",
+      "revision": "053aa2d188bc66445cde45edfef9896ddbb0a58e",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/yetone/magpie/053aa2d188bc66445cde45edfef9896ddbb0a58e/LICENSE",
+      "license_file": "assets/LICENSE",
+      "attribution": "yetone. Official Magpie icon from build/windows/icon-256.png, with the upstream license notice preserved."
+    },
     "mnemo": {
       "repository": "https://github.com/szupzj18/mnemo",
       "revision": "d4da6e2b0ce5f0580a01b5f9c61dada75d19b16d",
@@ -334,6 +350,18 @@
       "height": 512,
       "trademark_owner": "Discord Inc.",
       "usage": "Exact Raycast extension icon used to identify the corresponding public service."
+    },
+    "dingtalk": {
+      "path": "assets/icon.png",
+      "source_id": "dify-official-plugins",
+      "source_url": "https://raw.githubusercontent.com/langgenius/dify-official-plugins/60804e30f6fa41fbe890c02c9849b0bdbe28d13a/tools/dingtalk/_assets/icon.svg",
+      "sha256": "1a24b488055ed08a0ed7d5699af39eeeea875de504cf6b4d866c04ee02eff55a",
+      "format": "png",
+      "width": 480,
+      "height": 480,
+      "trademark_owner": "Alibaba (DingTalk)",
+      "usage": "Service icon used solely to identify this integration. The 480x480 PNG embedded in the upstream SVG, extracted byte for byte without changes.",
+      "transformation": "The 480x480 PNG embedded in the upstream SVG, extracted byte for byte without changes."
     },
     "disklessly": {
       "path": "assets/icon.png",
@@ -676,6 +704,17 @@
       "trademark_owner": "Miniflux project",
       "usage": "Exact Raycast extension icon used to identify the corresponding public service."
     },
+    "magpie-usage": {
+      "path": "assets/icon.png",
+      "source_id": "magpie-usage",
+      "source_url": "https://raw.githubusercontent.com/yetone/magpie/053aa2d188bc66445cde45edfef9896ddbb0a58e/build/windows/icon-256.png",
+      "sha256": "5512c5ce51526ca87731af1e120a0de8e8e6555d108385bd817b5ea084929ed4",
+      "format": "png",
+      "width": 256,
+      "height": 256,
+      "trademark_owner": "yetone",
+      "usage": "Official Magpie icon used to identify the integration."
+    },
     "mnemo": {
       "path": "assets/icon.png",
       "source_id": "mnemo",
@@ -946,6 +985,19 @@
       "trademark_owner": "Persona / nwverse",
       "usage": "Official Persona app branding for this Persona-native tool or pack, not the logo of an external data provider."
     },
+    "steam": {
+      "path": "assets/icon.png",
+      "source_id": "lucide",
+      "source_url": "https://raw.githubusercontent.com/lucide-icons/lucide/f620c85e3b8ecb7c9089de19df7e7b7ff3863efd/icons/gamepad-2.svg",
+      "sha256": "70e0a5543be088e0be0df78477e6af8de656d45111e14eb324ff26b5bf675833",
+      "format": "png",
+      "width": 256,
+      "height": 256,
+      "trademark_owner": "Valve Corporation (Steam)",
+      "usage": "Lucide gamepad pictogram identifying the Steam integration.",
+      "source_sha256": "b0671de7afbebdafc4d655d867d9851947170b906fb187e749410039df867509",
+      "transformation": "The source SVG is rasterized at 256 × 256 on a light blue background with its path geometry intact."
+    },
     "sentry": {
       "path": "assets/icon.png",
       "source_id": "raycast",
@@ -1048,7 +1100,18 @@
       "trademark_owner": "Telegram",
       "usage": "Exact Raycast extension icon used to identify the corresponding public service."
     },
-    "termwise": {
+    "telegram-bot": {
+      "path": "assets/icon.png",
+      "source_id": "raycast",
+      "source_url": "https://raw.githubusercontent.com/raycast/extensions/dfa15bf5d53b5c97722f9d4df1b1e0af939a81ab/extensions/telegram/assets/telegram.png",
+      "sha256": "892cc76353842417decb03c265d5999c57fc4235c5ea9bb34c30993d57b36b8d",
+      "format": "png",
+      "width": 512,
+      "height": 512,
+      "trademark_owner": "Telegram",
+      "usage": "Exact Raycast extension icon used to identify the corresponding public service."
+    },
+    "relingo": {
       "path": "assets/icon.png",
       "source_id": "persona",
       "source_url": "https://raw.githubusercontent.com/nwverse/persona/ba975136899181a7f79b771cfe0d508f088dbaf9/apple/Persona/Resources/Assets.xcassets/AppIcon.appiconset/icon.png",
@@ -1113,6 +1176,18 @@
       "height": 512,
       "trademark_owner": "Tencent",
       "usage": "Exact Raycast extension icon used to identify the corresponding public service."
+    },
+    "wecom": {
+      "path": "assets/icon.png",
+      "source_id": "dify-official-plugins",
+      "source_url": "https://raw.githubusercontent.com/langgenius/dify-official-plugins/60804e30f6fa41fbe890c02c9849b0bdbe28d13a/tools/wecom/_assets/icon.svg",
+      "sha256": "da23a88d05b22fa482fc8f858b2385c6605db1a0b5b562734898bd733721b4ad",
+      "format": "png",
+      "width": 512,
+      "height": 512,
+      "trademark_owner": "Tencent (WeCom)",
+      "usage": "Service icon used solely to identify this integration. The upstream 40x40 SVG rasterized with Google Chrome 147.0.7727.56 at 512x512, preserving its artwork and aspect ratio.",
+      "transformation": "The upstream 40x40 SVG rasterized with Google Chrome 147.0.7727.56 at 512x512, preserving its artwork and aspect ratio."
     },
     "wikipedia": {
       "path": "assets/icon.png",

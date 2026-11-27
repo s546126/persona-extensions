@@ -2,14 +2,21 @@ export const limits = Object.freeze({ request: 12_000, page: 18_000, tool: 18_00
 export type LimitOptions = { [K in keyof typeof limits]?: number };
 export type ReadCode = "invalid" | "bad_answer" | "not_found" | "unsupported" | "rate_limited" | "slow" | "network" | "http" | "storage";
 export class ReadError extends Error { constructor(readonly code: ReadCode, readonly status?: number) { super(code); } }
-export const clip = (text: string, most: number) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  if (most <= 0) return "";
+  const chars = Array.from(text);
+  if (chars.length <= most) return text;
+  if (most === 1) return chars[0];
+  return chars.slice(0, most - 1).join("").trimEnd() + "…";
+};
 export const plain = (text: string) => text.replace(/\s+/gu, " ").trim();
+const hasLoneSurrogate = (value: string) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
 function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer"); return value as Record<string, unknown>; }
 function array(value: unknown): unknown[] { if (!Array.isArray(value)) throw new ReadError("bad_answer"); return value; }
 function string(value: unknown): string { if (typeof value !== "string") throw new ReadError("bad_answer"); return value; }
 export interface DomainName { ascii: string; unicode: string }
 export function domainName(raw: unknown): DomainName {
-  if (typeof raw !== "string" || raw.length > 1024 || /[\u0000- \u007f\\/@#?&=]/u.test(raw)) throw new ReadError("invalid");
+  if (typeof raw !== "string" || raw.length > 1024 || /[\u0000- \u007f\\/@#?&=]/u.test(raw) || hasLoneSurrogate(raw)) throw new ReadError("invalid");
   let unicode: string;
   try { unicode = raw.trim().toLowerCase().replace(/\.$/u, "").normalize("NFC"); } catch { throw new ReadError("invalid"); }
   if (!unicode || unicode.length > 253 || /[_*:%]/u.test(unicode) || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(unicode)) throw new ReadError("invalid");
@@ -35,7 +42,7 @@ export function rdapService(raw: unknown, domain: string): RDAPService {
       try {
         const url = new URL(string(value));
         if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash || !url.pathname.endsWith("/")) return "";
-        if (url.origin !== "https://rdap.verisign.com" || url.pathname !== `/${suffix}/v1/`) return "";
+        if (url.origin !== "https://rdap.verisign.com" || url.pathname !== `/${suffix}/v1/` || url.toString().length > 4096) return "";
         return url.toString();
       } catch { return ""; }
     }).filter(Boolean);
@@ -60,7 +67,9 @@ function publicLink(value: unknown, kind: "self" | "iana"): string {
     if (url.origin !== "https://www.iana.org") throw new ReadError("bad_answer");
   } else if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || !url.hostname.includes(".")) throw new ReadError("bad_answer");
   url.hash = "";
-  return url.toString();
+  const href = url.toString();
+  if (href.length > 4096) throw new ReadError("bad_answer");
+  return href;
 }
 function registrar(raw: unknown): string | undefined {
   if (!Array.isArray(raw)) return undefined;
@@ -69,27 +78,46 @@ function registrar(raw: unknown): string | undefined {
     if (!roles.includes("registrar")) continue;
     const fn = Array.isArray(item.vcardArray) && Array.isArray(item.vcardArray[1])
       ? (item.vcardArray[1] as unknown[]).find(row => Array.isArray(row) && row[0] === "fn" && typeof row[3] === "string") : undefined;
-    if (fn) return clip(plain((fn as unknown[])[3] as string), 300);
+    if (fn) {
+      const value = clip(plain((fn as unknown[])[3] as string), 300);
+      if (value) return value;
+    }
   }
   return undefined;
 }
 function date(value: unknown): string {
   const raw = string(value);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u.test(raw) || !Number.isFinite(Date.parse(raw))) throw new ReadError("bad_answer");
-  // Date.parse rolls an impossible calendar day into the next month; that is not a valid RDAP date.
-  const [y, m, d] = raw.slice(0, 10).split("-").map(Number), parsed = new Date(raw);
-  if (parsed.getUTCFullYear() !== y || parsed.getUTCMonth() !== m - 1 || parsed.getUTCDate() !== d) throw new ReadError("bad_answer");
-  return parsed.toISOString();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|([+-])(\d{2}):(\d{2}))$/u.exec(raw);
+  if (!match) throw new ReadError("bad_answer");
+  const y = Number(match[1]), m = Number(match[2]), d = Number(match[3]);
+  const hh = Number(match[4]), mm = Number(match[5]), ss = Number(match[6]);
+  if (hh > 23 || mm > 59 || ss > 59) throw new ReadError("bad_answer");
+  if (match[7] !== "Z") {
+    const oh = Number(match[9]), om = Number(match[10]);
+    if (oh > 23 || om > 59) throw new ReadError("bad_answer");
+  }
+  // Validate the local calendar day itself (Date.parse rolls impossible days like Feb 30 into March).
+  const calendar = new Date(Date.UTC(y, m - 1, d));
+  if (calendar.getUTCFullYear() !== y || calendar.getUTCMonth() !== m - 1 || calendar.getUTCDate() !== d) throw new ReadError("bad_answer");
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) throw new ReadError("bad_answer");
+  return new Date(ms).toISOString();
 }
 export function parseRegistration(raw: unknown, domain: string, at: number): Registration {
   const requested = domainName(domain), root = object(raw);
   if (root.objectClassName !== "domain") throw new ReadError("bad_answer");
-  const name = root.ldhName == null ? requested.ascii : domainName(string(root.ldhName)).ascii;
+  let name = requested.ascii;
+  if (root.ldhName != null) {
+    try { name = domainName(string(root.ldhName)).ascii; }
+    catch { throw new ReadError("bad_answer"); }
+  }
   if (name !== requested.ascii) throw new ReadError("bad_answer");
   const statuses = array(root.status ?? []).slice(0, 32).map(value => clip(plain(string(value)), 160)).filter(Boolean);
   const events = array(root.events ?? []).slice(0, 32).map(value => {
     const item = object(value);
-    return { action: clip(plain(string(item.eventAction)), 80), at: date(item.eventDate) };
+    const action = clip(plain(string(item.eventAction)), 80);
+    if (!action) throw new ReadError("bad_answer");
+    return { action, at: date(item.eventDate) };
   });
   const self = array(root.links ?? []).slice(0, 32).find(link => object(link).rel === "self");
   const url = publicLink(object(self ?? {}).href, "self");

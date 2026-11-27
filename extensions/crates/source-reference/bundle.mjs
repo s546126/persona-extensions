@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "crates", name: "Rust Crates", version: "0.1.4", icon: "assets/icon.png", description: "Search Rust crates on the official crates.io JSON API. Compare default versions, licenses, release dates, download activity, documentation and repository links. Get an exact-version cargo add command without executing it.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/crates/README.md", tags: ["Development", "Rust", "Cargo", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/crates.mjs", sha256: "" } }, contributes: { connectors: [{ id: "crates", name: "Rust Crates", capabilities: ["status", "tools"], hosts: ["crates.io"], agent_tools: ["crates_*"] }], ui: [{ id: "crates", title: "Rust Crates", placement: "nav_page", icon: "code" }] }, permissions: { network: ["crates.io"] } };
+var persona_extension_default = { manifest_version: 1, id: "crates", name: "Rust Crates", version: "0.1.5", icon: "assets/icon.png", description: "Search Rust crates on the official crates.io JSON API. Compare default versions, licenses, release dates, download activity, documentation and repository links. Get an exact-version cargo add command without executing it.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/crates/README.md", tags: ["Development", "Rust", "Cargo", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/crates.mjs", sha256: "" } }, contributes: { connectors: [{ id: "crates", name: "Rust Crates", capabilities: ["status", "tools"], hosts: ["crates.io"], agent_tools: ["crates_*"] }], ui: [{ id: "crates", title: "Rust Crates", placement: "nav_page", icon: "code" }] }, permissions: { network: ["crates.io"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 1 << 20, fresh: 15 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 250 });
@@ -779,14 +779,21 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
 function crateName(value) {
   if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)) throw new ReadError("invalid");
   return value;
 }
 function queryText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -831,12 +838,12 @@ function httpsURL(value) {
   } catch {
     return void 0;
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.port) return void 0;
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) return void 0;
   return url.href;
 }
 function license(value, fallback = "Unspecified") {
   const license2 = clip(oneLine(string(value, fallback)), 120);
-  if (!license2 || /[\u0000-\u001f\u007f]/u.test(license2)) throw new ReadError("bad_answer");
+  if (!license2 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(license2)) throw new ReadError("bad_answer");
   return license2;
 }
 function date(value) {
@@ -848,8 +855,13 @@ function date(value) {
 function summary(value) {
   const item = object(value), name = crateName(item.name ?? item.id), version = versionText(item.default_version ?? item.newest_version ?? item.max_version);
   const url = `https://crates.io/crates/${name}`;
-  const licenseValue = item.license ?? (item.default_version && array(item.versions ?? []).find((raw) => object(raw).num === version) ? object(array(item.versions ?? []).find((raw) => object(raw).num === version)).license : void 0);
-  return { name, version, description: clip(oneLine(string(item.description, "")), 500), license: license(licenseValue, "See details"), url, ...httpsURL(item.repository) ? { repository: httpsURL(item.repository) } : {}, ...httpsURL(item.homepage) ? { homepage: httpsURL(item.homepage) } : {}, ...httpsURL(item.documentation) ? { documentation: httpsURL(item.documentation) } : {}, ...date(item.updated_at) ? { updated: date(item.updated_at) } : {}, ...item.recent_downloads == null ? {} : { recentDownloads: integer(item.recent_downloads) }, ...item.downloads == null ? {} : { totalDownloads: integer(item.downloads) } };
+  const matched = item.license == null && item.default_version ? array(item.versions ?? []).find((raw) => object(raw).num === version) : void 0;
+  const licenseValue = item.license ?? (matched ? object(matched).license : void 0);
+  const repoURL = httpsURL(item.repository);
+  const homeURL = httpsURL(item.homepage);
+  const docsURL = httpsURL(item.documentation);
+  const updated = date(item.updated_at);
+  return { name, version, description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), license: license(licenseValue, "See details"), url, ...repoURL ? { repository: repoURL } : {}, ...homeURL ? { homepage: homeURL } : {}, ...docsURL ? { documentation: docsURL } : {}, ...updated ? { updated } : {}, ...item.recent_downloads == null ? {} : { recentDownloads: integer(item.recent_downloads) }, ...item.downloads == null ? {} : { totalDownloads: integer(item.downloads) } };
 }
 function parseSearch(raw, at) {
   const root2 = object(raw), meta = object(root2.meta), total = integer(meta.total, 1e9), seen = /* @__PURE__ */ new Set();
@@ -867,7 +879,8 @@ function parseCrate(raw, at) {
   if (selected.length !== 1) throw new ReadError("bad_answer");
   const version = object(selected[0]);
   if (version.crate != null && crateName(version.crate) !== result.name) throw new ReadError("bad_answer");
-  return { ...result, license: license(version.license), install: `cargo add ${result.name}@${result.version}`, yanked: boolean(version.yanked ?? false), ...version.downloads == null ? {} : { versionDownloads: integer(version.downloads) }, ...date(version.created_at) ? { published: date(version.created_at) } : {} };
+  const published = date(version.created_at);
+  return { ...result, license: license(version.license), install: `cargo add ${result.name}@${result.version}`, yanked: boolean(version.yanked ?? false), ...version.downloads == null ? {} : { versionDownloads: integer(version.downloads) }, ...published ? { published } : {} };
 }
 
 // src/locales/en.json
@@ -1003,7 +1016,16 @@ var ja_default = {
 var textsFor = (locale = "") => locale.toLowerCase().startsWith("ja") ? ja_default : locale.toLowerCase().startsWith("zh") ? zh_Hans_default : en_default;
 var fmt = (text, values) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ""));
 var number = (value) => new Intl.NumberFormat("en-US").format(value);
-var dateText = (value) => value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "";
+function dateText(value) {
+  if (!value) return "";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "";
+  try {
+    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(parsed);
+  } catch {
+    return "";
+  }
+}
 function errorText(error, locale = "") {
   const t = textsFor(locale);
   if (!(error instanceof ReadError)) return t.network;
@@ -1048,7 +1070,7 @@ var Crates = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    if (item && this.monotonic() - item.used < fresh) {
+    if (item && this.monotonic() - item.saved < fresh) {
       item.used = this.monotonic();
       return item;
     }
@@ -1056,10 +1078,14 @@ var Crates = class {
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
+    const stamp = this.monotonic();
+    this.cache.set(path, { raw, at, saved: stamp, used: stamp, bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       let oldest;
@@ -1077,6 +1103,21 @@ var Crates = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1084,7 +1125,8 @@ var Crates = class {
       void reader.cancel().catch(() => {
       });
     };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -1093,11 +1135,15 @@ var Crates = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally {
       signal.removeEventListener("abort", cancel);
       reader.releaseLock();
@@ -1114,22 +1160,20 @@ var Crates = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal, validate) {
+  async read(path, fresh, signal, parse) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
-    if (cached) return cached;
+    if (cached) return { value: parse(cached.raw, cached.at), at: cached.at };
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
-      if (again) return again;
+      if (again) return { value: parse(again.raw, again.at), at: again.at };
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
       if (pause) await new Promise((resolve, reject) => {
         const cancel = () => {
@@ -1148,15 +1192,19 @@ var Crates = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
-        validate(raw, at);
+        const value = parse(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
-        return { raw, at };
+        return { value, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) {
+          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        }
+        const failure = error instanceof ReadError ? error : signal?.aborted && signal.reason instanceof ReadError ? signal.reason : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1173,7 +1221,7 @@ var Crates = class {
       const old = this.cache.get(path);
       if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
         old.used = this.monotonic();
-        return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+        return { value: parse(old.raw, old.at), at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
       }
       throw error;
     }
@@ -1184,20 +1232,16 @@ var Crates = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 12, refresh = false, signal) {
-    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
-      parseSearch(raw, at);
-    });
-    return { ...parseSearch(rd.raw, rd.at), stale: rd.stale };
+    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => parseSearch(raw, at));
+    return { ...rd.value, stale: rd.stale };
   }
   async crate(name, refresh = false, signal) {
-    const rd = await this.read(cratePath(crateName(name)), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
-      parseCrate(raw, at);
-    });
-    return { crate: parseCrate(rd.raw, rd.at), at: rd.at, ...rd.stale ? { stale: rd.stale } : {} };
+    const rd = await this.read(cratePath(crateName(name)), refresh ? 0 : this.limits.fresh, signal, (raw, at) => parseCrate(raw, at));
+    return { crate: rd.value, at: rd.at, ...rd.stale ? { stale: rd.stale } : {} };
   }
   cacheStats() {
     return { entries: this.cache.size, bytes: this.bytes };
@@ -1238,14 +1282,36 @@ ${crate.homepage}` : ""}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const field of ["query", "name"]) for (const token of exact.fieldValues(field)) {
+      if (token.raw === "null") {
+        delete args[field];
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[field] = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = Number(limit);
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1256,23 +1322,34 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "crates_search" && name !== "crates_crate") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "crates_search") {
-      const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(query, limit, false, request.signal);
-      return clip((result.crates.length ? result.crates.map((crate, index) => summaryLine(crate, index, service.locale)).join("\n") : t.empty) + `
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result2 = await service.search(query, limit, false, request.signal);
+      return clip((result2.crates.length ? result2.crates.map((crate, index) => summaryLine(crate, index, service.locale)).join("\n") : t.empty) + `
+${t.attribution}${result2.stale ? `
+${errorText(result2.stale, service.locale)}` : ""}`, 29999);
+    }
+    const result = await service.crate(crateName(args.name), false, request.signal);
+    return clip(detailText(result.crate, service.locale) + `
 ${t.attribution}${result.stale ? `
 ${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    if (name === "crates_crate") {
-      const result = await service.crate(crateName(args.name), false, request.signal);
-      return clip(detailText(result.crate, service.locale) + `
-${t.attribution}${result.stale ? `
-${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1305,18 +1382,51 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { q: "", found: false };
+var MAX_VIEW_ITEMS = 300;
+var MAX_RESULT_CHROME_ITEMS = 8;
+var MAX_RESULT_ITEMS = MAX_VIEW_ITEMS - MAX_RESULT_CHROME_ITEMS;
+var MAX_RESULT_BYTES = 512 * 1024;
+var MAX_STATE_BYTES = 16 * 1024;
+var encoder3 = new TextEncoder();
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "~" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
+function validHTTPS(raw, maxLen = 4096) {
+  if (!raw || raw.length > maxLen) return void 0;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password && !url.port ? url.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function summaryState(value) {
   if (value == null) return void 0;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("invalid");
   const raw = value, name = crateName(raw.name);
+  const rawDesc = typeof raw.description === "string" ? raw.description : "";
+  const rawLicense = typeof raw.license === "string" ? raw.license : "";
+  if (/[\ud800-\udfff]/u.test(rawDesc) || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(rawLicense)) throw new ReadError("invalid");
   const summary2 = { name, version: typeof raw.version === "string" && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,99}$/.test(raw.version) ? raw.version : (() => {
     throw new ReadError("invalid");
-  })(), description: clip(typeof raw.description === "string" ? raw.description : "", 500), license: clip(typeof raw.license === "string" ? raw.license : "", 120), url: `https://crates.io/crates/${name}` };
+  })(), description: clip(rawDesc, 500), license: clip(rawLicense, 120), url: `https://crates.io/crates/${name}` };
   for (const field of ["repository", "homepage", "documentation"]) {
     if (raw[field] == null) continue;
     if (typeof raw[field] !== "string") throw new ReadError("invalid");
     const link = new URL(raw[field]);
-    if (link.protocol !== "https:" || link.username || link.password || link.port) throw new ReadError("invalid");
+    if (link.protocol !== "https:" || link.username || link.password || link.port || link.href.length > 4096) throw new ReadError("invalid");
     summary2[field] = link.href;
   }
   if (raw.updated != null) {
@@ -1341,6 +1451,12 @@ function readState(raw) {
   }
 }
 var encodeState = (state) => JSON.stringify(state);
+function boundState(state) {
+  const base = { q: clip(state.q, 100), found: Boolean(state.found) };
+  if (!state.crate) return base;
+  const candidate = { ...base, crate: { ...state.crate, description: clip(state.crate.description, 500), license: clip(state.crate.license, 120) } };
+  return encoder3.encode(encodeState(candidate)).byteLength <= MAX_STATE_BYTES ? candidate : base;
+}
 function crateTransition(state, result, id) {
   if (!id.startsWith("crate:")) return state;
   const crate = result.crates.find((candidate) => id === `crate:${candidate.name}`);
@@ -1377,49 +1493,61 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "results", result: await service.search(state.q, 12, refresh, request.signal) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale);
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "crates", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2800), style }, key);
+  const { service, state, loaded, uiVersion = 0 } = props, locale = props.locale || service.locale, t = textsFor(locale);
+  const safeState = boundState(state);
+  const encodedState = encodeState(safeState);
+  const act = (id, next, title) => {
+    const safeNext = next ? boundState(next) : void 0;
+    const safeTitle = title ? clip(title, 2e3) : void 0;
+    return props.action?.(id, safeNext, safeTitle) ?? (safeNext && uiVersion >= 3 ? { id, push: { ui: "crates", state: encodeState(safeNext), ...safeTitle ? { title: safeTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2e3), style }, key);
   const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "crates-query"),
+    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: safeState.q }, "crates-query"),
     /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "crates-submit")
   ] }, "crates-search");
   const attribution = /* @__PURE__ */ jsx(Section, { children: text("crates-license", t.attribution, "caption") }, "crates-attribution");
   const footer = /* @__PURE__ */ jsxs(Section, { children: [
     /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "crates-refresh"),
-    state.crate ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "crates-back") : null,
+    safeState.crate ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "crates-back") : null,
     /* @__PURE__ */ jsx(Button, { title: t.home, action: act("home") }, "crates-home")
   ] }, "crates-footer");
-  const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("crates-stale-text", errorText(error, props.locale ?? service.locale)) }, "crates-stale") : null;
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("crates-stale-text", errorText(error, locale)) }, "crates-stale") : null;
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "crates-loading-indicator") }, "crates-loading"),
     attribution
   ] }, "crates");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text("crates-error-message", errorText(loaded.error, props.locale ?? service.locale)),
+      text("crates-error-message", errorText(loaded.error, locale)),
       /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "crates-retry")
     ] }, "crates-error"),
     attribution
   ] }, "crates");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("crates-welcome-text", t.welcome, "body") }, "crates-welcome"),
     attribution
   ] }, "crates");
   if (loaded.kind === "detail") {
     const crate = loaded.result.crate;
-    return /* @__PURE__ */ jsxs(View, { title: crate.name, state: encodeState(state), children: [
+    const publishedText = crate.published ? dateText(crate.published) : "";
+    const detailFooter = clip([fmt(t.license, { license: crate.license }), publishedText ? fmt(t.published, { version: crate.version, date: publishedText }) : `v${crate.version}`].join(" \xB7 "), 2e3);
+    const docsURL = validHTTPS(crate.documentation);
+    const repoURL = validHTTPS(crate.repository);
+    const homeURL = validHTTPS(crate.homepage);
+    const crateURL = validHTTPS(crate.url) ?? `https://crates.io/crates/${crate.name}`;
+    return /* @__PURE__ */ jsxs(View, { title: clip(crate.name, 2e3), state: encodedState, children: [
       search,
-      /* @__PURE__ */ jsxs(Section, { title: crate.name, footer: [fmt(t.license, { license: crate.license }), crate.published ? fmt(t.published, { version: crate.version, date: dateText(crate.published) }) : `v${crate.version}`].join(" \xB7 "), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(crate.name, 2e3), footer: detailFooter, children: [
         text("crates-description", crate.description, "body"),
         crate.recentDownloads !== void 0 ? text("crates-recent", fmt(t.recent, { count: number(crate.recentDownloads) })) : null,
         crate.totalDownloads !== void 0 ? text("crates-total", fmt(t.total, { count: number(crate.totalDownloads) })) : null,
@@ -1431,24 +1559,52 @@ function page(props) {
         text("crates-install-hint", t.installHint, "caption")
       ] }, "crates-install"),
       /* @__PURE__ */ jsxs(Section, { children: [
-        /* @__PURE__ */ jsx(Link, { title: t.openCrate, url: crate.url }, "crates-crate-link"),
-        crate.documentation ? /* @__PURE__ */ jsx(Link, { title: t.openDocs, url: crate.documentation }, "crates-docs-link") : null,
-        crate.repository ? /* @__PURE__ */ jsx(Link, { title: t.openRepository, url: crate.repository }, "crates-repository-link") : null,
-        crate.homepage ? /* @__PURE__ */ jsx(Link, { title: t.openHomepage, url: crate.homepage }, "crates-homepage-link") : null
+        /* @__PURE__ */ jsx(Link, { title: t.openCrate, url: crateURL }, "crates-crate-link"),
+        docsURL ? /* @__PURE__ */ jsx(Link, { title: t.openDocs, url: docsURL }, "crates-docs-link") : null,
+        repoURL ? /* @__PURE__ */ jsx(Link, { title: t.openRepository, url: repoURL }, "crates-repository-link") : null,
+        homeURL ? /* @__PURE__ */ jsx(Link, { title: t.openHomepage, url: homeURL }, "crates-homepage-link") : null
       ] }, "crates-links"),
       stale(loaded.result.stale),
       footer,
       attribution
     ] }, "crates");
   }
-  return /* @__PURE__ */ jsxs(View, { title: `${t.title}: ${clip(state.q, 100)}`, state: encodeState(state), children: [
+  const cards = [];
+  const usedKeys = /* @__PURE__ */ new Set();
+  const uniqueID = (prefix, value) => {
+    let key = boundedID(prefix, value);
+    for (let n = 1; usedKeys.has(key); n++) key = boundedID(prefix, `${value}~${n}`);
+    usedKeys.add(key);
+    return key;
+  };
+  let remainingItems = MAX_RESULT_ITEMS;
+  let remainingBytes = MAX_RESULT_BYTES;
+  for (const crate of loaded.result.crates) {
+    if (remainingItems < 3) break;
+    const title = clip(`${crate.name}@${crate.version}`, 2e3);
+    const updatedText = crate.updated ? dateText(crate.updated) : "";
+    const cardFooter = clip([fmt(t.license, { license: crate.license }), crate.recentDownloads !== void 0 ? fmt(t.recent, { count: number(crate.recentDownloads) }) : "", updatedText].filter(Boolean).join(" \xB7 "), 2e3);
+    const desc = clip(crate.description || t.unknown, 2e3);
+    const crateURL = validHTTPS(crate.url) ?? `https://crates.io/crates/${crate.name}`;
+    const sectionKey = uniqueID("crate-", crate.name);
+    const descKey = uniqueID("description-", crate.name);
+    const openKey = uniqueID("open-", crate.name);
+    const linkKey = uniqueID("link-", crate.name);
+    const nextState = boundState({ ...safeState, crate });
+    const cardBytes = encoder3.encode(JSON.stringify([sectionKey, title, cardFooter, descKey, desc, openKey, linkKey, crateURL, nextState])).byteLength;
+    if (cardBytes > remainingBytes) break;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, footer: cardFooter, children: [
+      text(descKey, desc, "body"),
+      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(`crate:${crate.name}`, nextState, crate.name) }, openKey),
+      /* @__PURE__ */ jsx(Link, { title: t.openCrate, url: crateURL }, linkKey)
+    ] }, sectionKey));
+    remainingItems -= 3;
+    remainingBytes -= cardBytes;
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(`${t.title}: ${clip(safeState.q, 100)}`, 2e3), state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("crates-total-results", fmt(t.results, { total: number(loaded.result.total) }), "caption") }, "crates-result-count"),
-    loaded.result.crates.length ? loaded.result.crates.map((crate) => /* @__PURE__ */ jsxs(Section, { title: `${crate.name}@${crate.version}`, footer: [fmt(t.license, { license: crate.license }), crate.recentDownloads !== void 0 ? fmt(t.recent, { count: number(crate.recentDownloads) }) : "", crate.updated ? dateText(crate.updated) : ""].filter(Boolean).join(" \xB7 "), children: [
-      text(`description-${crate.name}`, crate.description, "body"),
-      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(`crate:${crate.name}`, { ...state, crate }, crate.name) }, `open-${crate.name}`),
-      /* @__PURE__ */ jsx(Link, { title: t.openCrate, url: crate.url }, `link-${crate.name}`)
-    ] }, `crate-${crate.name}`)) : /* @__PURE__ */ jsx(Section, { children: text("crates-empty", t.empty) }, "crates-empty-results"),
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("crates-empty", t.empty) }, "crates-empty-results"),
     stale(loaded.result.stale),
     footer,
     attribution
@@ -1456,11 +1612,14 @@ function page(props) {
 }
 
 // src/root.tsx
+function sameState(a, b) {
+  return a.q === b.q && a.found === b.found && a.crate?.name === b.crate?.name;
+}
 function Root(options) {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState(void 0);
-  const identity = JSON.stringify(state) + ":" + refresh;
+  const identity = JSON.stringify([state, refresh]);
   useLoadEffect(async (signal) => {
     const loaded2 = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded2) ? previous : { service: options.service, identity, loaded: loaded2 });
@@ -1476,11 +1635,17 @@ function Root(options) {
         return callback(() => ({ push }), { push });
       }
       return callback((values) => {
-        if (id === "refresh") setRefresh((previous) => previous + 1);
+        if (id === "refresh") setView((previous) => ({ state: previous.state, refresh: previous.refresh + 1 }));
         else if (id.startsWith("crate:")) {
           if (loaded.kind !== "results") return;
-          setState((previous) => crateTransition(previous, loaded.result, id));
-        } else setState((previous) => transition(previous, id, values));
+          setView((previous) => {
+            const nextState = crateTransition(previous.state, loaded.result, id);
+            return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+          });
+        } else setView((previous) => {
+          const nextState = transition(previous.state, id, values);
+          return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     }
   });

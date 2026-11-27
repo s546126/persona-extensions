@@ -7,6 +7,11 @@
 // See CONTRACT.md next to this file for who writes which field and the file formats of the exits.
 package entry
 
+import (
+	"regexp"
+	"strings"
+)
+
 // Facet is one of the six things the curator is for, plus the people the user deals with (⑤′). They are equal: no
 // facet may be dropped, narrowed or filled with generic text to make room for another.
 type Facet string
@@ -44,18 +49,40 @@ const (
 )
 
 // Origin is where an entry comes from: behaviour (the default), what the user wrote about themself ("about me", the
-// first-run questions), or the assistant's hand-written memory. Self-reported and hand-written entries start stable.
+// first-run questions), or the assistant's own memory notes (T2 clue). Only SelfReport and FromOnboarding start stable.
 type Origin string
 
 const (
 	Behavior       Origin = "behavior"
-	SelfReport     Origin = "self_report" // the "about me" notes
-	FromOnboarding Origin = "onboarding"  // an answer to the first-run questions
-	Handwritten    Origin = "handwritten" // the assistant's memory files (S6): compared and counted, never rewritten
+	SelfReport     Origin = "self_report" // the "about me" notes (T0)
+	FromOnboarding Origin = "onboarding"  // an answer to the first-run questions (T0)
+	// OriginAssistantNote is an assistant-authored memory file note (S6, T2 clue): never UserOwned and never
+	// passed straight into the resident 4 KB block without user corroboration.
+	OriginAssistantNote Origin = "assistant_note"
+	// Handwritten is the legacy pre-0.4.0 S6 origin value kept for reading/migrating older state.json files.
+	// It carries no UserOwned privilege; migrate-v04 rewrites it to OriginAssistantNote.
+	Handwritten Origin = "handwritten"
 	// Seed is the user's own profile or rules confirmed elsewhere (another memory, a notes file), imported
 	// (enkeep_seed_import, unified memory design v2 §11.2). Unlike the others it starts a candidate: it reaches the
 	// exits only once the user's own records bear it out (an action filed under it), and never while K21 is off.
 	Seed Origin = "seed"
+)
+
+// IsAssistantNote reports whether o is an S6 assistant-authored note (current or legacy pre-0.4.0 value).
+func IsAssistantNote(o Origin) bool {
+	return o == OriginAssistantNote || o == Handwritten
+}
+
+// MemoryClass classifies an entry's architectural role, lifecycle and exit routing (0.4.0 §1.3).
+type MemoryClass string
+
+const (
+	ClassCoreProfile       MemoryClass = "core_profile"       // A1: user identity, stage & anti-misread boundaries
+	ClassPrinciple         MemoryClass = "principle"          // A2: cross-scene cognitive & decision principles
+	ClassUniversalContract MemoryClass = "universal_contract" // B: cross-tool universal AI collaboration rules
+	ClassOpsRunbook        MemoryClass = "ops_runbook"        // C: host/tool/command/API/repo/platform runbooks (never global 4 KB)
+	ClassEntityDossier     MemoryClass = "entity_dossier"     // D1: persistent named entity facts & structural relations
+	ClassEphemeral         MemoryClass = "ephemeral"          // D2: short-lived status/meetings/PR progress (14-30d TTL)
 )
 
 // SeedInfo is where a seed entry came from, in the import's general format (internal/seed).
@@ -136,6 +163,8 @@ const (
 	SrcChat      = "S8"  // connected message sources: chats, mail, code, docs, meetings, events (kb.read)
 	SrcKB        = "S9"  // the knowledge base's people, projects, relations and kb.owner
 	SrcRecording = "S11" // recordings, minutes and day reviews (kb.read recordings)
+	SrcLedger    = "S12" // assistant structured ledger entries (assistant.entries.read)
+	SrcSent      = "S13" // sent-as-user provenance on archived chats (sent.read)
 )
 
 // Who a line is by, after speaker resolution (3.2).
@@ -293,9 +322,10 @@ type Entry struct {
 	ValidFrom string `json:"valid_from,omitempty"`
 	ValidTo   string `json:"valid_to,omitempty"` // set when invalidated; the entry is kept, not deleted
 
-	Origin        Origin    `json:"origin"`
-	OriginVersion string    `json:"origin_version,omitempty"` // prompt@ruleset, or the memory file's hash
-	Seed          *SeedInfo `json:"seed,omitempty"`           // Origin Seed: where it came from
+	Origin        Origin      `json:"origin"`
+	OriginVersion string      `json:"origin_version,omitempty"` // prompt@ruleset, or the memory file's hash
+	MemoryClass   MemoryClass `json:"memory_class,omitempty"`   // 0.4.0 §1.3 architectural class
+	Seed          *SeedInfo   `json:"seed,omitempty"`           // Origin Seed: where it came from
 
 	User       *UserEdit   `json:"user,omitempty"`
 	Pinned     bool        `json:"pinned,omitempty"`
@@ -329,6 +359,90 @@ func (e *Entry) Live() bool {
 		return false
 	}
 	return true
+}
+
+// IsTrueUserOwned is the single source of truth for T0 user-sovereign entries (0.4.0 §1.2):
+// SelfReport ("about me"), FromOnboarding, Pinned, or a non-empty user edit.
+// S6 assistant notes (OriginAssistantNote and legacy Handwritten) are never user-owned.
+func IsTrueUserOwned(e *Entry) bool {
+	if e == nil {
+		return false
+	}
+	if e.Pinned || e.Origin == SelfReport || e.Origin == FromOnboarding {
+		return true
+	}
+	return e.User != nil && strings.TrimSpace(e.User.Text) != ""
+}
+
+// PayloadTexts returns the entry's own structured text fields (never raw Evidence quotes) for Payload-First
+// sensitivity checks and deterministic ops-runbook classification.
+func (e *Entry) PayloadTexts() []string {
+	if e == nil {
+		return nil
+	}
+	return []string{
+		e.Shown(), e.Text, e.Situation, e.Choice, e.Rejected,
+		e.Why, e.Exception, e.Object, e.Pitfall, e.Fix,
+		e.Impact.Action, e.Impact.Object,
+	}
+}
+
+var (
+	// opsRunbookCommandRe detects concrete CLI tools, shell invocations, file/script paths, env vars and git/CI ops.
+	opsRunbookCommandRe = regexp.MustCompile(`(?i)` +
+		`\b(git|gh|ssh|scp|rsync|docker(\s+compose)?|kubectl|helm|npm|pnpm|yarn|cargo|go\s+(test|vet|build|run|mod|fmt)|` +
+		`python3?|pytest|curl|wget|brew|apt(-get)?|systemctl|launchctl|tmux|xcodebuild|xcrun|simctl|adb|gradle|` +
+		`make|cmake|jq|sed|awk|lsof|pkill|crontab|sqlite3|psql|gofmt|xcodegen)\b` +
+		`|~/[a-z0-9._-]+|/(tmp|etc|usr|var|opt|home|users)/[a-z0-9._/-]+` +
+		`|\b[a-z0-9_-]+\.(sh|py|go|json|yaml|yml|toml|env|plist|service|sql|xcstrings|xcodeproj)\b` +
+		`|\b[A-Z][A-Z0-9_]{2,}_(KEY|TOKEN|URL|HOST|PORT|DIR|PATH|ENV|HOME|CONFIG|SECRET)\b` +
+		`|\borigin/(main|master)\b|\b(worktree|squash[- ]?merge|cherry-pick|dockerfile|makefile|workflow\.yml)\b`)
+
+	// opsRunbookInfraRe detects concrete hostnames, infra services, agent engines, platform tools and API mechanics.
+	opsRunbookInfraRe = regexp.MustCompile(`(?i)` +
+		`\b[a-z0-9]+-(wsl|vps|nas|mac|linux|server|node|host|box|vm|prod|staging|ci)\b` +
+		`|localhost:\d+|127\.0\.0\.1|\b\d{1,3}(?:\.\d{1,3}){3}:\d+\b` +
+		`|\b(wsl2?|vps|nas|ec2|s3|rds|k8s|kubernetes|nginx|caddy|systemd|tailscale|wireguard|cloudflare|` +
+		`postgres(ql)?|redis|mysql|mongodb|mac\s*mini|ubuntu|debian|centos|alpine|jump[- ]?host|bastion)\b` +
+		`|\b(herdr|orca|tern|paseo|codex|claude\s*code|opencode|cursor|aider|copilot|` +
+		`1password|bitwarden|keychain|email-relay|personad|persona-link|mcp|webhook|oauth|jwt|grpc|websocket|` +
+		`http\s*[45]\d\d|rate\s*limit|api\s*(key|token|limit|quota|endpoint)|rest\s*api|graphql|cron(tab)?|launchd)\b` +
+		`|\b(task_plan|agent_start|decisions_query|memory_sources|memory\.entries|kb\.update|kb\.read|` +
+		`ask_user|todo_create|enkeep[-_]memory|persona-extensions|testflight|deriveddata|app\s*store\s*connect)\b`)
+
+	// opsRunbookZHRe detects Chinese environment/deployment/CI/quota/platform-mechanism workflow rules.
+	opsRunbookZHRe = regexp.MustCompile(
+		`部署到|放\s*VPS|跑门禁|CI\s*门禁|门禁脚本|定时脚本|定时任务|端口转发|跳板机|容器镜像|镜像升级|` +
+			`轮换密钥|API\s*限流|额度.{0,8}分流|改配置前.{0,6}备份|工作树|合入\s*main|合并\s*PR|推分支|拉取仓库|环境变量`)
+)
+
+// ClassifyOpsRunbook deterministically reports whether e is a Class C environment/tool ops runbook (0.4.0 §1.3):
+// any tools-facet entry, any entry already tagged ClassOpsRunbook, or any entry whose own text/object names concrete
+// hosts, tools, CLI commands, APIs, repositories or platform-specific workflow mechanics.
+func ClassifyOpsRunbook(e *Entry) bool {
+	if e == nil {
+		return false
+	}
+	if e.MemoryClass == ClassOpsRunbook || e.Facet == Tools {
+		return true
+	}
+	if e.Facet == World || e.Facet == People {
+		return false
+	}
+	for _, s := range e.Scopes {
+		if s.Kind == ScopeObject && strings.TrimSpace(s.Name) != "" {
+			return true
+		}
+	}
+	for _, txt := range e.PayloadTexts() {
+		if strings.TrimSpace(txt) == "" {
+			continue
+		}
+		if opsRunbookCommandRe.MatchString(txt) || opsRunbookInfraRe.MatchString(txt) || opsRunbookZHRe.MatchString(txt) {
+			return true
+		}
+	}
+	return false
 }
 
 // Tombstone keeps what the user deleted so the same content is not made again.

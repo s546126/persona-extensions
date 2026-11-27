@@ -4,14 +4,36 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+export function boundedID(prefix: string, raw: string, most = 128): string {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 export function gemName(value: unknown): string {
   if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)) throw new ReadError("invalid");
   return value;
 }
 export function queryText(value: unknown): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -44,14 +66,14 @@ export function httpsURL(value: unknown): string | undefined {
   let url: URL;
   try { url = new URL(string(value)); } catch { return undefined; }
   // Optional third-party links are omitted, never upgraded to another origin.
-  if (url.protocol !== "https:" || url.username || url.password || url.port) return undefined;
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) return undefined;
   return url.href;
 }
 function license(value: unknown): string {
   if (value == null || (Array.isArray(value) && value.length === 0)) return "Unspecified";
   const licenses = Array.isArray(value) ? value.slice(0, 10).map(item => string(item)) : [string(value)];
   const text = clip(oneLine(licenses.join(" OR ")), 120);
-  if (!text || /[\u0000-\u001f\u007f]/u.test(text)) throw new ReadError("bad_answer");
+  if (!text || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(text)) throw new ReadError("bad_answer");
   return text;
 }
 function date(value: unknown): string | undefined {
@@ -75,11 +97,12 @@ function summary(value: unknown): GemSummary {
   const item = object(value), name = gemName(item.name), version = versionText(item.version);
   const project = httpsURL(item.project_uri);
   if (project !== `https://rubygems.org/gems/${name}` && project !== `https://rubygems.org/gems/${encodeURIComponent(name)}`) throw new ReadError("bad_answer");
+  const repository = httpsURL(item.source_code_uri), homepage = httpsURL(item.homepage_uri), documentation = httpsURL(item.documentation_uri);
   return {
-    name, version, description: clip(oneLine(string(item.info, "")), 500), license: license(item.licenses), url: project,
-    ...(httpsURL(item.source_code_uri) ? { repository: httpsURL(item.source_code_uri) } : {}),
-    ...(httpsURL(item.homepage_uri) ? { homepage: httpsURL(item.homepage_uri) } : {}),
-    ...(httpsURL(item.documentation_uri) ? { documentation: httpsURL(item.documentation_uri) } : {}),
+    name, version, description: clip(oneLine(string(item.info, "").replace(/[\ud800-\udfff]/gu, "")), 500), license: license(item.licenses), url: project,
+    ...(repository ? { repository } : {}),
+    ...(homepage ? { homepage } : {}),
+    ...(documentation ? { documentation } : {}),
     totalDownloads: integer(item.downloads),
     ...(item.version_downloads == null ? {} : { versionDownloads: integer(item.version_downloads) }),
   };
@@ -98,11 +121,15 @@ export function parseGem(raw: unknown, at: number): GemDetail {
   const root = object(raw), result = summary(root);
   const dependencies = object(root.dependencies), development = array(dependencies.development ?? []);
   for (const dependency of development) { object(dependency); }
+  const seenDeps = new Set<string>();
   const runtime = array(dependencies.runtime ?? []).slice(0, 100).map(value => {
     const item = object(value);
-    const name = gemName(item.name), requirements = clip(oneLine(string(item.requirements)), 100);
-    if (!requirements) throw new ReadError("bad_answer");
+    const name = gemName(item.name), requirements = clip(oneLine(string(item.requirements).replace(/[\ud800-\udfff]/gu, "")), 100);
+    const normalized = name.toLowerCase();
+    if (!requirements || seenDeps.has(normalized)) throw new ReadError("bad_answer");
+    seenDeps.add(normalized);
     return { name, requirements };
   });
-  return { ...result, install: `gem install ${result.name} -v ${result.version}`, yanked: boolean(root.yanked ?? false), ...(date(root.version_created_at) ? { published: date(root.version_created_at) } : {}), dependencies: runtime };
+  const published = date(root.version_created_at);
+  return { ...result, install: `gem install ${result.name} -v ${result.version}`, yanked: boolean(root.yanked ?? false), ...(published ? { published } : {}), dependencies: runtime };
 }

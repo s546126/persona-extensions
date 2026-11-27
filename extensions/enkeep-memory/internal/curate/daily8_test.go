@@ -212,9 +212,67 @@ func TestAboutMeAndMemoryFiles(t *testing.T) {
 	c2, _ := newCurator(t, nil, "shadow")
 	u2, d2 := d8unit("memory/feedback_options.md", "memory", "- 选项不能只写代号，要写出每个选项是什么")
 	m := obs("interaction", "选项不能只写代号", 1, "选项不能只写代号")
-	d8ingest(t, c2, u2, d2, schema.DailyOutput{Observations: []schema.Observation{m}}, nil)
-	if e := entryWith(c2, m.Text); e == nil || e.Origin != entry.Handwritten || e.Evidence[0].Source != entry.SrcMemory {
-		t.Errorf("memory file: %+v %+v", e, c2.St.S.Rejections)
+	pS6 := obs("persona", "用户喜欢写代码", 1, "选项不能只写代号")
+	pS6.Type = "preference"
+	d8ingest(t, c2, u2, d2, schema.DailyOutput{Observations: []schema.Observation{m, pS6}}, nil)
+	if obsRejected(c2, pS6.Text) != obsFacetNotAllowed {
+		t.Errorf("S6 assistant note should not write persona: %+v", c2.St.S.Rejections)
+	}
+	e := entryWith(c2, m.Text)
+	if e == nil || e.Origin != entry.OriginAssistantNote || e.Status != entry.Candidate || e.Evidence[0].Source != entry.SrcMemory {
+		t.Errorf("memory file (S6 assistant_note): %+v %+v", e, c2.St.S.Rejections)
+	}
+	if entry.IsTrueUserOwned(e) {
+		t.Errorf("S6 assistant_note must NOT satisfy IsTrueUserOwned: %+v", e)
+	}
+}
+
+// Payload-First (0.4.0 §1.6): work-methodology rules do not inherit conversation/space sensitivity or model
+// tone/topic labels, and filing/merging avoids unconditional union contagion (<50% sensitive members do not taint).
+func TestObservePayloadFirstAndNoCategoryContagion(t *testing.T) {
+	c, _ := newCurator(t, nil, "shadow")
+	u, d := d8unit("chats/persona-health-1", "assistant",
+		"09:00 我: 我要的是例行方案不要一次性导出，别每次都重新问",
+		"09:01 助手: 好的，按例行同步设计",
+		"09:02 我: 你反复发问让我不满，解释太绕了请直接说人话",
+	)
+	u.Meta.Space = "health"
+	o1 := obs("interaction", "要的是例行方案，不要一次性导出", 1, "要的是例行方案不要一次性导出")
+	o1.Sensitive = "health" // model falsely tagged health due to space/topic
+	o2 := obs("interaction", "反复发问会让用户不满，嫌解释绕要求说人话", 3, "反复发问让我不满，解释太绕了请直接说人话")
+	o2.Sensitive = "emotion" // model falsely tagged emotion due to correction tone
+	d8ingest(t, c, u, d, schema.DailyOutput{Observations: []schema.Observation{o1, o2}}, nil)
+	for _, txt := range []string{o1.Text, o2.Text} {
+		e := entryWith(c, txt)
+		if e == nil {
+			t.Fatalf("missing entry %q (rejections=%+v)", txt, c.St.S.Rejections)
+		}
+		if e.IsSensitive() || e.OriginSpace != "" || !e.Resident(nil) {
+			t.Errorf("Payload-First violated for %q: cats=%v space=%q resident=%v", txt, e.Cats(), e.OriginSpace, e.Resident(nil))
+		}
+	}
+
+	// Filing <50% sensitive members into a general class must not contaminate the class; >=50% does.
+	c.St.Lock()
+	defer c.St.Unlock()
+	cls := c.create(&entry.Entry{Facet: entry.Persona, Grain: entry.Class, Text: "用户注重长期规划"}, "t")
+	a1 := c.Observe(&entry.Entry{Facet: entry.Persona, Text: "做技术规划注重长期演进", Evidence: []entry.Evidence{{Source: entry.SrcAssistant, Ref: "c/1", Day: "2026-11-20", Who: entry.WhoSelf, Quote: "长期演进"}}}, "t")
+	a2 := c.Observe(&entry.Entry{Facet: entry.Persona, Text: "做产品路线注重长期复利", Evidence: []entry.Evidence{{Source: entry.SrcAssistant, Ref: "c/2", Day: "2026-11-21", Who: entry.WhoSelf, Quote: "长期复利"}}}, "t")
+	a3 := c.Observe(&entry.Entry{Facet: entry.Persona, Text: "体检后重视长期服药与血糖管理", Categories: []entry.Category{{Name: entry.CatHealth, By: entry.ByModel}}, Evidence: []entry.Evidence{{Source: entry.SrcAssistant, Ref: "c/3", Day: "2026-11-22", Who: entry.WhoSelf, Quote: "体检血糖"}}}, "t")
+	for _, id := range []string{a1, a2, a3} {
+		if err := c.File(id, cls.ID, "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cls.IsSensitive() {
+		t.Errorf("1/3 sensitive member should not taint class: cats=%v", cls.Cats())
+	}
+	a4 := c.Observe(&entry.Entry{Facet: entry.Persona, Text: "定期复诊追踪血压指标", Categories: []entry.Category{{Name: entry.CatHealth, By: entry.ByModel}}, Evidence: []entry.Evidence{{Source: entry.SrcAssistant, Ref: "c/4", Day: "2026-11-23", Who: entry.WhoSelf, Quote: "复诊血压"}}}, "t")
+	if err := c.File(a4, cls.ID, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(cls.Cats(), entry.CatHealth) {
+		t.Errorf("2/4 (50%%) payload-sensitive members should tag class with health: cats=%v", cls.Cats())
 	}
 }
 
@@ -288,8 +346,8 @@ func TestCategoriesTagged(t *testing.T) {
 	c, _ := newCurator(t, nil, "shadow")
 	d8ingest(t, c, u, d, schema.DailyOutput{Observations: []schema.Observation{fam}}, nil)
 	e := entryWith(c, fam.Text)
-	if e == nil || !slices.Equal(e.Cats(), []string{entry.CatRelationships}) || e.Categories[0].By != entry.ByModel || e.Domain != entry.Life {
-		t.Fatalf("family kept and tagged: %+v %+v", e, c.St.S.Rejections)
+	if e == nil || !slices.Contains(e.Cats(), entry.CatRelationships) || !slices.Contains(e.Cats(), entry.CatHealth) || e.Categories[0].By != entry.ByModel || e.Domain != entry.Life {
+		t.Fatalf("family+health kept and tagged: %+v %+v", e, c.St.S.Rejections)
 	}
 	if e.Resident(c.St.S.Switches) {
 		t.Error("a category reached the resident exits with K22 off")
@@ -299,10 +357,14 @@ func TestCategoriesTagged(t *testing.T) {
 		t.Error("K13 or the K22 base opened the resident exits")
 	}
 	sw["K22.relationships"] = entry.SwitchSetting{Value: "on", By: "user"}
-	if !e.Resident(sw) {
-		t.Error("K22.relationships on: still out")
+	if e.Resident(sw) {
+		t.Error("K22.relationships alone should not open an entry also tagged health")
 	}
-	if !e.Named([]string{"relationships"}) || e.Named(nil) || e.Named([]string{"health"}) {
+	sw["K22.health"] = entry.SwitchSetting{Value: "on", By: "user"}
+	if !e.Resident(sw) {
+		t.Error("K22.relationships + K22.health on: still out")
+	}
+	if !e.Named([]string{"relationships", "health"}) || e.Named(nil) || e.Named([]string{"health"}) {
 		t.Error("named categories")
 	}
 	money := obs("persona", "用户这个月工资到账后要还信用卡", 6, "推进 project-x")
@@ -311,13 +373,13 @@ func TestCategoriesTagged(t *testing.T) {
 	if e := entryWith(c4, money.Text); e == nil || !slices.Contains(e.Cats(), entry.CatFinance) {
 		t.Errorf("unlabelled money: %+v %+v", e, c4.St.S.Rejections)
 	}
-	if cats, ok := categoriesOf("", "下周去办护照续签"); !ok || !slices.Equal(cats, []string{entry.CatLegalID}) {
+	if cats, ok := CategoriesOf("", "下周去办护照续签"); !ok || !slices.Equal(cats, []string{entry.CatLegalID}) {
 		t.Errorf("legal_id by words: %v %v", cats, ok)
 	}
-	if _, ok := categoriesOf("gossip"); ok {
+	if _, ok := CategoriesOf("gossip"); ok {
 		t.Error("an unknown label passed")
 	}
-	if cats, _ := categoriesOf("", "合同评审排在周三"); len(cats) != 0 {
+	if cats, _ := CategoriesOf("", "合同评审排在周三"); len(cats) != 0 {
 		t.Errorf("a work contract is not legal_id: %v", cats)
 	}
 }
@@ -563,7 +625,7 @@ func TestReplayForced(t *testing.T) {
 	if err := c.digest(context.Background(), nil, b, u, d, "", owner, k, run); err != nil || run.Counts["digest_replayed"] != 1 {
 		t.Fatalf("forced: %v %v", err, run.Counts)
 	}
-	if e := entryWith(c, fam.Text); e == nil || !slices.Equal(e.Cats(), []string{entry.CatRelationships}) {
+	if e := entryWith(c, fam.Text); e == nil || !slices.Contains(e.Cats(), entry.CatRelationships) || !slices.Contains(e.Cats(), entry.CatHealth) {
 		t.Fatalf("the refused observation is not kept on replay: %+v", c.St.S.Rejections)
 	}
 	if slices.ContainsFunc(c.St.S.Rejections, func(r store.Rejection) bool { return r.Key == key && r.Code == "SENSITIVE_OFF" }) ||

@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "wiktionary", name: "Wiktionary \u591A\u8BED\u8BCD\u5178", version: "0.1.6", icon: "assets/icon.png", description: "\u67E5\u8BE2\u82F1\u6587\u3001\u4E2D\u6587\u548C\u65E5\u6587 Wiktionary \u7684\u8BCD\u6027\u3001\u91CA\u4E49\u4E0E\u4F8B\u53E5\uFF0C\u63D0\u4F9B\u539F\u59CB\u6761\u76EE\u94FE\u63A5\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/wiktionary/README.md", tags: ["\u8BCD\u5178", "\u8BED\u8A00", "Wiktionary"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/wiktionary.mjs", sha256: "" } }, contributes: { connectors: [{ id: "wiktionary", name: "Wiktionary", capabilities: ["status", "tools"], hosts: ["en.wiktionary.org", "zh.wiktionary.org", "ja.wiktionary.org"], agent_tools: ["wiktionary_*"] }], ui: [{ id: "wiktionary", title: "\u67E5\u8BCD\u5178", placement: "nav_page", icon: "doc" }] }, configuration: { type: "object", properties: { language: { type: "string", title: "Wiktionary \u8BED\u8A00", default: "auto", description: "auto \u8DDF\u968F Persona \u754C\u9762\u8BED\u8A00\uFF1B\u82F1\u6587\u9009 en\uFF0C\u4E2D\u6587\u9009 zh\uFF0C\u65E5\u6587\u9009 ja", oneOf: [{ const: "auto", title: "\u8DDF\u968F\u754C\u9762\u8BED\u8A00" }, { const: "en", title: "English" }, { const: "zh", title: "\u4E2D\u6587" }, { const: "ja", title: "\u65E5\u672C\u8A9E" }] } } }, permissions: { network: ["en.wiktionary.org", "zh.wiktionary.org", "ja.wiktionary.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "wiktionary", name: "Wiktionary \u591A\u8BED\u8BCD\u5178", version: "0.1.7", icon: "assets/icon.png", description: "\u67E5\u8BE2\u82F1\u6587\u3001\u4E2D\u6587\u548C\u65E5\u6587 Wiktionary \u7684\u8BCD\u6027\u3001\u91CA\u4E49\u4E0E\u4F8B\u53E5\uFF0C\u63D0\u4F9B\u539F\u59CB\u6761\u76EE\u94FE\u63A5\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/wiktionary/README.md", tags: ["\u8BCD\u5178", "\u8BED\u8A00", "Wiktionary"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/wiktionary.mjs", sha256: "" } }, contributes: { connectors: [{ id: "wiktionary", name: "Wiktionary", capabilities: ["status", "tools"], hosts: ["en.wiktionary.org", "zh.wiktionary.org", "ja.wiktionary.org"], agent_tools: ["wiktionary_*"] }], ui: [{ id: "wiktionary", title: "\u67E5\u8BCD\u5178", placement: "nav_page", icon: "doc" }] }, configuration: { type: "object", properties: { language: { type: "string", title: "Wiktionary \u8BED\u8A00", default: "auto", description: "auto \u8DDF\u968F Persona \u754C\u9762\u8BED\u8A00\uFF1B\u82F1\u6587\u9009 en\uFF0C\u4E2D\u6587\u9009 zh\uFF0C\u65E5\u6587\u9009 ja", oneOf: [{ const: "auto", title: "\u8DDF\u968F\u754C\u9762\u8BED\u8A00" }, { const: "en", title: "English" }, { const: "zh", title: "\u4E2D\u6587" }, { const: "ja", title: "\u65E5\u672C\u8A9E" }] } } }, permissions: { network: ["en.wiktionary.org", "zh.wiktionary.org", "ja.wiktionary.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 2 << 20, fresh: 6 * 60 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 150 });
@@ -791,7 +791,14 @@ function languageFor(config, locale = "") {
   if (config.language && config.language !== "auto") return config.language;
   return locale.toLowerCase().startsWith("ja") ? "ja" : locale.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
-var clip = (text2, most) => Array.from(text2).length <= most ? text2 : Array.from(text2).slice(0, most).join("").trimEnd() + "\u2026";
+var clip = (text2, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text2);
+  if (chars.length <= limit) return text2;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text2) => text2.replace(/\s+/gu, " ").trim();
 function plain(text2) {
   let out = "";
@@ -824,7 +831,7 @@ function validCodepoint(n) {
 function word(value) {
   if (typeof value !== "string") throw new ReadError("invalid");
   const text2 = value.trim();
-  if (/[\u0000-\u001f\u007f#?<>[\]{}|\\]/u.test(value) || text2.split("/").includes("..")) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff#?<>[\]{}|\\]/u.test(value) || text2.split("/").includes("..")) throw new ReadError("invalid");
   if (!text2 || Array.from(text2).length > 120) throw new ReadError("invalid");
   return text2;
 }
@@ -832,7 +839,7 @@ function definitionPath(value) {
   return `/api/rest_v1/page/definition/${encodeURIComponent(word(value)).replaceAll("%2F", "/")}`;
 }
 function entryURL(language, value) {
-  return `https://${language}.wiktionary.org/wiki/${word(value).replaceAll(" ", "_")}`;
+  return `https://${language}.wiktionary.org/wiki/${encodeURIComponent(word(value).replaceAll(" ", "_")).replaceAll("%2F", "/")}`;
 }
 function object(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
@@ -960,7 +967,25 @@ function errorText(error, locale = "") {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 function readTime(at, timeZone = "Local", locale = "en") {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? void 0 : timeZone }).format(at);
+  if (!Number.isFinite(at) || Number.isNaN(new Date(at).getTime())) return "";
+  const loc = locale || "en";
+  const tz = timeZone && timeZone !== "Local" ? timeZone : void 0;
+  const opts = { year: "numeric", month: "short", day: "numeric" };
+  try {
+    return new Intl.DateTimeFormat(loc, { ...opts, timeZone: tz }).format(at);
+  } catch {
+  }
+  if (tz) {
+    try {
+      return new Intl.DateTimeFormat(loc, { ...opts, timeZone: "UTC" }).format(at);
+    } catch {
+    }
+  }
+  try {
+    return new Intl.DateTimeFormat("en", { ...opts, timeZone: tz }).format(at);
+  } catch {
+  }
+  return new Intl.DateTimeFormat("en", { ...opts, timeZone: "UTC" }).format(at);
 }
 
 // src/service.ts
@@ -1009,9 +1034,12 @@ var Wiktionary = class {
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
     this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
@@ -1034,6 +1062,21 @@ var Wiktionary = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1041,7 +1084,8 @@ var Wiktionary = class {
       void reader.cancel().catch(() => {
       });
     };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -1055,6 +1099,9 @@ var Wiktionary = class {
         }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally {
       signal.removeEventListener("abort", cancel);
       reader.releaseLock();
@@ -1071,22 +1118,20 @@ var Wiktionary = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text2);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal) {
+  async read(path, fresh, signal, parse) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
-    if (cached) return cached;
+    if (cached) return { value: parse(cached.raw, cached.at) };
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
-      if (again) return again;
+      if (again) return { value: parse(again.raw, again.at) };
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
       if (pause) await new Promise((resolve, reject) => {
         const cancel = () => {
@@ -1105,14 +1150,19 @@ var Wiktionary = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
+        const value = parse(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
-        return { raw, at };
+        return { value };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) {
+          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        }
+        const failure = error instanceof ReadError ? error : signal?.aborted && signal.reason instanceof ReadError ? signal.reason : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1127,7 +1177,9 @@ var Wiktionary = class {
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       const old = this.cached(path, Infinity);
-      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
+        return { value: parse(old.raw, old.at), stale: error instanceof ReadError ? error : new ReadError("network") };
+      }
       throw error;
     }
   }
@@ -1137,13 +1189,13 @@ var Wiktionary = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async lookup(value, refresh = false, signal) {
     const path = definitionPath(value);
-    const rd = await this.read(path, refresh ? 0 : this.limits.fresh, signal);
-    return { ...parseEntry(rd.raw, this.language, value, rd.at), stale: rd.stale };
+    const rd = await this.read(path, refresh ? 0 : this.limits.fresh, signal, (raw, at) => parseEntry(raw, this.language, value, at));
+    return { ...rd.value, stale: rd.stale };
   }
   cacheStats() {
     return { entries: this.cache.size, bytes: this.bytes };
@@ -1168,8 +1220,16 @@ ${group.definitions.map((definition, index) => `${index + 1}. ${clip(definition.
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const token of exact.fieldValues("word")) {
+      if (token.raw === "null") {
+        delete args.word;
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args.word = value2;
@@ -1183,13 +1243,15 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "wiktionary_lookup") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), request = budget(signal, service.limits.tool);
   try {
-    if (name === "wiktionary_lookup") {
-      if (typeof args.word !== "string") throw new ReadError("invalid");
-      return clip(text(await service.lookup(args.word, false, request.signal)), 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    if (typeof args.word !== "string") throw new ReadError("invalid");
+    return clip(text(await service.lookup(args.word, false, request.signal)), 29999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1222,13 +1284,33 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { q: "", found: false };
+var MAX_VIEW_ITEMS = 300;
+var ENTRY_CHROME_ITEMS = 6;
+var MAX_SENSE_ITEMS = MAX_VIEW_ITEMS - ENTRY_CHROME_ITEMS;
+var MAX_SENSE_BYTES = 512 * 1024;
+var encoder3 = new TextEncoder();
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "-" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
 function readState(raw) {
   if (typeof raw !== "string" || raw.length > 1e3) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value) || typeof value.q !== "string" || typeof value.found !== "boolean") return initialState;
-    const q = clip(value.q.trim(), 120);
-    return q ? { q, found: value.found } : initialState;
+    if (!value.q.trim()) return initialState;
+    return { q: word(value.q), found: value.found };
   } catch {
     return initialState;
   }
@@ -1246,7 +1328,7 @@ function transition(state, id, values = {}) {
   if (!values || typeof values !== "object" || Array.isArray(values)) return state;
   fields2 = values;
   if (id === "lookup") {
-    const query = typeof fields2.word === "string" ? clip(fields2.word.trim(), 120) : "";
+    const query = typeof fields2.word === "string" ? fields2.word.trim() : "";
     try {
       return query ? { q: word(query), found: true } : state;
     } catch {
@@ -1263,15 +1345,15 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "entry", entry: await service.lookup(state.q, refresh, request.signal) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
+  const { service, state, loaded, uiVersion = 0 } = props, locale = props.locale || service.locale, t = textsFor(locale), tz = props.tz || "Local";
   const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "wiktionary", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text2 = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 4e3), style }, key);
+  const text2 = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 2e3), style }, key);
   const search = /* @__PURE__ */ jsxs(Section, { title: t.lookup, children: [
     /* @__PURE__ */ jsx(Field, { name: "word", label: t.lookup, kind: "text", placeholder: t.searchHint, value: state.q }, "dictionary-word"),
     /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("lookup") }, "dictionary-submit")
@@ -1286,7 +1368,7 @@ function page(props) {
     search,
     state.found ? home : null,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text2("dictionary-error-message", errorText(loaded.error, props.locale ?? service.locale)),
+      text2("dictionary-error-message", errorText(loaded.error, locale)),
       /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "dictionary-retry")
     ] }, "dictionary-error")
   ] }, "wiktionary");
@@ -1296,27 +1378,63 @@ function page(props) {
     /* @__PURE__ */ jsx(Section, { children: text2("dictionary-license", t.attribution, "caption") }, "dictionary-attribution")
   ] }, "wiktionary");
   const entry = loaded.entry;
-  return /* @__PURE__ */ jsxs(View, { title: entry.word, state: encodeState(state), children: [
+  const sections = [];
+  let remainingItems = MAX_SENSE_ITEMS;
+  let remainingBytes = MAX_SENSE_BYTES;
+  for (let index = 0; index < entry.groups.length && remainingItems > 0; index++) {
+    const group = entry.groups[index];
+    const title = clip([group.partOfSpeech, group.language].filter(Boolean).join(" \xB7 "), 2e3);
+    const titleBytes = encoder3.encode(JSON.stringify(title)).byteLength;
+    if (titleBytes > remainingBytes) break;
+    const items = [];
+    let sectionBytes = titleBytes;
+    for (let i = 0; i < group.definitions.length && remainingItems > 0; i++) {
+      const definition = group.definitions[i];
+      const defText = clip(`${i + 1}. ${definition.text}`, 2e3);
+      const defBytes = encoder3.encode(JSON.stringify(defText)).byteLength;
+      if (sectionBytes + defBytes > remainingBytes) {
+        remainingItems = 0;
+        break;
+      }
+      items.push(text2(`definition-${index}-${i}`, defText, "body"));
+      remainingItems--;
+      sectionBytes += defBytes;
+      for (let j = 0; j < definition.examples.length && remainingItems > 0; j++) {
+        const exampleText = clip(`${t.examples}: ${definition.examples[j].text}`, 2e3);
+        const exampleBytes = encoder3.encode(JSON.stringify(exampleText)).byteLength;
+        if (sectionBytes + exampleBytes > remainingBytes) {
+          remainingItems = 0;
+          break;
+        }
+        items.push(text2(`example-${index}-${i}-${j}`, exampleText, "caption"));
+        remainingItems--;
+        sectionBytes += exampleBytes;
+      }
+    }
+    if (items.length > 0) {
+      remainingBytes -= sectionBytes;
+      sections.push(/* @__PURE__ */ jsx(Section, { title, children: items }, boundedID(`sense-${index}-`, group.partOfSpeech)));
+    }
+  }
+  const footer = clip(`${fmt(t.readAt, { at: readTime(entry.at, tz, locale) })}${entry.stale ? ` \xB7 ${errorText(entry.stale, locale)}` : ""}`, 2e3);
+  return /* @__PURE__ */ jsxs(View, { title: clip(entry.word, 2e3), state: encodeState(state), children: [
     search,
-    entry.groups.map((group, index) => /* @__PURE__ */ jsx(Section, { title: [group.partOfSpeech, group.language].filter(Boolean).join(" \xB7 "), children: group.definitions.map((definition, i) => [
-      text2(`definition-${index}-${i}`, `${i + 1}. ${definition.text}`, "body"),
-      ...definition.examples.map((example, j) => text2(`example-${index}-${i}-${j}`, `${t.examples}: ${example.text}`, "caption"))
-    ]) }, `sense-${index}-${group.partOfSpeech}`)),
+    sections,
     /* @__PURE__ */ jsxs(Section, { children: [
       /* @__PURE__ */ jsx(Link, { title: t.open, url: entry.url }, "dictionary-open"),
       /* @__PURE__ */ jsx(Button, { title: t.back, action: act("home") }, "dictionary-back-button")
     ] }, "dictionary-actions"),
-    /* @__PURE__ */ jsx(Section, { footer: `${fmt(t.readAt, { at: readTime(entry.at, tz, props.locale ?? service.locale) })}${entry.stale ? ` \xB7 ${errorText(entry.stale, props.locale ?? service.locale)}` : ""}`, children: /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "dictionary-refresh") }, "dictionary-footer"),
+    /* @__PURE__ */ jsx(Section, { footer, children: /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "dictionary-refresh") }, "dictionary-footer"),
     /* @__PURE__ */ jsx(Section, { children: text2("dictionary-license", t.attribution, "caption") }, "dictionary-attribution")
   ] }, "wiktionary");
 }
 
 // src/root.tsx
 function Root(options) {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState(void 0);
-  const identity = `${state.q}:${state.found}:${refresh}`;
+  const identity = JSON.stringify([state.q, state.found, refresh]);
   useLoadEffect(async (signal) => {
     const loaded = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded) ? previous : { service: options.service, identity, loaded });
@@ -1331,8 +1449,11 @@ function Root(options) {
         return callback(() => ({ push }), { push });
       }
       return callback((values) => {
-        if (id === "refresh") setRefresh((previous) => previous + 1);
-        else setState((previous) => transition(previous, id, values));
+        if (id === "refresh") setView((previous) => ({ state: previous.state, refresh: previous.refresh + 1 }));
+        else setView((previous) => {
+          const nextState = transition(previous.state, id, values);
+          return nextState.q === previous.state.q && nextState.found === previous.state.found ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     }
   });

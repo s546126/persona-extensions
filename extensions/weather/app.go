@@ -47,9 +47,18 @@ func (a *app) init(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any,
 	if err := in.Config(&cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
+	good, bad := cleanCities(cfg.cities())
+	a.mu.Lock()
 	a.cfg = cfg
-	a.cities, a.badCities = cleanCities(cfg.cities())
+	a.cities, a.badCities = good, bad
+	a.mu.Unlock()
 	return nil, nil
+}
+
+func (a *app) snapshotConfig() (Config, []City, []City) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg, a.cities, a.badCities
 }
 
 // locate is c with its point: a city written by name only is searched for (the answer is cached like any read), and
@@ -89,7 +98,9 @@ func (a *app) read(ctx context.Context, base, path string, fresh time.Duration) 
 	defer a.mu.Unlock()
 	switch {
 	case err == nil:
-		a.lastOK = rd.at.UTC()
+		if at := rd.at.UTC(); at.After(a.lastOK) {
+			a.lastOK = at
+		}
 	case errors.Is(err, errNoCity), errors.Is(err, context.Canceled):
 		// about one city, or the caller gave up: not the connector's state
 	default:
@@ -200,9 +211,15 @@ func oneLine(s string) string { return strings.TrimSpace(strings.Join(strings.Fi
 
 // clip cuts s to at most n characters, marking the cut.
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
 	r := []rune(s)
-	return strings.TrimSpace(string(r[:n])) + "…"
+	if n == 1 {
+		return string(r[:1])
+	}
+	return strings.TrimSpace(string(r[:n-1])) + "…"
 }

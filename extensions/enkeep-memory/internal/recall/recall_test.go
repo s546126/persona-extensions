@@ -73,3 +73,18 @@ func TestSearchPoolAndRanking(t *testing.T) {
 		t.Errorf("format: %q", Format(res.Hits[0]))
 	}
 }
+
+// A rule's line carries when it does not hold (0.2.6); a fact's and the user's own wording do not.
+func TestLineException(t *testing.T) {
+	e := &entry.Entry{Facet: entry.Interaction, Text: "做完一轮不要停下等批准。", Exception: "只有涉及线上、删数据时才停。"}
+	if got := Line(e); got != "做完一轮不要停下等批准。（例外：只有涉及线上、删数据时才停）" {
+		t.Errorf("line %q", got)
+	}
+	e.User = &entry.UserEdit{Text: "the user's words"}
+	if got := Line(e); got != "the user's words" {
+		t.Errorf("the user's own line %q", got)
+	}
+	if got := Line(&entry.Entry{Facet: entry.World, Text: "t", Exception: "x"}); got != "t" {
+		t.Errorf("a fact %q", got)
+	}
+}

@@ -13,9 +13,11 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Task states in the self-contained ATS state machine.
@@ -146,6 +148,14 @@ type Attempt struct {
 	WorkerID       string     `json:"worker_id"`
 	Machine        string     `json:"machine,omitempty"`
 	ModelTier      string     `json:"model_tier,omitempty"`
+	Launcher       string     `json:"launcher,omitempty"`
+	Model          string     `json:"model,omitempty"`
+	SessionID      string     `json:"session_id,omitempty"`
+	Worktree       string     `json:"worktree,omitempty"`
+	BaseSHA        string     `json:"base_sha,omitempty"`
+	HeadSHA        string     `json:"head_sha,omitempty"`
+	Dirty          *bool      `json:"dirty,omitempty"` // nil 表示未取得工作树检查结果
+	FullReply      string     `json:"full_reply,omitempty"`
 	Harness        string     `json:"harness,omitempty"`
 	State          string     `json:"state"`
 	LeasedAt       time.Time  `json:"leased_at"`
@@ -156,6 +166,9 @@ type Attempt struct {
 	ErrorClass     string     `json:"error_class,omitempty"`
 	Verdict        string     `json:"verdict,omitempty"`
 	Summary        string     `json:"summary,omitempty"`
+
+	TodoAttachError   string `json:"todo_attach_error,omitempty"`
+	TodoDetachPending bool   `json:"todo_detach_pending,omitempty"`
 }
 
 // EvidenceReport stores a verification report from an attempt.
@@ -171,9 +184,19 @@ type EvidenceReport struct {
 	ErrorClass string    `json:"error_class,omitempty"`
 	ExitCode   *int      `json:"exit_code,omitempty"`
 	Message    string    `json:"message,omitempty"`
+	Launcher   string    `json:"launcher,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Worktree   string    `json:"worktree,omitempty"`
+	BaseSHA    string    `json:"base_sha,omitempty"`
+	HeadSHA    string    `json:"head_sha,omitempty"`
+	Dirty      *bool     `json:"dirty,omitempty"`
+	FullReply  string    `json:"full_reply,omitempty"`
 	// Summary is the end of the agent's last reply in this attempt: what it says it did and found.
 	Summary   string     `json:"summary,omitempty"`
 	Artifacts []Artifact `json:"artifacts,omitempty"`
+
+	TodoAttachError string `json:"todo_attach_error,omitempty"`
 }
 
 // Task is a persistent unit of work in the ATS queue.
@@ -193,6 +216,8 @@ type Task struct {
 	QuotaWeight        float64           `json:"quota_weight"`
 	Machine            string            `json:"machine,omitempty"`
 	AgentType          string            `json:"agent_type,omitempty"`
+	Model              string            `json:"model,omitempty"`
+	Launcher           string            `json:"launcher,omitempty"`
 	PermissionProfile  string            `json:"permission_profile"`
 	Workspace          WorkspaceSpec     `json:"workspace"`
 	Acceptance         *AcceptanceSpec   `json:"acceptance,omitempty"`
@@ -236,6 +261,11 @@ type Execution struct {
 	Branch     string    `json:"branch,omitempty"`
 	BaseSHA    string    `json:"base_sha,omitempty"`
 	SessionID  string    `json:"session_id,omitempty"`
+	Launcher   string    `json:"launcher,omitempty"`
+	Model      string    `json:"model,omitempty"`
+	HeadSHA    string    `json:"head_sha,omitempty"`
+	Dirty      *bool     `json:"dirty,omitempty"`
+	FullReply  string    `json:"full_reply,omitempty"`
 	// SeenUpdate is the session's updated_at at the last poll that found its turn over, and Stable how many
 	// polls in a row found it so: the hub reports a finished turn for a moment between an agent's steps.
 	SeenUpdate string `json:"seen_update,omitempty"`
@@ -244,6 +274,12 @@ type Execution struct {
 	JudgedUpdate string `json:"judged_update,omitempty"`
 	LastReply    string `json:"last_reply,omitempty"`
 	Waiting      string `json:"waiting,omitempty"` // why the task needs the user, when it does
+
+	ContinueCount    int        `json:"continue_count,omitempty"`
+	ContinuedAt      *time.Time `json:"continued_at,omitempty"`
+	ContinuedErrorAt string     `json:"continued_error_at,omitempty"`
+
+	TodoAttachError string `json:"todo_attach_error,omitempty"`
 }
 
 // isActiveState reports whether a task in this state holds a lease.
@@ -310,6 +346,26 @@ func NormalizeAgentType(raw string) (string, error) {
 		return "", errors.New("agent_type must be a lowercase engine identifier of 1-32 letters, digits, _ or -")
 	}
 	return s, nil
+}
+
+func normalizeModel(raw string) (string, error) {
+	model := strings.TrimSpace(raw)
+	if len(model) > 128 || strings.ContainsFunc(raw, unicode.IsControl) || strings.ContainsFunc(model, unicode.IsSpace) {
+		return "", errors.New("model must be at most 128 bytes with no internal whitespace or control characters")
+	}
+	return model, nil
+}
+
+func normalizeLauncher(raw string) (string, error) {
+	launcher := strings.TrimSpace(raw)
+	// 含机器映射的配置可以用换行分隔条目。
+	mapSpec := strings.ContainsRune(launcher, '=')
+	if len(launcher) > 512 || strings.ContainsFunc(raw, func(r rune) bool {
+		return (r < 0x20 || r == 0x7f) && (r != '\n' || !mapSpec)
+	}) {
+		return "", errors.New("launcher must be at most 512 bytes with no control characters except newlines in a machine map")
+	}
+	return launcher, nil
 }
 
 // effectiveAgentType supplies the legacy default without rewriting old queue records.
@@ -534,6 +590,8 @@ type EnqueueInput struct {
 	Difficulty        string
 	Machine           string
 	AgentType         string
+	Model             string
+	Launcher          string
 	AcceptanceCommand string
 	PermissionProfile string
 	Labels            map[string]string
@@ -560,13 +618,31 @@ type CompleteAttemptInput struct {
 	ReportID   string
 	Outcome    string // succeeded | failed | canceled | rate_limited
 	Verdict    string // pass | fail | unverified
-	ErrorClass string // infra_error | timeout | task_failed | rate_limited | lost | auth_expired | config_error | rejected
+	ErrorClass string // See isRetryableErrorClass for errors eligible for retry.
 	ExitCode   *int
 	Message    string
 	Summary    string // the end of the agent's last reply
+	Launcher   string `json:"launcher,omitempty"`
+	Model      string `json:"model,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Worktree   string `json:"worktree,omitempty"`
+	BaseSHA    string `json:"base_sha,omitempty"`
+	HeadSHA    string `json:"head_sha,omitempty"`
+	Dirty      *bool  `json:"dirty,omitempty"`
+	FullReply  string `json:"full_reply,omitempty"`
 	Artifacts  []Artifact
 	Retryable  *bool
 	Now        time.Time
+
+	TodoDetachPending bool
+}
+
+type pendingTodoDetach struct {
+	TaskID    string
+	AttemptNo int
+	TodoID    string
+	MachineID string
+	SessionID string
 }
 
 // TaskFilter specifies filtering criteria for ListTasks.
@@ -579,6 +655,27 @@ type TaskFilter struct {
 	Difficulty string
 	Machine    string
 	Limit      int
+	// After is the cursor (taskCursor) of the last task of the page before: the list goes on after its place.
+	After string
+}
+
+// ErrBadCursor is ListTasks's answer to an After that is not a cursor.
+var ErrBadCursor = errors.New("after is not the next of a page")
+
+// taskCursor is a task's place in the list: when it was submitted, then its id, which is the list's order. A
+// place holds whatever became of the task since (it started, finished or was pruned), so the next page is found
+// without the task.
+func taskCursor(t *Task) string {
+	return strconv.FormatInt(t.SubmittedAt.UnixNano(), 10) + "-" + t.ID
+}
+
+func parseTaskCursor(s string) (submitted time.Time, id string, err error) {
+	ns, id, ok := strings.Cut(s, "-")
+	n, perr := strconv.ParseInt(ns, 10, 64)
+	if !ok || perr != nil || id == "" {
+		return time.Time{}, "", ErrBadCursor
+	}
+	return time.Unix(0, n), id, nil
 }
 
 // storeVersion is the layout of queue-state.json. Version 1 (0.3.0) had no version field and no exec records;
@@ -750,6 +847,15 @@ func (q *Queue) saveLocked() error {
 	return os.Rename(tmp, q.dataFile)
 }
 
+func boolPtr(v bool) *bool { return &v }
+
+func cloneBoolPtr(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	return boolPtr(*p)
+}
+
 func cloneTask(t *Task) *Task {
 	if t == nil {
 		return nil
@@ -779,6 +885,11 @@ func cloneTask(t *Task) *Task {
 	}
 	if t.Exec != nil {
 		e := *t.Exec
+		e.Dirty = cloneBoolPtr(e.Dirty)
+		if e.ContinuedAt != nil {
+			ca := *e.ContinuedAt
+			e.ContinuedAt = &ca
+		}
 		out.Exec = &e
 	}
 	if t.Attempts != nil {
@@ -797,6 +908,7 @@ func cloneTask(t *Task) *Task {
 				ec := *a.ExitCode
 				att.ExitCode = &ec
 			}
+			att.Dirty = cloneBoolPtr(a.Dirty)
 			out.Attempts[i] = att
 		}
 	}
@@ -808,6 +920,7 @@ func cloneTask(t *Task) *Task {
 				ec := *r.ExitCode
 				rep.ExitCode = &ec
 			}
+			rep.Dirty = cloneBoolPtr(r.Dirty)
 			if r.Artifacts != nil {
 				rep.Artifacts = slices.Clone(r.Artifacts)
 			}
@@ -848,6 +961,14 @@ func (q *Queue) Enqueue(in EnqueueInput) (EnqueueResult, error) {
 		return EnqueueResult{}, err
 	}
 	agentType, err := NormalizeAgentType(in.AgentType)
+	if err != nil {
+		return EnqueueResult{}, err
+	}
+	model, err := normalizeModel(in.Model)
+	if err != nil {
+		return EnqueueResult{}, err
+	}
+	launcher, err := normalizeLauncher(in.Launcher)
 	if err != nil {
 		return EnqueueResult{}, err
 	}
@@ -971,6 +1092,8 @@ func (q *Queue) Enqueue(in EnqueueInput) (EnqueueResult, error) {
 		QuotaWeight:       weight,
 		Machine:           machine,
 		AgentType:         agentType,
+		Model:             model,
+		Launcher:          launcher,
 		PermissionProfile: perm,
 		Workspace: WorkspaceSpec{
 			Repo:    repo,
@@ -1120,7 +1243,17 @@ func (q *Queue) CompleteAttempt(in CompleteAttemptInput) (*Task, error) {
 		ExitCode:   in.ExitCode,
 		Message:    in.Message,
 		Summary:    in.Summary,
+		Launcher:   in.Launcher,
+		Model:      in.Model,
+		SessionID:  in.SessionID,
+		Worktree:   in.Worktree,
+		BaseSHA:    in.BaseSHA,
+		HeadSHA:    in.HeadSHA,
+		Dirty:      cloneBoolPtr(in.Dirty),
+		FullReply:  in.FullReply,
 		Artifacts:  slices.Clone(in.Artifacts),
+
+		TodoAttachError: att.TodoAttachError,
 	}
 	t.Reports = append(t.Reports, rep)
 
@@ -1129,6 +1262,10 @@ func (q *Queue) CompleteAttempt(in CompleteAttemptInput) (*Task, error) {
 	att.ExitCode = in.ExitCode
 	att.ErrorClass = in.ErrorClass
 	att.Verdict = verdict
+	att.Launcher, att.Model, att.SessionID, att.Worktree = in.Launcher, in.Model, in.SessionID, in.Worktree
+	att.BaseSHA, att.HeadSHA, att.FullReply = in.BaseSHA, in.HeadSHA, in.FullReply
+	att.Dirty = cloneBoolPtr(in.Dirty)
+	att.TodoDetachPending = in.TodoDetachPending
 	att.Summary = firstLinePreview(in.Message, 200)
 	t.Summary = att.Summary
 
@@ -1154,23 +1291,23 @@ func (q *Queue) CompleteAttempt(in CompleteAttemptInput) (*Task, error) {
 		if errClass == "" {
 			errClass = "task_failed"
 		}
-		shouldRetry := t.RetriesLeft > 0 && isRetryableErrorClass(errClass)
-		if errClass == "rate_limited" && t.AttemptNo <= t.MaxRetries+3 {
-			shouldRetry = true
-		}
+		reroute := errClass == "gateway_unreachable" && t.AttemptNo <= t.MaxRetries+3 && q.hasHealthyAlternateLocked(t.Machine, att.Machine)
+		extraRetry := reroute || (errClass == "rate_limited" && t.AttemptNo <= t.MaxRetries+3)
+		shouldRetry := extraRetry || (t.RetriesLeft > 0 && isRetryableErrorClass(errClass))
 		if in.Retryable != nil {
-			shouldRetry = *in.Retryable && (t.RetriesLeft > 0 || (errClass == "rate_limited" && t.AttemptNo <= t.MaxRetries+3))
+			shouldRetry = *in.Retryable && (t.RetriesLeft > 0 || extraRetry)
 		}
 		if shouldRetry {
-			if errClass != "rate_limited" || t.AttemptNo > t.MaxRetries {
-				if t.RetriesLeft > 0 {
+			t.NotBefore = nil
+			if !reroute {
+				if t.RetriesLeft > 0 && (errClass != "rate_limited" || t.AttemptNo > t.MaxRetries) {
 					t.RetriesLeft--
 				}
+				delay := ComputeRetryDelay(t.ID, t.AttemptNo, q.cfg.RetryBaseDelay, q.cfg.RetryMaxDelay)
+				readyAt := now.Add(delay)
+				t.NotBefore = &readyAt
 			}
-			delay := ComputeRetryDelay(t.ID, t.AttemptNo, q.cfg.RetryBaseDelay, q.cfg.RetryMaxDelay)
-			readyAt := now.Add(delay)
 			t.State = StateQueued
-			t.NotBefore = &readyAt
 			t.FailureReason = errClass
 		} else {
 			t.State = StateFailed
@@ -1187,12 +1324,73 @@ func (q *Queue) CompleteAttempt(in CompleteAttemptInput) (*Task, error) {
 	return cloneTask(t), nil
 }
 
+// PendingTodoDetaches returns unfinished unlink requests for attempts that no longer hold the lease.
+func (q *Queue) PendingTodoDetaches() []pendingTodoDetach {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	var pending []pendingTodoDetach
+	for _, t := range q.tasks {
+		todoID := t.TodoID()
+		if todoID == "" {
+			continue
+		}
+		active := isActiveState(t.State)
+		for i, att := range t.Attempts {
+			if !att.TodoDetachPending || (active && i == len(t.Attempts)-1) || att.Machine == "" || att.SessionID == "" {
+				continue
+			}
+			pending = append(pending, pendingTodoDetach{
+				TaskID: t.ID, AttemptNo: att.AttemptNo, TodoID: todoID, MachineID: att.Machine, SessionID: att.SessionID,
+			})
+		}
+	}
+	return pending
+}
+
+// SetAttemptTodoDetachPending saves whether the attempt's to-do link still needs to be removed.
+func (q *Queue) SetAttemptTodoDetachPending(taskID string, attemptNo int, pending bool) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	t, ok := q.tasks[taskID]
+	if !ok {
+		return ErrTaskNotFound
+	}
+	for i := range t.Attempts {
+		att := &t.Attempts[i]
+		if att.AttemptNo != attemptNo {
+			continue
+		}
+		prev := att.TodoDetachPending
+		if prev == pending {
+			return nil
+		}
+		att.TodoDetachPending = pending
+		if err := q.saveLocked(); err != nil {
+			att.TodoDetachPending = prev
+			return err
+		}
+		return nil
+	}
+	return ErrStaleAttempt
+}
+
+func (q *Queue) hasHealthyAlternateLocked(requiredMachine, failedMachine string) bool {
+	for _, m := range q.machines {
+		if m.Name != failedMachine && m.Online && !m.Degraded && m.MaxSlots > 0 && m.matches(requiredMachine) {
+			return true
+		}
+	}
+	return false
+}
+
 // isRetryableErrorClass: the classes another attempt can get past. Not among them: rejected (the task asks for
 // something that is not there), config_error (the configured model is unavailable) and auth_expired (the agent
 // is signed out): they fail the same way until the user changes something.
 func isRetryableErrorClass(errClass string) bool {
 	switch errClass {
-	case "infra_error", "timeout", "task_failed", "rate_limited", "lost":
+	case "infra_error", "timeout", "task_failed", "rate_limited", "lost", "gateway_unreachable", "gateway_error", "stream_interrupted":
 		return true
 	default:
 		return false
@@ -1351,6 +1549,21 @@ func (q *Queue) ListTasks(f TaskFilter) ([]*Task, error) {
 		}
 		return out[i].ID > out[j].ID
 	})
+
+	if f.After != "" {
+		at, id, err := parseTaskCursor(f.After)
+		if err != nil {
+			return nil, err
+		}
+		// The first task after the cursor's place, in the order of the sort above.
+		i := slices.IndexFunc(out, func(t *Task) bool {
+			return t.SubmittedAt.Before(at) || (t.SubmittedAt.Equal(at) && t.ID < id)
+		})
+		if i < 0 {
+			i = len(out)
+		}
+		out = out[i:]
+	}
 
 	limit := f.Limit
 	if limit <= 0 {

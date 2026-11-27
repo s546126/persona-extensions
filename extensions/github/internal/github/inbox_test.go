@@ -183,14 +183,16 @@ func TestNotificationsBecomeThings(t *testing.T) {
 	pr := got["example-org/example-repo#12"]
 	if pr.Kind != "review_requested" || pr.Label != "请你 review" || pr.Tier != "action" || pr.Done != "" || !pr.CanReply ||
 		pr.Sender != "bob" || pr.Preview != "请看一下示例" || pr.URL != "https://github.com/example-org/example-repo/pull/12" ||
-		pr.ReplyTo != "评论到 example-org/example-repo#12（仓库可见的人都能看到）" || pr.Last != t1 || pr.Why != "规则：请你 review" {
+		pr.ReplyTo != "评论到 example-org/example-repo#12（仓库可见的人都能看到）" || messageLastTime(t, pr.Last) != "2026-11-02T08:59:00Z" ||
+		pr.Why != "规则：请你 review" {
 		t.Errorf("review request: %+v", pr)
 	}
 	if !strings.Contains(pr.Context, "GitHub PR example-org/example-repo#12：Add the example") || !strings.Contains(pr.Context, "等这些人 review：me") ||
 		!strings.Contains(pr.Context, "bob：\n请看一下示例") {
 		t.Errorf("context:\n%s", pr.Context)
 	}
-	if is := got["example-org/example-repo#7"]; is.Kind != "assign" || is.Sender != "bob" || is.Preview != "出错了" || is.Tier != "action" {
+	if is := got["example-org/example-repo#7"]; is.Kind != "assign" || is.Sender != "bob" || is.Preview != "出错了" || is.Tier != "action" ||
+		is.Last != t1 { // no comment or review yet: the notification names the move
 		t.Errorf("assignment: %+v", is)
 	}
 
@@ -449,5 +451,174 @@ func TestDiscussionAndCommitMentionsAreNotCI(t *testing.T) {
 	}
 	if over := c.Settle(context.Background(), threads); len(over) != 0 {
 		t.Errorf("settled %v", over)
+	}
+}
+
+// A push or an edit bumps a PR's notification but adds no comment or review: the thing keeps its Last, so the hub
+// takes no new message from it; a new review moves Last.
+func TestPushOrEditIsNoNewMessage(t *testing.T) {
+	const reviewAt, newer = "2026-11-02T09:10:00Z", "2026-11-02T09:40:00Z"
+	f := &fakeNotifications{prs: map[string]string{api12: openPR(""), "/repos/example-org/example-repo/issues/12": `{"comments":0}`},
+		comments: map[string]string{"/repos/example-org/example-repo/pulls/12/reviews": `[{"user":{"login":"carol"},"state":"COMMENTED",` +
+			`"body":"Automated review found 2 issues.","submitted_at":"` + reviewAt + `"}]`}}
+	f.notifications = "[" + note("1", "author", "PullRequest", "https://api.github.com"+api12, t1) + "]"
+	c := f.server(t)
+	c.now = func() time.Time { return time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC) }
+	c.poll(context.Background())
+	pr := things(t, c)["example-org/example-repo#12"]
+	if messageLastTime(t, pr.Last) != reviewAt || pr.Preview != "评审了 Automated review found 2 issues." {
+		t.Fatalf("after the review: %+v", pr)
+	}
+
+	// The author pushes a commit and edits the body: a later notification, no new comment or review.
+	f.mu.Lock()
+	f.prs[api12] = strings.Replace(openPR(""), "示例描述", "示例描述（改过）", 1)
+	f.notifications = "[" + note("1", "author", "PullRequest", "https://api.github.com"+api12, t2) + "]"
+	f.mu.Unlock()
+	c.inbox.fullAt = time.Time{}
+	c.poll(context.Background())
+	if again := things(t, c)["example-org/example-repo#12"]; again.Last != pr.Last || !strings.Contains(again.Context, "示例描述（改过）") {
+		t.Fatalf("a push or edit counted as a new message: Last %q -> %q\n%s", pr.Last, again.Last, again.Context)
+	}
+
+	// A new review is a new message.
+	f.mu.Lock()
+	f.comments["/repos/example-org/example-repo/pulls/12/reviews"] = `[{"user":{"login":"carol"},"state":"COMMENTED",` +
+		`"body":"Automated review found 2 issues.","submitted_at":"` + reviewAt + `"},{"user":{"login":"carol"},"state":"APPROVED",` +
+		`"body":"Looks good now.","submitted_at":"` + newer + `"}]`
+	f.notifications = "[" + note("1", "author", "PullRequest", "https://api.github.com"+api12, "2026-11-02T09:41:00Z") + "]"
+	f.mu.Unlock()
+	c.inbox.fullAt = time.Time{}
+	c.poll(context.Background())
+	if last := things(t, c)["example-org/example-repo#12"]; messageLastTime(t, last.Last) != newer {
+		t.Fatalf("a new review kept Last %q", last.Last)
+	}
+}
+
+func TestInlineOnlyReviewAdvancesLast(t *testing.T) {
+	const oldAt, inlineAt = "2026-11-02T09:10:00Z", "2026-11-02T09:40:00Z"
+	const prJSON = `{"title":"Example change","state":"open","user":{"login":"example-author"},"body":"Example body","html_url":"https://github.com/example-org/example-repo/pull/12"}`
+	const oldReview = `{"user":{"login":"example-reviewer"},"state":"COMMENTED","body":"Example review","submitted_at":"` + oldAt + `"}`
+	for _, tt := range []struct {
+		name, reviews, comments, body string
+	}{
+		{name: "older review", reviews: oldReview},
+		{name: "older comment", comments: `{"user":{"login":"example-commenter"},"body":"Example comment","created_at":"` + oldAt + `"}`},
+		{name: "no previous message"},
+		{name: "whitespace body", reviews: oldReview, body: " \n\t"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeNotifications{
+				prs: map[string]string{api12: prJSON, "/repos/example-org/example-repo/issues/12": `{"comments":0}`},
+				comments: map[string]string{
+					api12 + "/reviews": "[" + tt.reviews + "]",
+					"/repos/example-org/example-repo/issues/12/comments": "[" + tt.comments + "]",
+				},
+			}
+			if tt.comments != "" {
+				f.prs["/repos/example-org/example-repo/issues/12"] = `{"comments":1}`
+			}
+			f.notifications = "[" + note("1", "author", "PullRequest", "https://api.github.com"+api12, "2026-11-02T09:11:00Z") + "]"
+			c := f.server(t)
+			c.now = func() time.Time { return time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC) }
+			if _, _, err := c.poll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			before := things(t, c)["example-org/example-repo#12"]
+			wantBefore := oldAt
+			if tt.reviews == "" && tt.comments == "" {
+				wantBefore = "2026-11-02T09:11:00Z"
+			}
+			if messageLastTime(t, before.Last) != wantBefore {
+				t.Fatalf("before inline review: Last %q, want %q", before.Last, wantBefore)
+			}
+
+			// A submitted review can carry only inline comments, with no review-level body.
+			inline := fmt.Sprintf(`{"user":{"login":"example-inline-reviewer"},"state":"COMMENTED","body":%q,"submitted_at":%q}`, tt.body, inlineAt)
+			f.mu.Lock()
+			f.comments[api12+"/reviews"] = "[" + strings.TrimPrefix(tt.reviews+",", ",") + inline + "]"
+			f.notifications = "[" + note("1", "author", "PullRequest", "https://api.github.com"+api12, "2026-11-02T09:41:00Z") + "]"
+			f.mu.Unlock()
+			c.inbox.fullAt = time.Time{}
+			if _, _, err := c.poll(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			after := things(t, c)["example-org/example-repo#12"]
+			if messageLastTime(t, after.Last) != inlineAt {
+				t.Errorf("inline-only review: Last %q, want submitted_at %q (not notification time)", after.Last, inlineAt)
+			}
+			if after.Preview != before.Preview || after.Sender != before.Sender || after.Context != before.Context ||
+				after.Tier != before.Tier || after.Why != before.Why || after.Done != before.Done {
+				t.Errorf("inline-only review changed display, tier or Done:\nbefore %+v\nafter %+v", before, after)
+			}
+
+			for i, change := range []string{"push", "title edit", "body edit", "label change"} {
+				f.mu.Lock()
+				switch change {
+				case "title edit":
+					f.prs[api12] = strings.Replace(f.prs[api12], "Example change", "Edited example change", 1)
+				case "body edit":
+					f.prs[api12] = strings.Replace(f.prs[api12], "Example body", "Edited example body", 1)
+				case "label change":
+					f.prs[api12] = strings.TrimSuffix(f.prs[api12], "}") + `,"labels":[{"name":"example-label"}]}`
+				}
+				f.notifications = "[" + note("1", "author", "PullRequest", "https://api.github.com"+api12, fmt.Sprintf("2026-11-02T10:%02d:00Z", i)) + "]"
+				f.mu.Unlock()
+				c.inbox.fullAt = time.Time{}
+				if _, _, err := c.poll(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				again := things(t, c)["example-org/example-repo#12"]
+				if again.Last != after.Last {
+					t.Errorf("%s: Last %q, want unchanged %q", change, again.Last, inlineAt)
+				}
+				if change == "title edit" && again.Title != "Edited example change" ||
+					change == "body edit" && !strings.Contains(again.Context, "Edited example body") {
+					t.Errorf("%s was not refreshed: %+v", change, again)
+				}
+			}
+		})
+	}
+}
+
+func TestUnsubmittedReviewsDoNotAdvanceLast(t *testing.T) {
+	const oldAt = "2026-11-02T09:10:00Z"
+	for _, tt := range []struct {
+		name, state, submitted string
+	}{
+		{name: "pending", state: "PENDING", submitted: `,"submitted_at":"2026-11-02T09:40:00Z"`},
+		{name: "commented missing time", state: "COMMENTED"},
+		{name: "commented null time", state: "COMMENTED", submitted: `,"submitted_at":null`},
+		{name: "commented zero time", state: "COMMENTED", submitted: `,"submitted_at":"0001-01-01T00:00:00Z"`},
+		{name: "approved missing time", state: "APPROVED"},
+		{name: "changes requested missing time", state: "CHANGES_REQUESTED"},
+		{name: "dismissed", state: "DISMISSED", submitted: `,"submitted_at":"2026-11-02T09:40:00Z"`},
+	} {
+		for _, withOlder := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/older=%t", tt.name, withOlder), func(t *testing.T) {
+				const notifiedAt = "2026-11-02T09:41:00Z"
+				f := &fakeNotifications{
+					prs:      map[string]string{api12: openPR(""), "/repos/example-org/example-repo/issues/12": `{"comments":0}`},
+					comments: map[string]string{},
+				}
+				f.notifications = "[" + note("1", "review_requested", "PullRequest", "https://api.github.com"+api12, notifiedAt) + "]"
+				reviews := fmt.Sprintf(`{"user":{"login":"me"},"state":%q,"body":"Example unsubmitted review"%s}`, tt.state, tt.submitted)
+				wantLast := notifiedAt
+				if withOlder {
+					reviews += `,{"user":{"login":"example-reviewer"},"state":"COMMENTED","body":"Example old review","submitted_at":"` + oldAt + `"}`
+					wantLast = oldAt
+				}
+				f.comments[api12+"/reviews"] = "[" + reviews + "]"
+				c := f.server(t)
+				c.now = func() time.Time { return time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC) }
+				if _, _, err := c.poll(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				got := things(t, c)["example-org/example-repo#12"]
+				if messageLastTime(t, got.Last) != wantLast || got.Done != connector.DoneRead || strings.Contains(got.Context, "Example unsubmitted review") {
+					t.Errorf("unsubmitted review counted: Last %q (want %q), Done %q, context %q", got.Last, wantLast, got.Done, got.Context)
+				}
+			})
+		}
 	}
 }

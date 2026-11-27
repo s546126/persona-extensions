@@ -224,7 +224,8 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 	if len(f.creates) != 1 {
 		t.Fatal("restart repeated creation")
 	}
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(args), Status: "pending", StartedAt: time.Now()}})
+	keyData, _ := json.Marshal(createArgs{ProjectID: 7, Title: "Persistent task"})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "vikunja_create_task:" + string(keyData), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

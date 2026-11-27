@@ -177,7 +177,7 @@ func feedAddressOK(u *url.URL) error {
 	}
 	h := u.Hostname()
 	if isLoopbackHost(h) || strings.EqualFold(h, sandboxHost) {
-		return errors.New("本机的订阅源要通过设置里的 RSSHub 实例地址来读")
+		return errors.New("本机的订阅源要通过设置里的「RSSHub 服务地址」来读")
 	}
 	if ip := net.ParseIP(h); ip != nil && blockedIP(ip) {
 		return fmt.Errorf("不能读这个地址（%s）", h)

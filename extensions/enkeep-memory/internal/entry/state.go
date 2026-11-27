@@ -1,5 +1,72 @@
 package entry
 
+import "slices"
+
+// LifecycleDecayReport summarizes deterministic ephemeral and ops_runbook lifecycle transitions.
+type LifecycleDecayReport struct {
+	EphemeralTagged        int `json:"ephemeral_tagged"`
+	EphemeralDemotedStable int `json:"ephemeral_demoted_stable"`
+	EphemeralRecallExpired int `json:"ephemeral_recall_expired"`
+	EphemeralDormant       int `json:"ephemeral_dormant"`
+	OpsDemoted             int `json:"ops_demoted"`
+	OpsDormant             int `json:"ops_dormant"`
+}
+
+// ApplyLifecycleDecay applies the v0.4.0 deterministic lifecycle rules in place across entries as of today
+// (YYYY-MM-DD):
+//   - Ephemeral entries are tagged with FlagEphemeral, never kept in Stable, exit active recall at >= 14d,
+//     and transition to Dormant at >= 30d.
+//   - Ops runbook entries (facet==tools or flagged ops_runbook) are demoted in ranking at >= 45d and
+//     transition to Dormant at >= 60d.
+//
+// Pinned, deleted, retired, and merged entries are left unchanged.
+func ApplyLifecycleDecay(entries map[string]*Entry, today string) LifecycleDecayReport {
+	var rep LifecycleDecayReport
+	if len(entries) == 0 || today == "" {
+		return rep
+	}
+	for _, e := range entries {
+		if e == nil || !e.Live() || e.Pinned {
+			continue
+		}
+		if IsEphemeral(e) {
+			if !slices.Contains(e.Flags, FlagEphemeral) {
+				e.Flags = append(e.Flags, FlagEphemeral)
+				rep.EphemeralTagged++
+			}
+			if ShouldDormantEphemeral(e, today) {
+				if e.Status != Dormant {
+					e.Status = Dormant
+					e.StatusAt = today
+					rep.EphemeralDormant++
+				}
+				continue
+			}
+			if e.Status == Stable {
+				e.Status = Candidate
+				e.StatusAt = today
+				rep.EphemeralDemotedStable++
+			}
+			if EphemeralExpiredRecall(e, today) {
+				rep.EphemeralRecallExpired++
+			}
+			continue
+		}
+		if IsOpsRunbookEntry(e) {
+			if ShouldDormantOpsRunbook(e, today) {
+				if e.Status != Dormant {
+					e.Status = Dormant
+					e.StatusAt = today
+					rep.OpsDormant++
+				}
+			} else if OpsRunbookWeight(e, today) < 1.0 {
+				rep.OpsDemoted++
+			}
+		}
+	}
+	return rep
+}
+
 // Contact is one person on the intersection list (5.7): someone the user has dealt with. Being on the list decides
 // whom a card is made for; what goes on the card is everything resolvable to them, not only the exchanges.
 type Contact struct {

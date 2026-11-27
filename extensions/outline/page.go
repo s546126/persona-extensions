@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,7 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Offset < 0 || len([]rune(st.Query)) > maxQueryChars || len(st.DocumentID) > 128 || len(st.CollectionID) > 128 || len([]rune(st.Title)) > 150 || len(st.Text) > 11000 || len(st.DraftID) > 128 {
+	if err := r.DecodeState(&st); err != nil || st.Offset < 0 || st.Offset > 1000000 || len([]rune(st.Query)) > maxQueryChars || len(st.DocumentID) > 128 || len(st.CollectionID) > 128 || len([]rune(st.Title)) > 150 || len(st.Text) > 11000 || len(st.DraftID) > 128 {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -95,20 +96,59 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 }
 
 // maxViewRecords is half the SDK's component limit: a result renders a row and a context line.
-const maxViewRecords = 125
+const (
+	maxViewRecords = 125
+	maxViewPages   = 10
+)
+
+func documentKey(id string) string {
+	key := "document-" + id
+	if len(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "document-" + hex.EncodeToString(sum[:])
+}
+
+func documentTitle(item document) string {
+	for _, candidate := range []string{item.Title, item.ID} {
+		if s := strings.TrimSpace(candidate); s != "" {
+			return s
+		}
+	}
+	return "Document"
+}
 
 // collectResults reads the batches from the start through the one at offset so that Load more answers the whole list,
 // longer. It stops at maxViewRecords to keep the view within the SDK's component limit, and reports whether another
 // batch can be loaded and where it starts.
 func (a *app) collectResults(ctx context.Context, query string, offset int) ([]searchResult, int, bool, error) {
 	var out []searchResult
-	next, more := 0, false
-	for pos := 0; len(out) < maxViewRecords; pos = next {
+	seenIDs := map[string]bool{}
+	seenOffsets := map[int]bool{}
+	next, more, pages := 0, false, 0
+	for pos := 0; len(out) < maxViewRecords && pages < maxViewPages; pos = next {
+		if seenOffsets[pos] {
+			more = false
+			break
+		}
+		seenOffsets[pos] = true
+		pages++
 		page, err := a.client.search(ctx, query, pos)
 		if err != nil {
 			return nil, 0, false, err
 		}
-		out = append(out, page.Data...)
+		for _, result := range page.Data {
+			item := result.Document
+			if !validDocumentID(item.ID) || item.Title == "" || item.ArchivedAt != "" || item.DeletedAt != "" || seenIDs[item.ID] {
+				continue
+			}
+			seenIDs[item.ID] = true
+			out = append(out, result)
+			if len(out) >= maxViewRecords {
+				break
+			}
+		}
 		if next, more, err = nextOffset(page.Pagination); err != nil {
 			return nil, 0, false, err
 		}
@@ -116,10 +156,7 @@ func (a *app) collectResults(ctx context.Context, query string, offset int) ([]s
 			break
 		}
 	}
-	if len(out) > maxViewRecords {
-		out = out[:maxViewRecords]
-	}
-	return out, next, more && len(out) < maxViewRecords, nil
+	return out, next, more && len(out) < maxViewRecords && pages < maxViewPages && !seenOffsets[next], nil
 }
 
 func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
@@ -137,11 +174,20 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.collections}
+		seenCol := map[string]bool{}
 		for _, item := range page.Data {
-			if item.ID == "" || item.ArchivedAt != "" || item.DeletedAt != "" || !uuidPattern.MatchString(item.ID) {
+			if item.ID == "" || item.ArchivedAt != "" || item.DeletedAt != "" || !uuidPattern.MatchString(item.ID) || seenCol[item.ID] {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "collection-" + item.ID, Title: clipText(item.Name, 1800), Subtitle: item.Permission, Action: &wire.Action{ID: "create", Values: map[string]string{"collection_id": item.ID}}})
+			seenCol[item.ID] = true
+			name := strings.TrimSpace(item.Name)
+			if name == "" {
+				name = item.ID
+			}
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "collection-" + item.ID, Title: clipText(name, 1800), Subtitle: clipText(item.Permission, 200), Action: &wire.Action{ID: "create", Values: map[string]string{"collection_id": item.ID}}})
+			if len(section.Items) >= maxViewRecords {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noCollections})
@@ -175,7 +221,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			if !validDocumentID(item.ID) || item.Title == "" || item.ArchivedAt != "" || item.DeletedAt != "" {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "document-" + item.ID, Title: clipText(item.Title, 1800), Subtitle: clipText(item.UpdatedAt, 200), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: documentKey(item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(item.UpdatedAt, 200), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 			if result.Context != "" {
 				section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(result.Context, 1800), Style: wire.TextStyleSecondary})
 			}
@@ -195,21 +241,25 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 func createView(r *ext.UIRequest, st pageState) *wire.View {
 	t := textsFor(r.Locale)
 	if st.Mode == "review-create" {
-		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(st.Title, 1800)}, {Type: wire.ComponentText, Text: t.draftNotice}}
+		title := clipText(strings.TrimSpace(st.Title), 1800)
+		if title == "" {
+			title = t.create
+		}
+		items := []wire.Component{{Type: wire.ComponentText, Text: title}, {Type: wire.ComponentText, Text: t.draftNotice}}
 		items = append(items, textComponents(clipText(st.Text, 10000))...)
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Title + "\n" + t.draftNotice}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + title + "\n" + t.draftNotice}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}
 	}
 	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.draftNotice, Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: st.Title},
-		{Type: wire.ComponentField, Kind: "text", Name: "text", Label: t.text, Value: st.Text},
+		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: clipText(st.Title, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "text", Label: t.text, Value: clipText(st.Text, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 	}}}}
 }
 
 func detailView(r *ext.UIRequest, st pageState, item document) *wire.View {
 	t := textsFor(r.Locale)
-	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.knowledge, Items: []wire.Component{
+	v := &wire.View{Title: clipText(documentTitle(item), 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.knowledge, Items: []wire.Component{
 		{Type: wire.ComponentText, Text: clipText(t.updated+": "+item.UpdatedAt, 1800)},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}

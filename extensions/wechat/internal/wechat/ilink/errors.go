@@ -25,10 +25,11 @@ const (
 
 // Error is what the package returns; Retry says whether trying the same call again later can work.
 type Error struct {
-	Code  Code
-	Msg   string
-	Retry bool
-	err   error
+	Code   Code
+	Msg    string
+	Retry  bool
+	status int
+	err    error
 }
 
 func (e *Error) Error() string { return e.Msg }

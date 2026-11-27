@@ -27,6 +27,26 @@ func TestTurnErrorClass(t *testing.T) {
 		{"transient", "API Error: 529 Overloaded", "rate_limited"},
 		{"", "Too many requests", "rate_limited"},
 		{"", "Claude usage limit reached", "rate_limited"},
+		{"transient", "Server error mid-response", "stream_interrupted"},
+		{"", "Connection lost", "stream_interrupted"},
+		{"", "unexpected EOF", "stream_interrupted"},
+		{"", "stream closed", "stream_interrupted"},
+		{"", "stream ended", "stream_interrupted"},
+		{"", "response.failed (502 Bad Gateway)", "stream_interrupted"},
+		{"", "Disconnected before its last event", "stream_interrupted"},
+		{"", "HTTP 502", "gateway_error"},
+		{"", "HTTP 503", "gateway_error"},
+		{"", "HTTP 503: overloaded", "gateway_error"},
+		{"", "HTTP 504", "gateway_error"},
+		{"", "Bad Gateway", "gateway_error"},
+		{"", "Gateway Timeout", "gateway_error"},
+		{"", "Service Unavailable", "gateway_error"},
+		{"", "inference gateway", "gateway_error"},
+		{"", "connection refused", "gateway_error"},
+		{"", "connection reset", "gateway_error"},
+		{"", "no route to host", "gateway_error"},
+		{"", "dial tcp", "gateway_error"},
+		{"", "i/o timeout", "gateway_error"},
 		// Words that only look like the above.
 		{"", "the limited edition build failed to generate", "task_failed"},
 		{"", "could not read the author field of the commit", "task_failed"},
@@ -197,7 +217,7 @@ func TestRetryOfAWritableTaskContinuesFromTheEarlierAttemptAndKnowsHowItEnded(t 
 			if first := r.hub.created[0].Prompt; strings.Contains(first, "This is attempt") {
 				t.Errorf("the first attempt's prompt talks of an earlier one:\n%s", first)
 			}
-			v := viewTask(got, false)
+			v := viewTask(got, promptNone)
 			if v.FailureReason != "" || v.NotBefore != nil {
 				t.Fatalf("the running attempt shows the earlier one's failure: %+v", v)
 			}
@@ -507,7 +527,8 @@ func TestWaitingText(t *testing.T) {
 		{hubInteraction{Kind: "permission", Summary: strings.Repeat("x", 200)}, "Agent 等你批准运行：" + strings.Repeat("x", 120) + "…"},
 		{hubInteraction{Kind: "question", Summary: "A or B?"}, "Agent 在问你：A or B?"},
 		{hubInteraction{Kind: "permission"}, ""},
-		{hubInteraction{Kind: "plan", Summary: "a plan"}, ""},
+		{hubInteraction{Kind: "plan", Summary: "a plan"}, "Agent 提交了计划，等你批准"},
+		{hubInteraction{Kind: "unknown", Summary: "other"}, ""},
 	} {
 		if got := waitingText(tc.ix); got != tc.want {
 			t.Errorf("waitingText(%+v) = %q, want %q", tc.ix, got, tc.want)
@@ -527,9 +548,37 @@ func TestTaskViewShowsTheFailureOnlyWhereItSaysSomething(t *testing.T) {
 		{state: StateNeedsInput, reason: false, notBefore: false},
 		{state: StateFailed, reason: true, notBefore: false},
 	} {
-		v := viewTask(&Task{State: tc.state, FailureReason: "task_failed", NotBefore: &soon}, false)
+		v := viewTask(&Task{State: tc.state, FailureReason: "task_failed", NotBefore: &soon}, promptNone)
 		if (v.FailureReason != "") != tc.reason || (v.NotBefore != nil) != tc.notBefore {
 			t.Errorf("%s: failure_reason %q not_before %v", tc.state, v.FailureReason, v.NotBefore)
 		}
+	}
+}
+
+// A retry is told how the acceptance command exited even when its output is long: the line is the first of the
+// report's message, and only the output under it is cut to its end.
+func TestRetryPromptKeepsTheExitCodeLineOfALongOutput(t *testing.T) {
+	task := &Task{ID: "task_1", Prompt: "Fix it", Acceptance: &AcceptanceSpec{Command: "make check"}}
+	output := strings.Repeat("ok  \tpkg\t0.1s\n", 300) + "--- FAIL: TestLogin\nFAIL"
+	prev := &EvidenceReport{AttemptNo: 1, ErrorClass: "task_failed", Message: "验收命令退出码 2\n" + output, Summary: "I changed login.go"}
+	p := buildPrompt(task, prepareResult{BaseSHA: "abc", Branch: "ats/task_1-2"}, false, prev, false)
+	_, note, _ := strings.Cut(p, "This is attempt 2")
+	if !strings.Contains(note, "    验收命令退出码 2\n    …") || !strings.Contains(note, "    --- FAIL: TestLogin\n    FAIL\n") || !strings.Contains(note, "    I changed login.go\n") {
+		t.Fatalf("the retry note: %s", note)
+	}
+	if n := len([]rune(note)); n > promptFailureRunes+800 {
+		t.Fatalf("the retry note is %d runes", n)
+	}
+
+	// A turn that ended in an error: the message is the agent's reply, and its summary is not said again.
+	prev = &EvidenceReport{AttemptNo: 1, ErrorClass: "task_failed", Message: "I could not find the repository", Summary: "I could not find the repository"}
+	p = buildPrompt(task, prepareResult{BaseSHA: "abc", Branch: "ats/task_1-2"}, false, prev, false)
+	// A short summary that happens to be a word of the output is still said.
+	prev = &EvidenceReport{AttemptNo: 1, ErrorClass: "task_failed", Message: "验收命令退出码 1\ndone 3 of 4\nFAIL", Summary: "done"}
+	if q := buildPrompt(task, prepareResult{BaseSHA: "abc", Branch: "ats/task_1-2"}, false, prev, false); !strings.Contains(q, "What that attempt's agent said at its end:\n    done\n") {
+		t.Fatalf("the summary is left out: %s", q)
+	}
+	if n := strings.Count(p, "I could not find the repository"); n != 1 || strings.Contains(p, "What that attempt's agent said") {
+		t.Fatalf("the reply is said %d times: %s", n, p)
 	}
 }

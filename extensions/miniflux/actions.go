@@ -60,8 +60,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(in)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

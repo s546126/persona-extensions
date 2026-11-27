@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,9 +33,18 @@ type pageState struct {
 // its state against it.
 const maxBookNameChars = 255
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "pages", "detail", "search", "create", "review-create", "edit", "review-edit":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.BookID < 0 || st.PageID < 0 || st.Offset < 0 || st.SearchPage < 0 || len([]rune(st.BookName)) > maxBookNameChars || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxTitleChars || utf8.RuneCountInString(st.Markdown) > maxMarkdownChars || len([]rune(st.Search)) > maxQueryChars {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || st.BookID < 0 || st.PageID < 0 || st.Offset < 0 || st.SearchPage < 0 || len([]rune(st.BookName)) > maxBookNameChars || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxTitleChars || utf8.RuneCountInString(st.Markdown) > maxMarkdownChars || len([]rune(st.Search)) > maxQueryChars {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -55,7 +65,11 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Search, st.SearchPage, st.Mode = clipText(r.Values["q"], maxQueryChars), 1, "search"
+		if strings.TrimSpace(r.Values["q"]) == "" {
+			st = pageState{}
+		} else {
+			st.Search, st.SearchPage, st.Mode = clipText(r.Values["q"], maxQueryChars), 1, "search"
+		}
 	case "more-search":
 		st.SearchPage++
 	case "book":
@@ -114,6 +128,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, errors.New("page draft exceeds page state limit")
 		}
 	case "confirm-create":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		raw, _ := json.Marshal(createArgs{BookID: st.BookID, Name: st.Name, Markdown: st.Markdown})
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "bookstack_create_page", raw)
 		if err != nil {
@@ -121,6 +138,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-edit":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		raw, _ := json.Marshal(updateArgs{PageID: st.PageID, Name: st.Name, Markdown: st.Markdown})
 		out, err := a.doAction(ctx, "ui-edit:"+st.DraftID, "bookstack_update_page", raw)
 		if err != nil {
@@ -163,7 +183,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "create" || st.Mode == "review-create" || st.Mode == "edit" || st.Mode == "review-edit" {
-		return a.editorView(r, st), nil
+		return a.editorView(r, st)
 	}
 	if st.Mode == "search" {
 		return a.searchView(ctx, r, st)
@@ -196,20 +216,23 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if err != nil {
 			return nil, err
 		}
-		section := wire.Section{Title: fmt.Sprintf(t.pages, len(items))}
+		section := wire.Section{}
+		seen := map[int64]bool{}
 		for _, item := range items {
-			if item.ID <= 0 || item.Name == "" {
+			if item.ID <= 0 || item.Name == "" || seen[item.ID] {
 				continue
 			}
+			seen[item.ID] = true
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "page-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: clipText(item.UpdatedAt, 100), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
 		}
+		section.Title = fmt.Sprintf(t.pages, len(section.Items))
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noPages})
 		}
 		if more {
 			section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more"}}
 		}
-		v := &wire.View{Title: clipText(st.BookName, 1800), State: ext.EncodeState(st), Sections: []wire.Section{section, {Title: t.pages, Items: []wire.Component{
+		v := &wire.View{Title: clipText(st.BookName, 1800), State: ext.EncodeState(st), Sections: []wire.Section{section, {Items: []wire.Component{
 			{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "create", Push: &wire.Push{Title: t.create, State: ext.EncodeState(pageState{Mode: "create", BookID: st.BookID, BookName: st.BookName, DraftID: randomID()})}}},
 			{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "books"}},
 		}}}}
@@ -226,11 +249,13 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return nil, err
 	}
 	section := wire.Section{Title: t.books}
+	seenBooks := map[int64]bool{}
 	for _, item := range items {
-		if item.ID <= 0 || item.Name == "" {
+		if item.ID <= 0 || item.Name == "" || seenBooks[item.ID] {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "book-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: clipText(item.Description, 500), Action: &wire.Action{ID: "book", Values: map[string]string{"id": fmt.Sprint(item.ID), "name": item.Name}}})
+		seenBooks[item.ID] = true
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "book-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: clipText(item.Description, 500), Action: &wire.Action{ID: "book", Values: map[string]string{"id": fmt.Sprint(item.ID), "name": clipText(item.Name, maxBookNameChars)}}})
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noBooks})
@@ -254,19 +279,27 @@ func (a *app) searchView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 	if err != nil {
 		return nil, err
 	}
-	section := wire.Section{Title: fmt.Sprintf(t.pages, len(items))}
+	section := wire.Section{}
+	seen := map[string]bool{}
 	for _, item := range items {
 		if item.ID <= 0 || item.Name == "" {
 			continue
 		}
-		row := wire.Component{Type: wire.ComponentRow, Key: item.Type + "-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: item.Type}
+		dedupKey := item.Type + ":" + fmt.Sprint(item.ID)
+		if seen[dedupKey] {
+			continue
+		}
+		seen[dedupKey] = true
+		key := boundedKey(item.Type+"-", fmt.Sprint(item.ID))
+		row := wire.Component{Type: wire.ComponentRow, Key: key, Title: clipText(item.Name, 1800), Subtitle: clipText(item.Type, 200)}
 		if item.Type == "page" {
 			row.Action = &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}
 		} else if link := safePageLink(item.URL); link != "" {
-			row = wire.Component{Type: wire.ComponentLink, Key: item.Type + "-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), URL: link}
+			row = wire.Component{Type: wire.ComponentLink, Key: key, Title: clipText(item.Name, 1800), URL: link}
 		}
 		section.Items = append(section.Items, row)
 	}
+	section.Title = fmt.Sprintf(t.pages, len(section.Items))
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noPages})
 	}
@@ -276,33 +309,50 @@ func (a *app) searchView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 	return &wire.View{Title: t.search, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Search, Action: wire.Action{ID: "search"}}, Sections: []wire.Section{section, {Items: []wire.Component{{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "books"}}}}}}, nil
 }
 
-func (a *app) editorView(r *ext.UIRequest, st pageState) *wire.View {
+func (a *app) editorView(r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
 	if st.Mode == "review-create" || st.Mode == "review-edit" {
 		action := "confirm-create"
-		if st.Mode == "review-edit" {
+		if st.Mode == "review-create" {
+			if err := (createArgs{BookID: st.BookID, Name: st.Name, Markdown: st.Markdown}).validate(); err != nil {
+				return nil, err
+			}
+		} else {
 			action = "confirm-edit"
+			if err := (updateArgs{PageID: st.PageID, Name: st.Name, Markdown: st.Markdown}).validate(); err != nil {
+				return nil, err
+			}
 		}
-		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(st.Name, 1800)}}
+		var items []wire.Component
+		if st.Name != "" {
+			items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(st.Name, 1800)})
+		}
 		items = append(items, textComponents(st.Markdown)...)
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: action, Confirm: t.save + "\n" + st.Name}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: map[bool]string{true: "edit", false: "create"}[st.Mode == "review-edit"]}})
-		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.review, Items: items}}}
+		confirm := t.save
+		if st.Name != "" {
+			confirm = clipText(t.save+"\n"+st.Name, wire.StringMost)
+		}
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: action, Confirm: confirm}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: map[bool]string{true: "edit", false: "create"}[st.Mode == "review-edit"]}})
+		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.review, Items: items}}}, nil
 	}
 	action, title := "review-create", t.create
 	if st.Mode == "edit" {
 		action, title = "review-edit", t.edit
 	}
 	return &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: st.Name},
-		{Type: wire.ComponentField, Kind: "text", Name: "markdown", Label: t.content, Value: st.Markdown},
+		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: clipText(st.Name, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "markdown", Label: t.content, Value: clipText(st.Markdown, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: action, Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
-	}}}}
+	}}}}, nil
 }
 
 func detailView(r *ext.UIRequest, st pageState, item page, text string) *wire.View {
 	t := textsFor(r.Locale)
-	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(item.UpdatedAt, 100)}}
+	var items []wire.Component
+	if item.UpdatedAt != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(item.UpdatedAt, 100)})
+	}
 	if link := safePageLink(item.URL); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}
@@ -311,7 +361,7 @@ func detailView(r *ext.UIRequest, st pageState, item page, text string) *wire.Vi
 		if bookID == 0 && st.Search == "" {
 			bookID = item.BookID
 		}
-		pushState := ext.EncodeState(pageState{Mode: "edit", BookID: bookID, BookName: st.BookName, Search: st.Search, SearchPage: st.SearchPage, PageID: item.ID, Name: item.Name, Markdown: item.Markdown, DraftID: randomID()})
+		pushState := ext.EncodeState(pageState{Mode: "edit", BookID: bookID, BookName: st.BookName, Search: st.Search, SearchPage: st.SearchPage, PageID: item.ID, Name: clipText(item.Name, maxTitleChars), Markdown: item.Markdown, DraftID: randomID()})
 		if len(pushState) <= wire.StateMost {
 			items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.edit, Action: &wire.Action{ID: "edit", Push: &wire.Push{Title: t.edit, State: pushState}}})
 		}
@@ -319,13 +369,26 @@ func detailView(r *ext.UIRequest, st pageState, item page, text string) *wire.Vi
 		items = append(items, wire.Component{Type: wire.ComponentText, Text: t.noMarkdown, Style: wire.TextStyleSecondary})
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.pages, Items: items}}}
+	title := clipText(item.Name, 1800)
+	if title == "" {
+		title = fmt.Sprintf("#%d", item.ID)
+	}
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.page, Items: items}}}
 	if text != "" {
 		v.Sections = append(v.Sections, wire.Section{Title: t.content, Items: textComponents(clipText(text, 60000))})
 	} else {
 		v.Sections = append(v.Sections, wire.Section{Title: t.content, Items: []wire.Component{{Type: wire.ComponentText, Text: t.noContent, Style: wire.TextStyleSecondary}}})
 	}
 	return v
+}
+
+func boundedKey(prefix, id string) string {
+	key := prefix + id
+	if len(key) <= 128 && utf8.RuneCountInString(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "k-" + hex.EncodeToString(sum[:16])
 }
 
 func textComponents(text string) []wire.Component {

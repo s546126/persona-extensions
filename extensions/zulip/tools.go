@@ -51,9 +51,10 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 	if err := decode(raw, &in); err != nil {
 		return "", err
 	}
+	c := a.currentClient()
 	switch name {
 	case "zulip_streams":
-		items, err := a.client.streams(ctx)
+		items, err := c.streams(ctx)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -66,7 +67,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return clipText(b.String(), 90000), nil
 	case "zulip_topics":
-		items, err := a.client.topics(ctx, in.StreamID)
+		items, err := c.topics(ctx, in.StreamID)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -77,7 +78,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return clipText(b.String(), 90000), nil
 	case "zulip_messages":
-		page, err := a.client.messages(ctx, in.StreamID, in.Topic, in.Anchor, in.FirstUnread)
+		page, err := c.messages(ctx, in.StreamID, in.Topic, in.Anchor, in.FirstUnread)
 		a.record(err)
 		if err != nil {
 			return "", err

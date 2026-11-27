@@ -46,7 +46,7 @@ func (c *ctx) field(p kernel.Prop, name string, v any) (wire.Component, bool) {
 	}
 	switch k.Input {
 	case kernel.InLine:
-		f.Placeholder = k.Hint
+		f.Placeholder = kindPlaceholder(k)
 	case kernel.InChoice:
 		f.Choices = optionChoices(k.Enum(&p))
 	case kernel.InPick:
@@ -128,10 +128,10 @@ func (c *ctx) targetChoices(p kernel.Prop, v any) []wire.Choice {
 func submitted(p kernel.Prop, raw string) (any, error) {
 	k, ok := kernel.KindOf(p.Kind)
 	if !ok {
-		return nil, fmt.Errorf("没有属性类型「%s」", p.Kind)
+		return nil, fmt.Errorf("「%s」的种类「%s」认不出来，这一项没法在这里填。请让助手看看", p.Name, p.Kind)
 	}
 	if k.Input == kernel.InNone {
-		return nil, fmt.Errorf("「%s」由计算得出，不能填写", p.Name)
+		return nil, fmt.Errorf("「%s」是自动统计出来的，不用填", p.Name)
 	}
 	if k.Input == kernel.InChoice || k.Input == kernel.InPick {
 		raw = strings.TrimPrefix(raw, choicePrefix)

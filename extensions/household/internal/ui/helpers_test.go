@@ -46,6 +46,7 @@ func newApp(st kernel.Storage) (*App, *int) {
 	n := 0
 	a := New(st, testLoc, func() { n++ })
 	a.now = func() time.Time { return testNow }
+	a.importsOf().SetClock(func() time.Time { return testNow })
 	return a, &n
 }
 

@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Source](../../extensions/rsshub/)
 
-[RSSHub](https://docs.rsshub.app) turns websites into feeds: a route such as `/github/issue/nwverse/persona`, `/arxiv/search/...`, `/bilibili/user/video/<uid>` or `/telegram/channel/<name>` is a feed of that page. This extension subscribes to RSSHub routes, or to the address of any RSS 2.0, RSS 1.0, Atom 1.0 or JSON Feed 1.0/1.1 feed, refreshes them on the hub in the background, and shows them in Persona and to the assistant.
+[RSSHub](https://docs.rsshub.app) turns websites into feeds: a route such as `/github/issue/nwverse/persona`, `/arxiv/search/...`, `/bilibili/user/video/<uid>` or `/telegram/channel/<name>` is a feed of that page. This extension subscribes to RSSHub routes, or to the address of any RSS 2.0, RSS 1.0, Atom 1.0 or JSON Feed 1.0/1.1 feed, refreshes them on the hub in the background, and shows them in Persona and to the assistant. In Persona it is called 「RSSHub 网站订阅」, and its navigation page 「网站订阅」; the pages and settings speak plain Chinese and call a route an 「RSSHub 短地址」 and the instance the 「RSSHub 服务」.
 
 | Extension point | Contribution | Behavior |
 | --- | --- | --- |
@@ -13,16 +13,18 @@
 
 [Manifest and settings schema](../../extensions/rsshub/persona-extension.json)
 
-| Setting | Meaning |
-| --- | --- |
-| `instance_url` | The RSSHub instance, `https://rsshub.app` by default. A self-hosted instance is an `https://` address, which may include a path prefix (`https://example.com/rsshub`). An instance on the hub machine itself may use plain `http` with `127.0.0.1` (any `127.x`), `localhost` or `[::1]`, with a port. Any other `http` address, user info, query or fragment is refused, and the connector's status says why. |
-| `access_auth` | How the access key is sent: `key` (default) adds `?key=<access key>`; `code` adds RSSHub's `?code=<md5(route path + access key)>`, so the key itself never appears in a URL. |
-| `refresh_minutes` | How often every subscription is refreshed in the background: 5 to 1440, default 30. |
-| `prefer_json` | Ask the instance for JSON Feed (`?format=json`) instead of its default RSS. Either format is read; the format is recognized from the content, not from the `Content-Type`. |
+| Setting | Title in the form | Meaning |
+| --- | --- | --- |
+| `instance_url` | RSSHub 服务地址 | The RSSHub instance, `https://rsshub.app` by default. A self-hosted instance is an `https://` address, which may include a path prefix (`https://example.com/rsshub`). An instance on the hub machine itself may use plain `http` with `127.0.0.1` (any `127.x`), `localhost` or `[::1]`, with a port. Any other `http` address, user info, query or fragment is refused, and the connector's status says why. |
+| `access_auth` | 高级：访问密钥的带法 (choices 直接带上密钥（默认） / 只带校验码，不露出密钥) | How the access key is sent: `key` (default) adds `?key=<access key>`; `code` adds RSSHub's `?code=<md5(route path + access key)>`, so the key itself never appears in a URL. |
+| `refresh_minutes` | 多久自动检查一次（分钟） | How often every subscription is refreshed in the background: 5 to 1440, default 30. |
+| `prefer_json` | 高级：让 RSSHub 换一种格式发内容 | Ask the instance for JSON Feed (`?format=json`) instead of its default RSS. Either format is read; the format is recognized from the content, not from the `Content-Type`. |
 
-| Secret | Meaning |
-| --- | --- |
-| `access_key` | Optional. The `ACCESS_KEY` of a self-hosted instance. It is added only to routes of the configured instance, never to a feed address of another host, and it is removed from errors, kept state and every link RSSHub echoes back. |
+The two settings almost nobody needs (`access_auth`, `prefer_json`) start their titles with `高级：`: the hub's settings form has no keyword to fold or group settings (see `scripts/config_form.py`), so the title says it.
+
+| Secret | Title in the form | Meaning |
+| --- | --- | --- |
+| `access_key` | 访问密钥 | Optional. The `ACCESS_KEY` of a self-hosted instance. It is added only to routes of the configured instance, never to a feed address of another host, and it is removed from errors, kept state and every link RSSHub echoes back. |
 
 The public `rsshub.app` is meant for trying RSSHub out: it may refuse some clients and networks with `403` ("we will gradually restrict access to rsshub.app for some feed readers"). The error is shown with the instance's own words. For daily use, run your own instance ([deployment guide](https://docs.rsshub.app/deploy/)) and put its address here.
 
@@ -49,13 +51,15 @@ Subscriptions, entries and read state live in the extension's data directory (`f
 
 ## The page
 
-The top shows the unread count, the number of subscriptions and the instance's state (connected, failing, or an unusable address), with **Refresh all**, **Mark all as read** and **Check instance**. Below are the latest entries, which can be limited to unread ones, and one section per tag (subscriptions without a tag are under 未分类) with each feed's unread count or a failure badge.
+The top says in two sentences what the page is for, then shows the number of subscriptions, the unread count, the last check (with the refresh interval) and the RSSHub instance's state (能连上, 连不上, 地址填错了 or 还没用到; with nothing subscribed and nothing read through RSSHub yet, the instance has not been asked, and the stat adds 加订阅时才会去连它，现在什么都不用做). Sources whose last check failed are named there, and an unusable instance address or a failing instance is explained. The buttons are **现在检查更新** (refresh all, once something is subscribed), **全部标为已读** (when something is unread) and **试试能不能连上 RSSHub** (check the instance). Below are the latest entries (最新文章), which can be limited to unread ones, and one section per tag (我订阅的 · <tag>; subscriptions without a tag are under 未分类) with each feed's unread count or an 出错 badge.
 
-- A feed shows its source, tag and last refresh, a link to its site, **Refresh**, **Mark all as read** and **Unsubscribe** (asked first).
-- An entry shows its source, author, time, text and a link to the original (`https` only; other links are shown as text). Opening it marks it read; **Mark as unread** undoes that.
-- The form at the bottom previews a route without subscribing (up to 15 entries) or subscribes to it, with an optional tag and title. A subscription is made only when the source could be read once.
+- With nothing subscribed, an empty state says what to paste and offers one example to preview (`/github/trending/daily/go/en`).
+- A feed shows its address, tag, unread count and last check, a link to its site, **现在检查更新**, **全部标为已读** and **取消订阅** (asked first).
+- An entry shows its source, author, time, text and a link to the original (`https` only; other links are shown as text). Opening it marks it read; **标回未读** undoes that.
+- The form at the bottom (添加订阅) explains the two kinds of address (a site's own RSS address, or an RSSHub route starting with `/`) and links to RSSHub's list of routes. **先看看** previews a source without subscribing (up to 15 entries); **订阅** subscribes to it, with an optional tag and title. A subscription is made only when the source could be read once.
+- Every failure is shown as what happened and what to do (for example a source that is not there, a refusal, a timeout, an unreachable host, a blocked local address, a page that is not a feed or wrong input), with the program's own message after 详细信息 in small print.
 
-Older apps get the same page without the newer components (no stat grid, segmented control or empty state).
+Older apps get the same page without the newer components (no stat grid, segmented control or empty state; the empty state's example is a button).
 
 ## Assistant tools
 

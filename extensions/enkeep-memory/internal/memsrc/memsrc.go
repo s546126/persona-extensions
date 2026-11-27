@@ -18,9 +18,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/curate"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/export"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/profile"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/recall"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
@@ -87,17 +87,27 @@ type item struct {
 	text     string // a curated entry's line as answered, when not its recall line (standing, or with its quote)
 }
 
-// Extra is an entry made elsewhere in the extension (the periodic overview's patterns, internal/overview), answered
-// beside the curated ones in the same order: Last is its newest evidence day.
+// Extra is an entry made elsewhere in the extension (the periodic overview's L1 principles and contracts,
+// internal/overview), answered beside the curated ones in the same order: Last is its newest evidence day.
 type Extra struct {
 	Entry Entry
 	Last  string
-	// Score (0–100, as entry.Score) and Kind (entry.KindRules or KindUnderstanding) make it a candidate for the
-	// standing set; Kind "" never stands. Entry.Standing is decided here, not by the maker.
+	// Score and Kind (entry.KindRules or KindUnderstanding) make it a candidate for the standing set; Kind "" never
+	// stands. Entry.Standing is decided here, not by the maker.
 	Score int
 	Kind  string
 	// Evidence are the curated entries it rests on: a pattern resting mostly on template lines never stands.
 	Evidence []string
+	// L1 metadata for three-bucket standing selection (unified design §2.1).
+	L1Kind     string   // "contract" or "principle"
+	Hard       bool     // contract: hard rule
+	Polarity   string   // contract: act / check / communicate / route
+	Dimension  string   // principle: decision / thinking / reaction / attention / communication
+	Group      string   // normalized "<facet>:<rule_type>" (empty for generic types)
+	Quotes     int      // distinct normalised user quotes (tie-breaker)
+	Body       string   // core statement without prefix/suffix (clipped first when over budget)
+	Suffix     string   // "（例外：…）" or "（两端：…）" (never clipped)
+	CoveredIDs []string // L0 entries covered by this L1 contract (used to retire absorbed hot-slot entries)
 }
 
 func (it item) id() string {
@@ -251,18 +261,54 @@ func Status(e *entry.Entry) string {
 	return "candidate"
 }
 
-// Rank orders entries by how much they matter (0.2.0-beta.52: entry.Score, 0 to 891; pinned 1000), not by how new they
-// are: recall and hand-offs take the highest first. A weak relation triple ranks last. The standing set has its own
-// ranks above every other (Resident).
+// Rank orders entries by how much they matter (0 to 940; pinned 1000), not by how new they are:
+//   - Active ops_runbook entries keep high on-demand recall rank (840–940) modulated by entry.OpsRunbookWeight
+//     (45d demote 0.5x, 60d dormant 0.25x) so operational rules stay out of 4 KB standing yet recall reliably when
+//     relevant and naturally decay when stale (v0.4.0 §1.3/§1.7).
+//   - Active genuinely user-owned entries keep rank >= 820; entity-anchored local rules >= 750.
+//   - Weak relation triples rank last (<= 9).
+//   - Standing entries receive their own ranks (995..989 down) in workStandingSet.
 func Rank(e *entry.Entry) int {
 	if e.Pinned {
 		return 1000
 	}
+	if entry.IsOpsRunbookEntry(e) && Status(e) == "active" {
+		base := 840 + min(100, entry.Score(e))
+		today := nowFn().Format("2006-01-02")
+		w := entry.OpsRunbookWeight(e, today)
+		return max(0, min(940, int(float64(base)*w)))
+	}
 	r := entry.Score(e) * 9
 	if IsWeakRelation(e) {
 		r = min(r, 9)
+	} else if IsUserOwned(e) && Status(e) == "active" && entry.KindOf(e) != "" {
+		r = max(r, 820)
+	} else if entityAnchoredRule(e) && Status(e) == "active" {
+		r = max(r, 750)
 	}
 	return max(0, min(891, r))
+}
+
+// entityAnchoredRule says whether e is a rule or decision explicitly anchored to a person, project, machine or tool
+// (non-global scope, impact.object, or object), so it stays out of global standing while ranking high in recall.
+func entityAnchoredRule(e *entry.Entry) bool {
+	if e == nil {
+		return false
+	}
+	switch e.Facet {
+	case entry.Interaction, entry.Tools, entry.Judgement, entry.Workflow:
+	default:
+		return false
+	}
+	if strings.TrimSpace(e.Impact.Object) != "" || strings.TrimSpace(e.Object) != "" {
+		return true
+	}
+	for _, sc := range e.Scopes {
+		if sc.Kind != entry.ScopeGlobal && strings.TrimSpace(sc.Name) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // LegacyRank is Rank before 0.2.0-beta.52 (facet, grain and count, ties broken by the newest), kept for the hard
@@ -352,27 +398,42 @@ func Tags(st *store.State, e *entry.Entry) (cats []string, space string, backfil
 	return cats, space, true
 }
 
+// backfill classifies untagged legacy entries strictly by Payload-First (v0.4.0 §1.6):
+//   - NEVER scans raw Evidence quotes (ev.Quote), only the entry's own PayloadTexts().
+//   - Work-methodology facets (interaction, tools, workflow, judgement) do NOT inherit OriginSpace or member
+//     conversation-topic sensitivity unless their own payload discloses personal privacy or was explicitly tagged ByUser.
 func backfill(st *store.State, e *entry.Entry, depth int) ([]string, string) {
-	cats, space := e.Cats(), e.OriginSpace
+	workMethod := entry.IsWorkMethodFacet(e.Facet)
+	var cats []string
+	space := ""
+	if !workMethod {
+		space = e.OriginSpace
+	}
 	add := func(list []string) {
 		for _, c := range list {
-			if !slices.Contains(cats, c) && !slices.Contains(e.CatsRemoved, c) {
+			if c != "" && !slices.Contains(cats, c) && !slices.Contains(e.CatsRemoved, c) {
 				cats = append(cats, c)
 			}
 		}
 	}
-	if !e.Tagged {
-		texts := []string{e.Text, e.Object}
-		for _, ev := range e.Evidence {
-			texts = append(texts, ev.Quote)
+	// Preserve explicit user-authored categories and Payload-First supported categories.
+	ownPayload := entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
+	add(ownPayload)
+	for _, c := range e.Categories {
+		cn := entry.CategoryOf(c.Name)
+		if cn == "" {
+			continue
 		}
-		words, _ := curate.CategoriesOf("", texts...)
-		if e.Sensitive != "" || len(e.Categories) > 0 { // a model's label: the money words add nothing on their own
-			words = slices.DeleteFunc(words, func(c string) bool { return c == entry.CatFinance })
+		if c.By == entry.ByUser || (!workMethod && (c.By == entry.BySpaceDefault || slices.Contains(ownPayload, cn))) {
+			add([]string{cn})
 		}
-		add(words)
 	}
-	if depth < 2 {
+	if !workMethod {
+		if cn := entry.CategoryOf(e.Sensitive); cn != "" && slices.Contains(ownPayload, cn) {
+			add([]string{cn})
+		}
+	}
+	if !workMethod && depth < 2 {
 		for _, id := range e.Members {
 			m := st.Entries[id]
 			if m == nil {
@@ -391,16 +452,19 @@ func backfill(st *store.State, e *entry.Entry, depth int) ([]string, string) {
 			}
 		}
 	}
-	for _, c := range entry.SpaceDefaults(space) {
-		add([]string{c})
+	if !workMethod {
+		for _, c := range entry.SpaceDefaults(space) {
+			add([]string{c})
+		}
 	}
 	return cats, space
 }
 
 // Subjects are the names whose mention brings the entry in: the person of a card, its object, the person or project
-// its impact is for, its scopes' names.
+// its impact is for, its scopes' names, skeleton endpoints, occasion words, and 1-hop skeleton neighbors (up to MaxSubjects).
 func Subjects(st *store.State, e *entry.Entry) []string {
 	var out []string
+	var entityNames []string
 	add := func(s string) {
 		s = strings.TrimSpace(s)
 		if s == "" || len(out) >= MaxSubjects || slices.Contains(out, s) {
@@ -408,22 +472,148 @@ func Subjects(st *store.State, e *entry.Entry) []string {
 		}
 		out = append(out, clip(s, MaxSubject))
 	}
-	if k := st.Contacts[e.Person]; e.Person != "" && k != nil && k.Manual != "removed" {
-		add(k.Name)
+	addEntity := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if strings.HasPrefix(s, "person:") && st != nil {
+			if k := st.Contacts[s]; k != nil && k.Manual != "removed" && k.Name != "" {
+				s = k.Name
+			} else {
+				s = strings.TrimPrefix(s, "person:")
+			}
+		} else {
+			for _, p := range []string{"project:", "system:", "object:"} {
+				s = strings.TrimPrefix(s, p)
+			}
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		add(s)
+		if !slices.Contains(entityNames, s) {
+			entityNames = append(entityNames, s)
+		}
 	}
-	add(e.Object)
+	if st != nil && e.Person != "" {
+		if k := st.Contacts[e.Person]; k != nil && k.Manual != "removed" {
+			addEntity(k.Name)
+		}
+	}
+	addEntity(e.Object)
 	// The person or project a rule is for (impact.object, design l0-leverage §13: rules hang on entities): mentioning
 	// them brings the rule in. A kind of task named there is a short phrase too and does no harm.
 	if o := strings.TrimSpace(e.Impact.Object); utf8.RuneCountInString(o) <= 24 {
-		add(o)
+		addEntity(o)
 	}
 	for _, sc := range e.Scopes {
 		if sc.Kind != entry.ScopeGlobal {
-			add(sc.Name)
+			addEntity(sc.Name)
+		}
+	}
+	if e.Facet == entry.World && entry.IsSkeletonPredicate(e.Predicate) {
+		addEntity(e.Subject)
+		addEntity(e.Target)
+	}
+	// The occasion a rule is for (0.2.6): decisions_query matches its tag's words as substrings of the text, the
+	// subjects, the facet and the categories, so "派活" or "汇报" in a tag brings the rules for that moment in.
+	if entry.KindOf(e) == entry.KindRules || e.Facet == entry.Workflow {
+		for _, w := range momentWords[e.Impact.Moment] {
+			add(w)
+		}
+		if g := GroupOf(st, e); g != "" && !genericTypes[e.Type] {
+			add(strings.TrimPrefix(g, string(e.Facet)+":"))
+		}
+	}
+	// Enrich user-owned rules and ops_runbook entries with concrete tool/host/command identifiers and occasion cues
+	// (v0.4.0 §1.7) so non-standing ops runbooks stay 100% reachable via decisions_query(tag) and contextual recall.
+	if (IsUserOwned(e) || entry.IsOpsRunbookEntry(e)) && (entry.KindOf(e) != "" || e.Facet == entry.Tools) && len(out) < MaxSubjects {
+		enrichUserOwnedSubjects(recall.Head(e)+" "+e.Exception+" "+e.Object+" "+e.Pitfall+" "+e.Fix, add)
+	}
+	// 1-hop skeleton neighbors (unified design §2.2): for entity-anchored rules and ops_runbooks, attach up to 4
+	// structural 1-hop neighbor names from the entity graph so querying a related project/person/repo surfaces the rule.
+	if st != nil && st.Graph != nil && len(entityNames) > 0 && len(out) < MaxSubjects &&
+		(entityAnchoredRule(e) || entry.IsOpsRunbookEntry(e) || (e.Facet == entry.World && entry.IsSkeletonPredicate(e.Predicate))) {
+		for _, nb := range recall.SkeletonNeighbors(st, entityNames, 4) {
+			add(nb)
 		}
 	}
 	return out
 }
+
+var (
+	uoIdentRe   = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9_.-]{2,}`)
+	uoIdentStop = map[string]bool{
+		"the": true, "and": true, "for": true, "not": true, "all": true, "true": true, "false": true,
+		"ttl": true, "api": true, "cli": true, "url": true, "pdf": true, "json": true, "md": true,
+	}
+	uoOccasions = []struct {
+		cues []string
+		tags []string
+	}{
+		{cues: []string{"派活", "派发", "派 Agent", "安排 Agent", "主管", "task_plan", "agent_start", "agent_send", "conversation_send"}, tags: []string{"派活", "dispatch"}},
+		{cues: []string{"汇报", "交付", "结论", "摘要", "进展", "耗时", "时间戳"}, tags: []string{"汇报", "report"}},
+		{cues: []string{"提问", "追问", "请示", "确认", "待定", "选项", "大白话", "授权卡", "卡片"}, tags: []string{"提问", "ask"}},
+		{cues: []string{"开工", "执行", "plan mode", "大纲", "框架", "方案"}, tags: []string{"开工", "task"}},
+		{cues: []string{"验收", "核实", "核对", "源头", "门禁", "测试", "编译"}, tags: []string{"验收", "门禁"}},
+		{cues: []string{"排期", "估时间", "工期", "估计交付"}, tags: []string{"排期", "估时间"}},
+		{cues: []string{"密钥", "凭据", "token", "1Password", "op CLI", "secret_env"}, tags: []string{"密钥", "凭据"}},
+		{cues: []string{"配置", "升级", "回滚", "镜像", "备份"}, tags: []string{"配置", "升级"}},
+		{cues: []string{"待办", "todo_complete", "STATE.md"}, tags: []string{"待办"}},
+		{cues: []string{"飞书", "云文档", "多维表格"}, tags: []string{"飞书"}},
+		{cues: []string{"评审", "质疑", "分歧", "独立判断"}, tags: []string{"评审", "review"}},
+	}
+)
+
+func enrichUserOwnedSubjects(body string, add func(string)) {
+	for _, m := range uoIdentRe.FindAllString(body, -1) {
+		m = strings.Trim(m, ".-_")
+		if len(m) < 3 {
+			continue
+		}
+		low := strings.ToLower(m)
+		if uoIdentStop[low] {
+			continue
+		}
+		hasLetter := false
+		for i := 0; i < len(low); i++ {
+			if low[i] >= 'a' && low[i] <= 'z' {
+				hasLetter = true
+				break
+			}
+		}
+		if hasLetter {
+			add(m)
+		}
+	}
+	lowBody := strings.ToLower(body)
+	for _, r := range uoOccasions {
+		for _, cue := range r.cues {
+			if strings.Contains(lowBody, strings.ToLower(cue)) {
+				for _, t := range r.tags {
+					add(t)
+				}
+				break
+			}
+		}
+	}
+}
+
+// momentWords are the words a query for an occasion would use, in both languages.
+var momentWords = map[string][]string{
+	"ask_user":     {"提问", "问用户", "ask"},
+	"report":       {"汇报", "report"},
+	"dispatch":     {"派活", "dispatch"},
+	"task_start":   {"开工", "task"},
+	"reply_person": {"回复", "reply"},
+	"use_object":   {"工具", "tool"},
+	"review":       {"评审", "review"},
+}
+
+// genericTypes name no occasion: a correction can be of anything.
+var genericTypes = map[string]bool{"": true, "correction": true, "preference": true, "纠正": true}
 
 // Counts summarises a source's pool: entries, active, standing, and Backfilled: read before the 0.2.0-beta.40 tagging
 // rules and tagged by them now (Tags).
@@ -556,9 +746,9 @@ func PageWith(st *store.State, sum *profile.Summary, extras []Extra, p Params) (
 	return res, n, nil
 }
 
-// profileItems converts a profile summary into memory.entries items. General overview and six-facet summaries carry no
-// sensitive categories and are standing; sensitive category summaries carry their exact categories and origin_space and
-// are never standing so the hub's scene filter gates them.
+// profileItems converts a profile summary into memory.entries items. Profile summaries (general overview, six-facet
+// summaries, and sensitive category summaries) are never standing (unified design §2.1): they stay in the recallable
+// pool for on-demand lookup and UI views, with sensitive summaries carrying their exact categories and origin_space.
 func profileItems(sum *profile.Summary) []item {
 	if sum == nil || sum.SourceCount == 0 {
 		return nil
@@ -730,10 +920,16 @@ var standingCache struct {
 func standingSet(st *store.State, extras []Extra, room int) map[string]standing {
 	var kb strings.Builder
 	kb.WriteString(strconv.Itoa(room) + "|")
+	kb.WriteString(nowFn().Format("2006-01-02") + "|")
 	for _, x := range extras {
 		kb.WriteString(x.Entry.ID)
 		kb.WriteString(strconv.Itoa(x.Score))
+		kb.WriteString(x.L1Kind)
+		kb.WriteString(x.Polarity)
+		kb.WriteString(x.Dimension)
 		kb.WriteString(x.Entry.Text)
+		kb.WriteString(x.Body)
+		kb.WriteString(x.Suffix)
 	}
 	key := strconv.Itoa(len(st.Entries)) + "|" + kb.String()
 	standingCache.Lock()
@@ -755,25 +951,150 @@ func ResidentMostFor(room int) int {
 }
 
 func workStandingSet(st *store.State, extras []Extra, room int) map[string]standing {
-	var cands []Candidate
+	var l1Cands, hotCands, coldCands []Candidate
 	tpl := entry.TemplateQuotes(st.Entries)
-	for _, e := range st.Entries {
-		if c, ok := CuratedCandidate(st, e, tpl); ok && idRe.MatchString(e.ID) {
-			cands = append(cands, c)
-		}
-	}
+	now := nowFn()
+
+	// Collect L1 candidates across the three main sections (Profile, Principle, Contract) and track which L0 entries
+	// are absorbed by a live L1 contract.
+	absorbed := map[string]bool{}
+	var contractTexts []string
+	hasMainProfile, hasMainPrinciple, hasMainContract := false, false, false
+	l1LatestDay := ""
 	for _, x := range extras {
 		e := x.Entry
 		if x.Kind == "" || len(e.Categories) > 0 || e.OriginSpace != "" || st.Entries[e.ID] != nil || !idRe.MatchString(e.ID) ||
 			entry.TemplateBacked(st.Entries, x.Evidence, tpl) {
 			continue
 		}
-		cands = append(cands, Candidate{ID: e.ID, Text: clipBytes(strings.TrimSpace(e.Text), residentTextMost), Kind: x.Kind, Score: x.Score,
-			Days: len(x.Evidence), Last: x.Last, Pattern: strings.HasPrefix(e.ID, "ov:pattern:")})
+		if e.Facet == string(entry.Tools) {
+			continue // Class C ops_runbook never enters global 4 KB standing
+		}
+		if x.Last > l1LatestDay {
+			l1LatestDay = x.Last
+		}
+		bucket := BucketPrinciple
+		maxBytes := PrincipleTextMost
+		switch x.L1Kind {
+		case BucketProfile:
+			bucket = BucketProfile
+			maxBytes = ProfileTextMost
+		case BucketContract:
+			bucket = BucketContract
+			maxBytes = ContractTextMost
+		case BucketPrinciple:
+			bucket = BucketPrinciple
+			maxBytes = PrincipleTextMost
+		default:
+			if x.Kind == entry.KindRules {
+				bucket = BucketContract
+				maxBytes = ContractTextMost
+			}
+		}
+		prefix := StandingPrefix(bucket, x.Hard, x.Polarity)
+		text := ""
+		if strings.TrimSpace(x.Body) != "" {
+			text = FormatResidentLine(prefix+strings.TrimSpace(x.Body), x.Suffix, maxBytes)
+		} else {
+			text = FormatResidentLine(prefix+strings.TrimSpace(e.Text), "", maxBytes)
+		}
+		if text == "" {
+			continue
+		}
+		quotes := x.Quotes
+		if quotes <= 0 {
+			quotes = len(x.Evidence)
+		}
+		l1Cands = append(l1Cands, Candidate{
+			ID:        e.ID,
+			Text:      text,
+			Kind:      x.Kind,
+			Bucket:    bucket,
+			Facet:     e.Facet,
+			L1:        true,
+			Hard:      x.Hard,
+			Score:     x.Score,
+			Days:      quotes,
+			Last:      x.Last,
+			Polarity:  x.Polarity,
+			Dimension: x.Dimension,
+			Group:     x.Group,
+		})
+		switch bucket {
+		case BucketProfile:
+			hasMainProfile = true
+		case BucketContract:
+			hasMainContract = true
+			for _, id := range x.Evidence {
+				absorbed[id] = true
+			}
+			for _, id := range x.CoveredIDs {
+				absorbed[id] = true
+			}
+			contractTexts = append(contractTexts, text)
+		default:
+			hasMainPrinciple = true
+		}
 	}
+
+	// Collect Bucket 0 (Hot Slot: genuinely user-owned Pinned + active 7d non-ops Fast-Path) and cold-start L0
+	// fallback candidates per section (0 reliance on S6 assistant notes, 0 ops_runbook, 0 ephemeral, 0 sensitive).
+	for _, e := range st.Entries {
+		if !idRe.MatchString(e.ID) {
+			continue
+		}
+		hc, ok := HotSlotCandidate(st, e, tpl, now)
+		if !ok && hasMainContract && l1LatestDay != "" {
+			hc, ok = UnabsorbedRuleHotCandidate(st, e, tpl, l1LatestDay, now)
+		}
+		if ok {
+			if !hc.Pinned {
+				if absorbed[e.ID] || slices.ContainsFunc(contractTexts, func(t string) bool { return norm.Jaccard(t, hc.Text) >= sameRule }) {
+					continue // absorbed by L1 contract
+				}
+			}
+			hotCands = append(hotCands, hc)
+			continue
+		}
+		// Cold-start L0 fallback (v0.4.0 §1.7): T0 SelfReport/FromOnboarding or high-confidence T1 stable entries
+		// (Count >= 2 for Persona/Interaction, or entry.ColdStartEligible) for any section lacking L1.
+		coldOK := entry.ColdStartEligible(e) ||
+			(e.Facet == entry.Persona && (entry.IsTrueUserOwned(e) || (e.Status == entry.Stable && e.Count >= 2))) ||
+			(e.Facet == entry.Interaction && (entry.IsTrueUserOwned(e) || (e.Status == entry.Stable && e.Count >= 2)) && !entry.IsOpsRunbookEntry(e))
+		if !coldOK {
+			continue
+		}
+		if c, ok := CuratedCandidate(st, e, tpl); ok {
+			coldCands = append(coldCands, c)
+		}
+	}
+
+	cands := make([]Candidate, 0, len(hotCands)+len(l1Cands)+len(coldCands))
+	cands = append(cands, hotCands...)
+	cands = append(cands, l1Cands...)
+	for _, c := range coldCands {
+		if c.Bucket == BucketProfile && hasMainProfile {
+			continue
+		}
+		if c.Bucket == BucketPrinciple && hasMainPrinciple {
+			continue
+		}
+		if c.Bucket == BucketContract && hasMainContract {
+			continue
+		}
+		cands = append(cands, c)
+	}
+
 	out := map[string]standing{}
-	for i, c := range ResidentWithin(cands, room, ResidentMostFor(room)) {
-		out[c.ID] = standing{rank: rankStand - i, text: c.Text}
+	hotIdx, standIdx := 0, 0
+	for _, c := range ResidentWithin(cands, room, ResidentMostFor(room)) {
+		if c.Bucket == BucketHot {
+			out[c.ID] = standing{rank: rankHot - hotIdx, text: c.Text}
+			hotIdx++
+		} else {
+			out[c.ID] = standing{rank: rankStand - standIdx, text: c.Text}
+			standIdx++
+		}
 	}
 	return out
 }

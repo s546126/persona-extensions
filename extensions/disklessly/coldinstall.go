@@ -174,7 +174,7 @@ func copyInstall(ctx context.Context, streamer StreamRunner, src, dst *Machine, 
 		}
 		return o, errors.New(msg)
 	case serr != nil:
-		return o, fmt.Errorf("读取 %s 上的 CLI 失败：%w", machineLabel(src), serr)
+		return o, fmt.Errorf("读取 %s 上的配套小工具没有成功：%w", machineLabel(src), serr)
 	case terr != nil:
 		return o, terr
 	}
@@ -200,7 +200,7 @@ func installSourceFor(st *State, target *Machine) installOffer {
 		plat = cmp.Or(tcat.Platform, plat)
 	}
 	if plat == "" {
-		return installOffer{reason: "还不知道这台电脑的系统和架构，先刷新一次"}
+		return installOffer{reason: "还不知道这台电脑是什么系统，检查一次才知道"}
 	}
 	var notContained string
 	for _, m := range st.Machines {
@@ -221,7 +221,7 @@ func installSourceFor(st *State, target *Machine) installOffer {
 		}
 		if ok, why := cat.CLI.selfContained(); !ok {
 			if notContained == "" {
-				notContained = machineLabel(m) + " 有可用的 CLI，但" + why + "，不能复制"
+				notContained = "「" + machineLabel(m) + "」上的配套小工具能用，但" + why
 			}
 			continue
 		}
@@ -230,10 +230,29 @@ func installSourceFor(st *State, target *Machine) installOffer {
 	if notContained != "" {
 		return installOffer{reason: notContained, platform: plat}
 	}
-	return installOffer{reason: "没有同为 " + plat + " 的电脑装有可用的 disklessly CLI，无法复制安装", platform: plat}
+	label := platformLabel(plat)
+	sep := " "
+	if strings.HasSuffix(label, "）") {
+		sep = ""
+	}
+	return installOffer{reason: "别的 " + label + sep + "上都没有能用的配套小工具", platform: plat}
+}
+
+// installOfferReason is why no copy is offered, as a sentence of its own: the reason says only
+// what stands in the way, and this says once that copying is not possible.
+func installOfferReason(o installOffer) string {
+	return "也不能从别的电脑复制过来：" + strings.TrimSuffix(o.reason, "。") + "。"
+}
+
+// offeredCLI names the CLI a copy-install brings: disklessly and its version, when known.
+func offeredCLI(o installOffer) string {
+	if v := shortVersion(o.cli.Version); v != "" {
+		return "disklessly " + v
+	}
+	return "disklessly（版本不清楚）"
 }
 
 func installConfirm(o installOffer, target *Machine) string {
-	return fmt.Sprintf("从「%s」把 disklessly %s（%s）复制安装到「%s」？会装到 %s 的 ~/.local/opt/%s，先运行一次确认可用，再把 ~/.local/bin/disklessly 指向它；原来的版本保留在原处。不需要 root，也不从网络下载。",
-		machineLabel(o.src), cmp.Or(shortVersion(o.cli.Version), "（版本未知）"), o.platform, machineLabel(target), machineLabel(target), path.Base(o.cli.Home))
+	return fmt.Sprintf("从「%s」把配套小工具 %s 复制到「%s」？两台都是 %s。会放到 %s 的 ~/.local/opt/%s，先运行一次确认能用，再把 ~/.local/bin/disklessly 指向它；原来的版本留在原处。不需要管理员权限，也不从网上下载。",
+		machineLabel(o.src), offeredCLI(o), machineLabel(target), platformLabel(o.platform), machineLabel(target), path.Base(o.cli.Home))
 }

@@ -1,13 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +76,8 @@ func TestPostTaskQueuesAReadOnlyTaskForTheTodo(t *testing.T) {
 	}
 	task := taskOf(t, ans)
 	if task["state"] != StateQueued || task["permission_profile"] != PermissionReadonly || task["todo_id"] != "todo_1" ||
-		task["priority"] != PriorityP2 || task["repo"] != "/srv/code/app" || task["acceptance"] != "go test ./..." || task["agent_type"] != AgentClaude {
+		task["priority"] != PriorityP2 || task["repo"] != "/srv/code/app" || task["ref"] != "HEAD" ||
+		task["acceptance"] != "go test ./..." || task["agent_type"] != AgentClaude {
 		t.Fatalf("task: %v", task)
 	}
 	stored, err := a.queue.GetTask(task["id"].(string))
@@ -108,6 +115,398 @@ func TestPostTaskCanChooseAnEngine(t *testing.T) {
 	if replay.Status != http.StatusOK || replay.Body["created"] != false || taskOf(t, replay)["agent_type"] != AgentCodex ||
 		taskOf(t, replay)["id"] != taskOf(t, first)["id"] {
 		t.Fatalf("engine-changing replay: %d %v", replay.Status, replay.Body)
+	}
+}
+
+func TestPostTaskPreservesSessionOverridesAfterReloadAndReplay(t *testing.T) {
+	a := newTestApp(t)
+	body := strings.TrimSuffix(validTask, "}") +
+		`,"agent_type":"agy","model":"  provider/task-model  ","launcher":" machine-1=local\nmachine-2=remote ","idempotency_key":"overrides"}`
+	first := call(t, a, "POST", "/tasks", body)
+	if first.Status != http.StatusCreated || first.Body["created"] != true {
+		t.Fatalf("create: %d %v", first.Status, first.Body)
+	}
+	id := taskOf(t, first)["id"].(string)
+	check := func(ans apiAnswer) {
+		t.Helper()
+		task := taskOf(t, ans)
+		if task["id"] != id || task["model"] != "provider/task-model" || task["launcher"] != "machine-1=local\nmachine-2=remote" {
+			t.Fatalf("task after requesting session overrides: %v", task)
+		}
+	}
+	check(first)
+
+	reloaded, err := NewQueue(filepath.Dir(a.queue.dataFile), a.queue.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.queue = reloaded
+	detail := call(t, a, "GET", "/tasks/"+id, "")
+	if detail.Status != http.StatusOK {
+		t.Fatalf("read after reload: %d %v", detail.Status, detail.Body)
+	}
+	check(detail)
+
+	body = strings.TrimSuffix(validTask, "}") + `,"model":"other-model","launcher":"other-launcher","idempotency_key":"overrides"}`
+	replay := call(t, a, "POST", "/tasks", body)
+	if replay.Status != http.StatusOK || replay.Body["created"] != false {
+		t.Fatalf("replay: %d %v", replay.Status, replay.Body)
+	}
+	check(replay)
+}
+
+func TestPostTaskValidatesSessionOverrides(t *testing.T) {
+	maxModel := strings.Repeat("é", 64)
+	maxLauncher := strings.Repeat("é", 256)
+	for _, tc := range []struct {
+		name, field, value, want string
+		reject                   bool
+	}{
+		{"empty model", "model", "  ", "", false},
+		{"empty launcher", "launcher", "  ", "", false},
+		{"model byte limit", "model", " " + maxModel + " ", maxModel, false},
+		{"launcher byte limit", "launcher", " " + maxLauncher + " ", maxLauncher, false},
+		{"single launcher with spaces", "launcher", "  local launcher  ", "local launcher", false},
+		{"launcher map separators", "launcher", " default, m1 = one; m2=two\nm3=three ", "default, m1 = one; m2=two\nm3=three", false},
+		{"model space", "model", "vendor/bad model", "", true},
+		{"model unicode space", "model", "vendor/bad\u00a0model", "", true},
+		{"model tab", "model", "vendor/bad\tmodel", "", true},
+		{"model leading control", "model", "\tmodel", "", true},
+		{"model newline", "model", "vendor/bad\nmodel", "", true},
+		{"model NUL", "model", "bad\x00model", "", true},
+		{"model control", "model", "bad\x1bmodel", "", true},
+		{"model too long", "model", maxModel + "a", "", true},
+		{"launcher NUL", "launcher", "bad\x00launcher", "", true},
+		{"launcher tab", "launcher", "m1=bad\tlauncher", "", true},
+		{"launcher trailing control", "launcher", "launcher\t", "", true},
+		{"launcher carriage return", "launcher", "m1=one\r\nm2=two", "", true},
+		{"launcher DEL", "launcher", "bad\x7flauncher", "", true},
+		{"launcher newline outside a map", "launcher", "bad\nlauncher", "", true},
+		{"launcher too long", "launcher", maxLauncher + "a", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t)
+			value, err := json.Marshal(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := strings.TrimSuffix(validTask, "}") + `,"` + tc.field + `":` + string(value) + "}"
+			ans := call(t, a, "POST", "/tasks", body)
+			if tc.reject {
+				if ans.Status != http.StatusBadRequest || ans.Code != "invalid" || !strings.Contains(ans.Error, tc.field) {
+					t.Fatalf("invalid %s: %d %s %s", tc.field, ans.Status, ans.Code, ans.Error)
+				}
+				tasks, err := a.queue.ListTasks(TaskFilter{})
+				if err != nil || len(tasks) != 0 {
+					t.Fatalf("invalid override left %d tasks: %v", len(tasks), err)
+				}
+				return
+			}
+			if ans.Status != http.StatusCreated {
+				t.Fatalf("valid %s: %d %v", tc.field, ans.Status, ans.Body)
+			}
+			got, present := taskOf(t, ans)[tc.field]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("empty %s was exposed as %q", tc.field, got)
+				}
+			} else if got != tc.want {
+				t.Fatalf("%s = %q, want %q", tc.field, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTaskViewPrefersExecutionMetadataToRequestedOverrides(t *testing.T) {
+	task := &Task{Launcher: "requested-launcher", Model: "requested-model"}
+	check := func(wantLauncher, wantModel string) {
+		t.Helper()
+		if got := viewTask(task, promptNone); got.Launcher != wantLauncher || got.Model != wantModel {
+			t.Fatalf("view launcher %q, model %q; want %q, %q", got.Launcher, got.Model, wantLauncher, wantModel)
+		}
+	}
+	check("requested-launcher", "requested-model")
+	task.Reports = []EvidenceReport{{AttemptNo: 1, Launcher: "report-launcher", Model: "report-model"}}
+	check("report-launcher", "report-model")
+	task.Attempts = []Attempt{{AttemptNo: 1, Launcher: "attempt-launcher"}}
+	check("attempt-launcher", "report-model")
+	task.Exec = &Execution{Launcher: "active-launcher", Model: "active-model"}
+	check("active-launcher", "active-model")
+	task.Exec = nil
+	task.Attempts = append(task.Attempts, Attempt{AttemptNo: 2})
+	check("requested-launcher", "requested-model")
+}
+
+func TestPostTaskAcceptsLargePromptsAndBodies(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prompt string
+	}{
+		{name: "256 KiB prompt", prompt: strings.Repeat("x", 256<<10)},
+		{name: "escaped JSON near 512 KiB", prompt: strings.Repeat("\"", (256<<10)-256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t)
+			body, err := json.Marshal(map[string]string{"todo_id": "todo_1", "prompt": tc.prompt, "repo": "/srv/code/app"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ans := call(t, a, "POST", "/tasks", string(body))
+			if ans.Status != http.StatusCreated {
+				t.Fatalf("large task: %d %v", ans.Status, ans.Body)
+			}
+			id := taskOf(t, ans)["id"].(string)
+			if got := taskOf(t, call(t, a, "GET", "/tasks/"+id+"?view=full", ""))["prompt"]; got != tc.prompt {
+				t.Fatal("the prompt was not preserved")
+			}
+		})
+	}
+}
+
+func TestTasksAndEvidencePreserveFullReplyAndExecutionMetadata(t *testing.T) {
+	for _, acceptance := range []string{"printf checked", ""} {
+		t.Run(cmpOr(acceptance, "no acceptance"), func(t *testing.T) {
+			r := newRig(t)
+			r.cfg.Launcher, r.cfg.ModelStandard = " provider ", " requested-model "
+			task := r.enqueue(EnqueueInput{PermissionProfile: PermissionDefault, AcceptanceCommand: acceptance})
+			r.tick()
+			running := r.task(task.ID)
+			if running.Exec == nil {
+				t.Fatal("the task did not start")
+			}
+			e := running.Exec
+			a := newATSApp(r.q)
+			want := map[string]any{"launcher": "provider", "model": "requested-model", "session_id": e.SessionID, "worktree": e.Worktree}
+			assertFields := func(got map[string]any, fields map[string]any) {
+				t.Helper()
+				for key, value := range fields {
+					if got[key] != value {
+						t.Errorf("%s: got %.100v, want %.100v", key, got[key], value)
+					}
+				}
+			}
+			if req := r.hub.created[0]; req.Launcher != "provider" || req.Model != "requested-model" {
+				t.Fatalf("session request: %+v", req)
+			}
+			reload := func() {
+				t.Helper()
+				q, err := NewQueue(filepath.Dir(r.q.dataFile), r.q.Config())
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.q, r.d.q, a = q, q, newATSApp(q)
+			}
+			one := call(t, a, "GET", "/tasks/"+task.ID+"?view=full", "")
+			assertFields(taskOf(t, one), want)
+			assertFields(one.Body["attempts"].([]any)[0].(map[string]any), want)
+			assertFields(call(t, a, "GET", "/tasks/"+task.ID+"/evidence", "").Body, want)
+
+			var acceptanceHead string
+			if acceptance != "" {
+				if err := os.WriteFile(e.Worktree+"/done.txt", []byte("committed\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, e.Worktree, "add", ".")
+				runGit(t, e.Worktree, "commit", "-q", "-m", "work")
+				acceptanceHead = runGit(t, e.Worktree, "rev-parse", "HEAD")
+				if err := os.WriteFile(e.Worktree+"/done.txt", []byte("uncommitted\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			reply := "\n" + strings.Repeat("字", 1600) + "\n完整结尾\n"
+			r.hub.set(e.SessionID, func(s *hubSession) { s.Model = " actual-model " })
+			r.hub.turnEnds(e.SessionID, "u1", reply)
+			r.tick()
+			r.tick()
+			want["model"] = "actual-model"
+			if acceptance != "" {
+				reload()
+				if exec := r.task(task.ID).Exec; exec == nil || exec.FullReply != reply || exec.LastReply != agentSummary(reply) {
+					t.Fatal("acceptance did not retain the complete reply and its separate summary after reload")
+				}
+				assertFields(taskOf(t, call(t, a, "GET", "/tasks/"+task.ID, "")), want)
+				r.waitAccepted(task.ID, 1)
+				r.tick()
+			}
+			if got := r.task(task.ID); got.State != StateSucceeded {
+				t.Fatalf("task did not finish: %s", got.State)
+			}
+			reload()
+			one = call(t, a, "GET", "/tasks/"+task.ID+"?view=full", "")
+			assertFields(taskOf(t, one), want)
+			ev := call(t, a, "GET", "/tasks/"+task.ID+"/evidence", "")
+			assertFields(ev.Body, want)
+			if _, has := ev.Body["last_report"].(map[string]any)["full_reply"]; has {
+				t.Fatal("the compact report carried the full reply")
+			}
+			want["full_reply"], want["base_sha"] = reply, e.BaseSHA
+			want["head_sha"] = e.BaseSHA
+			want["dirty"] = acceptance != ""
+			if acceptance != "" {
+				releasedHead := runGit(t, r.repo, "rev-parse", e.Branch)
+				if parent := runGit(t, r.repo, "rev-parse", releasedHead+"^"); parent != acceptanceHead {
+					t.Fatalf("release commit parent = %s, want %s", parent, acceptanceHead)
+				}
+				want["head_sha"] = releasedHead
+			}
+			assertFields(one.Body["attempts"].([]any)[0].(map[string]any), want)
+			report := call(t, a, "GET", "/tasks/"+task.ID+"/evidence?attempt=1", "").Body["report"].(map[string]any)
+			assertFields(report, want)
+			if summary, ok := report["summary"].(string); !ok || summary == reply || len([]rune(summary)) > 1201 {
+				t.Fatal("the report should keep a bounded summary separately from the complete reply")
+			}
+			copy := r.task(task.ID)
+			copy.Attempts[0].FullReply, copy.Reports[0].FullReply = "changed", "changed"
+			assertFields(call(t, a, "GET", "/tasks/"+task.ID+"?view=full", "").Body["attempts"].([]any)[0].(map[string]any), want)
+			assertFields(call(t, a, "GET", "/tasks/"+task.ID+"/evidence?attempt=1", "").Body["report"].(map[string]any), want)
+		})
+	}
+}
+
+func assertDirtyJSON(t *testing.T, raw []byte, want *bool) {
+	t.Helper()
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		t.Fatalf("expected a JSON object: %v", err)
+	}
+	value, present := fields["dirty"]
+	if want == nil {
+		if present || bytes.Contains(raw, []byte(`"dirty":`)) {
+			t.Errorf("uninspected worktree has a dirty field: %v", value)
+		}
+		return
+	}
+	wantField := `"dirty":` + strconv.FormatBool(*want)
+	if !present || value != *want || !bytes.Contains(raw, []byte(wantField)) {
+		t.Errorf("dirty = %v (present: %t), want raw JSON field %s", value, present, wantField)
+	}
+}
+
+func TestTaskAPIReportsDirtyOnlyAfterInspection(t *testing.T) {
+	clean, dirty := false, true
+	for _, tc := range []struct {
+		name, permission, acceptance string
+		edit, failPrepare            bool
+		wantDirty                    *bool
+	}{
+		{name: "clean readonly", acceptance: "true", wantDirty: &clean},
+		{name: "dirty readonly", edit: true, wantDirty: &dirty},
+		{name: "clean writable without acceptance", permission: PermissionDefault, wantDirty: &clean},
+		{name: "uninspected failure", failPrepare: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			zero := 0
+			task := r.enqueue(EnqueueInput{PermissionProfile: tc.permission, AcceptanceCommand: tc.acceptance, MaxRetries: &zero})
+			if tc.failPrepare {
+				r.nodes.fail["ats.prepare"] = errors.New("node unavailable")
+			}
+			r.tick()
+			wantState, wantVerdict := StateFailed, VerdictUnverified
+			if !tc.failPrepare {
+				wantState = StateSucceeded
+				e := r.task(task.ID).Exec
+				if e == nil || e.Phase != PhaseWorking {
+					t.Fatalf("task did not start: %+v", e)
+				}
+				if tc.edit {
+					if err := os.WriteFile(filepath.Join(e.Worktree, "draft.txt"), []byte("draft\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r.hub.turnEnds(e.SessionID, "u1", "Finished.")
+				r.tick()
+				r.tick()
+				if tc.acceptance != "" {
+					wantVerdict = VerdictPass
+					r.waitAccepted(task.ID, 1)
+					r.tick()
+				}
+			}
+			if got := r.task(task.ID); got.State != wantState || got.Verdict != wantVerdict {
+				t.Fatalf("task state and verdict = %s/%s, want %s/%s", got.State, got.Verdict, wantState, wantVerdict)
+			}
+
+			handler := newATSApp(r.q).handler()
+			for _, suffix := range []string{"", "/evidence"} {
+				path := "/tasks/" + task.ID + suffix
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("GET %s returned %d", path, rec.Code)
+				}
+				var body map[string]json.RawMessage
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("GET %s: %v", path, err)
+				}
+				raw := body["last_report"]
+				if suffix == "" {
+					var attempts []json.RawMessage
+					if err := json.Unmarshal(body["attempts"], &attempts); err != nil || len(attempts) != 1 {
+						t.Fatalf("GET %s returned %d attempts: %v", path, len(attempts), err)
+					}
+					raw = attempts[0]
+				}
+				assertDirtyJSON(t, raw, tc.wantDirty)
+			}
+		})
+	}
+}
+
+func TestATSScriptSendsInlineAndFileBodies(t *testing.T) {
+	body := "{\n  \"prompt\": \"完整说明\"\n}\n"
+	received := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/tasks" || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("request: %s %s %s", r.Method, r.URL.Path, r.Header.Get("Content-Type"))
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		received <- string(data)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	file := filepath.Join(t.TempDir(), "body with spaces.json")
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{body, "@" + file} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, "bash", "skills/ats-todo/scripts/api.sh", "POST", "/tasks", arg)
+		cmd.Env = append(os.Environ(), "ATS_BASE="+srv.URL)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("body submission: %v %s", err, out)
+		}
+		select {
+		case got := <-received:
+			if got != body {
+				t.Fatal("the script changed the submitted body")
+			}
+		default:
+			t.Fatal("the script did not submit a body")
+		}
+	}
+	if err := os.Chmod(file, 0); err != nil {
+		t.Fatal(err)
+	}
+	invalidFiles := []string{"@" + file + ".missing"}
+	if os.Geteuid() != 0 {
+		invalidFiles = append(invalidFiles, "@"+file)
+	}
+	for _, arg := range invalidFiles {
+		cmd := exec.Command("bash", "skills/ats-todo/scripts/api.sh", "POST", "/tasks", arg)
+		cmd.Env = append(os.Environ(), "ATS_BASE="+srv.URL)
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout.Len() != 0 || stderr.Len() == 0 {
+			t.Fatalf("invalid body file: %v stdout %q stderr %q", err, stdout.String(), stderr.String())
+		}
 	}
 }
 
@@ -161,6 +560,55 @@ func TestPostTaskRefusesWhatItMustNotQueue(t *testing.T) {
 	a.cfg.Repos = nil
 	if ans := call(t, a, "POST", "/tasks", validTask); ans.Status != http.StatusForbidden || ans.Code != "repos_not_configured" {
 		t.Fatalf("with no allowlist: %d %s", ans.Status, ans.Code)
+	}
+}
+
+func TestPostTaskRejectsUnsafeRefs(t *testing.T) {
+	for _, tc := range []struct{ name, ref string }{
+		{"forced refspec", "+refs/heads/main:refs/heads/other"},
+		{"refspec with destination", "refs/heads/main:refs/heads/other"},
+		{"force prefix", "+main"},
+		{"negative refspec", "^refs/heads/main"},
+		{"empty", ""},
+		{"blank", " \t"},
+		{"leading space", " main"},
+		{"trailing newline", "main\n"},
+		{"tab", "main\tother"},
+		{"carriage return", "main\rother"},
+		{"NUL", "main\x00other"},
+		{"control character", "main\x1fother"},
+		{"DEL", "main\x7fother"},
+		{"Unicode space", "main\u00a0other"},
+		{"over the byte limit", strings.Repeat("x", 201)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t)
+			ref, err := json.Marshal(tc.ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := strings.TrimSuffix(validTask, "}") + `,"ref":` + string(ref) + `}`
+			if ans := call(t, a, "POST", "/tasks", body); ans.Status != http.StatusBadRequest || ans.Code != "invalid_ref" {
+				t.Fatalf("POST /tasks with ref %q: got %d %s, want 400 invalid_ref", tc.ref, ans.Status, ans.Code)
+			}
+			if tasks, err := a.queue.ListTasks(TaskFilter{}); err != nil || len(tasks) != 0 {
+				t.Fatalf("queue has %d tasks after the rejected request: %v", len(tasks), err)
+			}
+		})
+	}
+}
+
+func TestPostTaskAcceptsCommitishRefs(t *testing.T) {
+	for _, ref := range []string{"main", "refs/heads/main", "HEAD^", "HEAD~1", "HEAD@{0}", strings.Repeat("x", 200)} {
+		a := newTestApp(t)
+		body := strings.TrimSuffix(validTask, "}") + `,"ref":"` + ref + `"}`
+		ans := call(t, a, "POST", "/tasks", body)
+		if ans.Status != http.StatusCreated {
+			t.Fatalf("POST /tasks with ref %q: got %d, want 201", ref, ans.Status)
+		}
+		if got := taskOf(t, ans)["ref"]; got != ref {
+			t.Errorf("stored ref = %q, want %q", got, ref)
+		}
 	}
 }
 
@@ -432,7 +880,9 @@ func TestManifest(t *testing.T) {
 	// The defaults the settings show are the ones the program uses when nothing is set.
 	def := defaultExtConfig()
 	for key, want := range map[string]any{
-		"write_permission_mode": def.WritePermissionMode, "parallel_per_machine": float64(def.ParallelPerMachine),
+		"launcher":                 def.Launcher,
+		"readonly_permission_mode": def.readonlyMode(),
+		"write_permission_mode":    def.WritePermissionMode, "parallel_per_machine": float64(def.ParallelPerMachine),
 		"task_timeout_minutes": float64(def.TaskTimeoutMinutes), "acceptance_timeout_minutes": float64(def.AcceptTimeoutMinutes),
 		"max_queued": float64(def.MaxQueued), "max_retries": float64(def.MaxRetries), "reserve_headroom_pct": float64(def.ReserveHeadroomPct),
 	} {
@@ -485,12 +935,12 @@ func TestQueuePageShowsEveryStateAndItsButtonsWork(t *testing.T) {
 		return string(raw)
 	}
 	page := render()
-	for _, want := range []string{"Working task", "Queued task", "Finished task", "Agent 在做", "排队中", "cancel:" + working.ID, "cancel:" + queued.ID, "retry:" + finished.ID, "Studio"} {
+	for _, want := range []string{"Working task", "Queued task", "Finished task", "ATS 在做", "排着队", "cancel:" + working.ID, "cancel:" + queued.ID, "retry:" + finished.ID, "Studio"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the page does not have %q", want)
 		}
 	}
-	if strings.Contains(page, "还差一步") {
+	if strings.Contains(page, "开始用之前") {
 		t.Error("the page asks for settings that are there")
 	}
 
@@ -503,10 +953,10 @@ func TestQueuePageShowsEveryStateAndItsButtonsWork(t *testing.T) {
 		t.Fatalf("after cancel: %s", got.State)
 	}
 	res, err = a.action(context.Background(), &ext.UIRequest{Contribution: queueUI, Action: "retry:" + finished.ID})
-	if err != nil || !strings.Contains(res.Toast, "已重新排队") || r.task(finished.ID).State != StateQueued {
+	if err != nil || !strings.Contains(res.Toast, "已经重新交给它做") || r.task(finished.ID).State != StateQueued {
 		t.Fatalf("retry: %+v %v", res, err)
 	}
-	if res, err := a.action(context.Background(), &ext.UIRequest{Contribution: queueUI, Action: "retry:task_none"}); err != nil || !strings.Contains(res.Toast, "失败") {
+	if res, err := a.action(context.Background(), &ext.UIRequest{Contribution: queueUI, Action: "retry:task_none"}); err != nil || res.Toast != "没能再试一次：找不到这个任务了，可能已经被清掉。刷新一下看看。" {
 		t.Fatalf("retry of an unknown task: %+v %v", res, err)
 	}
 	if _, err := a.render(t.Context(), &ext.UIRequest{Contribution: "other"}); err == nil {
@@ -519,7 +969,7 @@ func TestQueuePageShowsEveryStateAndItsButtonsWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw, _ := json.Marshal(view); !strings.Contains(string(raw), "还差一步") {
+	if raw, _ := json.Marshal(view); !strings.Contains(string(raw), "第 1 步：选一台干活的电脑") {
 		t.Error("the page does not say that computers and repositories are not set")
 	}
 }
@@ -565,5 +1015,271 @@ func TestAcceptanceResultArrivesAsANodeEventOrByAsking(t *testing.T) {
 	got := r.task(task.ID)
 	if got.State != StateSucceeded || got.Verdict != VerdictPass || !strings.Contains(got.Reports[len(got.Reports)-1].Message, "by asking") {
 		t.Fatalf("by asking: %s %s", got.State, got.Verdict)
+	}
+}
+
+// GET /tasks/{id} is read to see how a task is going, so it does not hand back the whole brief or the queue's
+// bookkeeping unless asked: a long prompt is cut to its beginning, with the length of the whole.
+func TestGetTaskCutsALongPromptUnlessAskedForAll(t *testing.T) {
+	a := newTestApp(t)
+	long := strings.Repeat("修复登录页。", 100) // 600 runes, 1800 bytes
+	short := mustEnqueue(t, a.queue, EnqueueInput{Title: "short", Prompt: "  Do the thing\n", Repo: "/srv/code/app", Now: testStart})
+	task := mustEnqueue(t, a.queue, EnqueueInput{Title: "long", Prompt: long, Repo: "/srv/code/app", Now: testStart})
+	if _, _, err := a.queue.LeaseTask(task.ID, "dispatcher", testMachine, testStart); err != nil {
+		t.Fatal(err)
+	}
+
+	got := taskOf(t, call(t, a, "GET", "/tasks/"+short.ID, ""))
+	if _, has := got["prompt_bytes"]; got["prompt"] != "Do the thing" || has {
+		t.Fatalf("a short prompt: %v", got)
+	}
+
+	brief := call(t, a, "GET", "/tasks/"+task.ID, "")
+	got = taskOf(t, brief)
+	head, _ := got["prompt"].(string)
+	if want := string([]rune(long)[:promptHeadRunes]) + "…"; head != want || got["prompt_bytes"] != float64(len(long)) {
+		t.Fatalf("a long prompt: %d bytes of prompt, prompt_bytes %v", len(head), got["prompt_bytes"])
+	}
+	att := brief.Body["attempts"].([]any)[0].(map[string]any)
+	for _, k := range []string{"attempt_no", "state", "machine", "started_at"} {
+		if _, has := att[k]; !has {
+			t.Errorf("the attempt lost %s: %v", k, att)
+		}
+	}
+	for _, k := range []string{"task_id", "attempt_id", "fence_token", "worker_id", "leased_at", "lease_expires_at"} {
+		if _, has := att[k]; has {
+			t.Errorf("the attempt carries %s: %v", k, att)
+		}
+	}
+
+	full := call(t, a, "GET", "/tasks/"+task.ID+"?view=full", "")
+	got = taskOf(t, full)
+	if _, has := got["prompt_bytes"]; got["prompt"] != long || has {
+		t.Fatalf("view=full: %d bytes of prompt, prompt_bytes %v", len(got["prompt"].(string)), got["prompt_bytes"])
+	}
+	att = full.Body["attempts"].([]any)[0].(map[string]any)
+	for _, k := range []string{"attempt_id", "fence_token", "worker_id", "lease_expires_at"} {
+		if _, has := att[k]; !has {
+			t.Errorf("view=full: the attempt lost %s: %v", k, att)
+		}
+	}
+
+	if ans := call(t, a, "GET", "/tasks/"+task.ID+"?view=brief", ""); ans.Status != 400 || ans.Code != "invalid_view" {
+		t.Fatalf("an unknown view: %d %s", ans.Status, ans.Code)
+	}
+}
+
+// The evidence is read to learn whether a task is really done: the conclusion comes first in the answer, the
+// last report keeps the end of its output, and attempt=N has the whole report of one attempt.
+func TestEvidencePutsTheConclusionFirstAndCutsTheOutput(t *testing.T) {
+	a := newTestApp(t)
+	q := a.queue
+	one := 1
+	output := "验收命令退出码 1\n" + strings.Repeat("ok  \tpkg\t0.1s\n", 200) + "--- FAIL: TestLogin\nFAIL"
+	task := mustEnqueue(t, q, EnqueueInput{Title: "t", Prompt: "p", Repo: "/srv/code/app", AcceptanceCommand: "make check", Now: testStart})
+	for i := range 2 {
+		_, att, err := q.LeaseTask(task.ID, "dispatcher", testMachine, testStart.Add(time.Duration(i)*time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.CompleteAttempt(CompleteAttemptInput{TaskID: task.ID, FenceToken: att.FenceToken, WorkerID: "dispatcher", Outcome: StateFailed,
+			Verdict: VerdictFail, ErrorClass: "task_failed", ExitCode: &one, Message: fmt.Sprintf("%s (attempt %d)", output, att.AttemptNo), Summary: "tried", Now: testStart}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw := tokRaw(t, a, "GET", "/tasks/"+task.ID+"/evidence", "")
+	if !strings.HasPrefix(raw, `{"verified":false,"state":"`) || strings.Index(raw, `"verdict"`) > strings.Index(raw, `"last_report"`) {
+		t.Fatalf("the conclusion does not come first: %.200s", raw)
+	}
+	ev := call(t, a, "GET", "/tasks/"+task.ID+"/evidence", "")
+	last := ev.Body["last_report"].(map[string]any)
+	msg, _ := last["message"].(string)
+	if n := len([]rune(msg)); n > evidenceTailRunes+2 || !strings.HasPrefix(msg, "验收命令退出码 1\n…") || !strings.HasSuffix(msg, "--- FAIL: TestLogin\nFAIL (attempt 2)") {
+		t.Fatalf("the output: %d runes: %q", n, msg)
+	}
+	if last["message_bytes"] != float64(len(output)+len(" (attempt 2)")) || last["exit_code"] != float64(1) || last["summary"] != "tried" || last["attempt_no"] != float64(2) {
+		t.Fatalf("the last report: %v", last)
+	}
+	for _, k := range []string{"task_id", "worker_id", "report_id", "fence_token"} {
+		if _, has := last[k]; has {
+			t.Errorf("the last report carries %s", k)
+		}
+	}
+
+	whole := call(t, a, "GET", "/tasks/"+task.ID+"/evidence?attempt=1", "")
+	rep, _ := whole.Body["report"].(map[string]any)
+	if _, has := whole.Body["last_report"]; has || rep["message"] != output+" (attempt 1)" || rep["attempt_no"] != float64(1) || whole.Body["verified"] != false {
+		t.Fatalf("attempt=1: %v", whole.Body)
+	}
+	for path, want := range map[string]string{"?attempt=3": "no_report", "?attempt=0": "invalid_attempt", "?attempt=last": "invalid_attempt"} {
+		if ans := call(t, a, "GET", "/tasks/"+task.ID+"/evidence"+path, ""); ans.Code != want || ans.Status == 200 {
+			t.Errorf("%s: %d %s", path, ans.Status, ans.Code)
+		}
+	}
+}
+
+// With no acceptance command the report's message is the agent's whole reply; the evidence shows its summary.
+func TestEvidenceLeavesOutAReplyItsSummaryStandsFor(t *testing.T) {
+	a := newTestApp(t)
+	q := a.queue
+	reply := strings.Repeat("I looked at the code. ", 100) + "\nSummary: nothing to fix"
+	task := mustEnqueue(t, q, EnqueueInput{Title: "t", Prompt: "p", Repo: "/srv/code/app", Now: testStart})
+	_, att, err := q.LeaseTask(task.ID, "dispatcher", testMachine, testStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.CompleteAttempt(CompleteAttemptInput{TaskID: task.ID, FenceToken: att.FenceToken, WorkerID: "dispatcher", Outcome: StateSucceeded,
+		Verdict: VerdictUnverified, Message: reply, Summary: agentSummary(reply), Now: testStart}); err != nil {
+		t.Fatal(err)
+	}
+	ev := call(t, a, "GET", "/tasks/"+task.ID+"/evidence", "")
+	last := ev.Body["last_report"].(map[string]any)
+	if _, has := last["message"]; has || last["summary"] != "nothing to fix" || last["message_bytes"] != float64(len(reply)) || ev.Body["verified"] != false {
+		t.Fatalf("the last report: %v", last)
+	}
+	if rep := call(t, a, "GET", "/tasks/"+task.ID+"/evidence?attempt=1", "").Body["report"].(map[string]any); rep["message"] != reply {
+		t.Fatalf("attempt=1: %v", rep)
+	}
+}
+
+func TestOutputEnd(t *testing.T) {
+	for name, tc := range map[string]struct{ in, want string }{
+		"short":            {" 验收命令退出码 0\nok\n", "验收命令退出码 0\nok"},
+		"long output":      {"验收命令退出码 2\n" + strings.Repeat("x", 50) + "\nend", "验收命令退出码 2\n…" + strings.Repeat("x", 27) + "\nend"},
+		"one long line":    {strings.Repeat("y", 50), "…" + strings.Repeat("y", 40)},
+		"a long first one": {strings.Repeat("头", 130) + "\ntail", strings.Repeat("头", 10) + "…\ntail"},
+	} {
+		if got := outputEnd(tc.in, 40); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// The list is read to see how the tasks of a to-do are going: a task is listed in short, a field at its default
+// is left out, and view=full lists every field.
+func TestListShowsTasksInShortUnlessAskedForAll(t *testing.T) {
+	a := newTestApp(t)
+	q := a.queue
+	plain := mustEnqueue(t, q, EnqueueInput{Title: "plain", Repo: "/srv/code/app", AcceptanceCommand: "make check",
+		Labels: map[string]string{PersonaTodoLabel: "todo_1"}, Now: testStart})
+	special := mustEnqueue(t, q, EnqueueInput{Title: "special", Repo: "/srv/code/app", Priority: PriorityP0, PermissionProfile: PermissionDefault,
+		AgentType: "codex", Labels: map[string]string{PersonaTodoLabel: "todo_1"}, Now: testStart.Add(time.Second)})
+	zero := 0
+	for i := range 2 { // fails once, then passes on its second attempt
+		_, att, err := q.LeaseTask(special.ID, "dispatcher", testMachine, testStart.Add(time.Duration(i)*time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := CompleteAttemptInput{TaskID: special.ID, FenceToken: att.FenceToken, WorkerID: "dispatcher", Outcome: StateFailed, Verdict: VerdictFail,
+			ErrorClass: "task_failed", Now: testStart.Add(time.Duration(i) * time.Hour)}
+		if i == 1 {
+			in.Outcome, in.Verdict, in.ErrorClass, in.ExitCode = StateSucceeded, VerdictPass, "", &zero
+		}
+		if _, err := q.CompleteAttempt(in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	byID := func(path string) map[string]map[string]any {
+		out := map[string]map[string]any{}
+		for _, v := range call(t, a, "GET", path, "").Body["tasks"].([]any) {
+			task := v.(map[string]any)
+			out[task["id"].(string)] = task
+		}
+		return out
+	}
+
+	got := byID("/tasks")
+	if p := got[plain.ID]; len(p) != 5 || p["title"] != "plain" || p["state"] != StateQueued || p["todo_id"] != "todo_1" || p["submitted_at"] == nil {
+		t.Fatalf("a task with every field at its default: %v", p)
+	}
+	s := got[special.ID]
+	if s["priority"] != PriorityP0 || s["permission_profile"] != PermissionDefault || s["agent_type"] != "codex" || s["attempt_no"] != float64(2) ||
+		s["verdict"] != VerdictPass || s["finished_at"] == nil {
+		t.Fatalf("a task with fields off their default: %v", s)
+	}
+	for _, k := range []string{"repo", "ref", "acceptance", "difficulty", "model_tier", "retries_left", "session_id", "prompt"} {
+		if _, has := s[k]; has {
+			t.Errorf("the list carries %s", k)
+		}
+	}
+	if p := byID("/tasks?todo_id=todo_1")[plain.ID]; len(p) != 4 || p["todo_id"] != nil {
+		t.Fatalf("a task in its to-do's list: %v", p)
+	}
+
+	p := byID("/tasks?view=full")[plain.ID]
+	if p["priority"] != PriorityP2 || p["permission_profile"] != PermissionReadonly || p["agent_type"] != AgentClaude || p["verdict"] != VerdictUnverified ||
+		p["repo"] != "/srv/code/app" || p["acceptance"] != "make check" || p["todo_id"] != "todo_1" || p["attempt_no"] != float64(0) {
+		t.Fatalf("view=full: %v", p)
+	}
+	if ans := call(t, a, "GET", "/tasks?view=short", ""); ans.Status != 400 || ans.Code != "invalid_view" {
+		t.Fatalf("an unknown view: %d %s", ans.Status, ans.Code)
+	}
+}
+
+// A list longer than the limit says where the next page starts, and the pages together are the whole list, each
+// task once.
+func TestListGoesOnInPages(t *testing.T) {
+	a := newTestApp(t)
+	var want []string
+	for i := range 7 {
+		todo := []string{"todo_1", "todo_2"}[i%2]
+		task := mustEnqueue(t, a.queue, EnqueueInput{Title: fmt.Sprint(i), Repo: "/srv/code/app", Labels: map[string]string{PersonaTodoLabel: todo}, Now: testStart})
+		want = append([]string{task.ID}, want...) // the same submission time: newest id first
+	}
+	pages := func(query string) (ids []string, n int) {
+		for after := ""; ; n++ {
+			ans := call(t, a, "GET", "/tasks?"+query+after, "")
+			if ans.Status != 200 || n > 10 {
+				t.Fatalf("page %d of %s: %d %v", n, query, ans.Status, ans.Body)
+			}
+			for _, v := range ans.Body["tasks"].([]any) {
+				ids = append(ids, v.(map[string]any)["id"].(string))
+			}
+			next, more := ans.Body["next"].(string)
+			if !more {
+				return ids, n + 1
+			}
+			if !strings.HasSuffix(next, "-"+ids[len(ids)-1]) {
+				t.Fatalf("next is %s, the page ends with %s", next, ids[len(ids)-1])
+			}
+			after = "&after=" + next
+		}
+	}
+	if ids, n := pages("limit=3"); !slices.Equal(ids, want) || n != 3 {
+		t.Fatalf("7 tasks by 3: %d pages, %v, want %v", n, ids, want)
+	}
+	if ids, n := pages("limit=7"); !slices.Equal(ids, want) || n != 1 {
+		t.Fatalf("7 tasks by 7: %d pages, %v", n, ids)
+	}
+	if ids, n := pages("limit=2&todo_id=todo_2"); len(ids) != 3 || n != 2 {
+		t.Fatalf("a to-do's 3 tasks by 2: %d pages, %v", n, ids)
+	}
+	if ids, n := pages("limit=200"); !slices.Equal(ids, want) || n != 1 {
+		t.Fatalf("the largest limit: %d pages, %v", n, ids)
+	}
+	// The page goes on from a place, not from a task: the last task of a page may leave the filtered list (it
+	// starts running) before the next page is asked for.
+	first := call(t, a, "GET", "/tasks?state=queued&limit=3", "")
+	next := first.Body["next"].(string)
+	if _, _, err := a.queue.LeaseTask(want[2], "dispatcher", testMachine, testStart); err != nil {
+		t.Fatal(err)
+	}
+	second := call(t, a, "GET", "/tasks?state=queued&limit=3&after="+next, "")
+	var ids []string
+	for _, v := range second.Body["tasks"].([]any) {
+		ids = append(ids, v.(map[string]any)["id"].(string))
+	}
+	if second.Status != 200 || !slices.Equal(ids, want[3:6]) {
+		t.Fatalf("the page after a task that left the list: %d %v, want %v", second.Status, ids, want[3:6])
+	}
+	// Past the end there is nothing more; what is not a cursor is refused.
+	if ans := call(t, a, "GET", "/tasks?after=1-task_0", ""); ans.Status != 200 || len(ans.Body["tasks"].([]any)) != 0 || ans.Body["next"] != nil {
+		t.Fatalf("past the end: %d %v", ans.Status, ans.Body)
+	}
+	for _, path := range []string{"/tasks?after=task_3", "/tasks?after=-task_3", "/tasks?after=12-"} {
+		if ans := call(t, a, "GET", path, ""); ans.Status != 400 || ans.Code != "invalid_after" {
+			t.Fatalf("%s: %d %s", path, ans.Status, ans.Code)
+		}
 	}
 }

@@ -1,6 +1,6 @@
 import type { FetchAdapter } from "@persona/extension/ui";
 import { answersPath, limits, parseAnswers, parseQuestions, questionID, ReadError, searchPath, siteID, tagText, type AnswerResult, type LimitOptions, type SearchResult, type Site } from "./model.ts";
-import { textsFor } from "./i18n.ts";
+import { errorText, textsFor } from "./i18n.ts";
 export { limits, ReadError } from "./model.ts";
 export interface ServiceOptions { now?: () => number; monotonic?: () => number; limits?: LimitOptions; locale?: string }
 function cancellation(signal: AbortSignal): Error {
@@ -26,7 +26,7 @@ export class StackExchange {
   private readonly backoff = new Map<string, number>();
   private queue: Promise<void> = Promise.resolve();
   private lastOK: number | undefined;
-  private lastError: { code: ReadError["code"]; at: number } | undefined;
+  private lastError: { code: ReadError["code"]; status?: number; at: number } | undefined;
   constructor(private readonly fetch: FetchAdapter, _config: unknown = {}, options: ServiceOptions = {}) {
     this.locale = options.locale ?? "en";
     this.now = options.now ?? Date.now; this.monotonic = options.monotonic ?? (() => performance.now()); this.limits = { ...limits, ...options.limits };
@@ -39,8 +39,9 @@ export class StackExchange {
   }
   private save(path: string, raw: unknown, at: number) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
+    const old = this.cache.get(path);
+    if (old) { this.bytes -= old.bytes; this.cache.delete(path); }
     if (bytes > this.limits.cacheBytes) return;
-    const old = this.cache.get(path); if (old) this.bytes -= old.bytes;
     const atMonotonic = this.monotonic();
     this.cache.set(path, { raw, at, fetched: atMonotonic, used: atMonotonic, bytes }); this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
@@ -57,6 +58,9 @@ export class StackExchange {
         method: "GET", headers: { Accept: "application/json", "Accept-Encoding": "gzip", "User-Agent": "persona-stackexchange/0.1.0" }, signal, redirect: "error",
       });
     } catch (error) { checkSignal(signal); throw error instanceof ReadError ? error : new ReadError("network"); }
+    if (response.status === 401 || response.status === 403 || response.status === 429) { void response.body?.cancel().catch(() => {}); throw new ReadError("rate_limited"); }
+    if (response.status === 404) { void response.body?.cancel().catch(() => {}); throw new ReadError("not_found"); }
+    if (response.status !== 200) { void response.body?.cancel().catch(() => {}); throw new ReadError("http", response.status); }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];
     let length = 0;
@@ -68,7 +72,7 @@ export class StackExchange {
         const chunk = await reader.read(); checkSignal(signal);
         if (chunk.done) break;
         length += chunk.value.byteLength;
-        if (length > this.limits.response) { await reader.cancel(); throw new ReadError("bad_answer"); }
+        if (length > this.limits.response) { await reader.cancel().catch(() => {}); throw new ReadError("bad_answer"); }
         chunks.push(chunk.value);
       }
     } finally { signal.removeEventListener("abort", cancel); reader.releaseLock(); }
@@ -76,9 +80,6 @@ export class StackExchange {
     for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
     let text: string;
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(data); } catch { throw new ReadError("bad_answer"); }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     let raw: unknown;
     try { raw = JSON.parse(text); } catch { throw new ReadError("bad_answer"); }
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ReadError("bad_answer");
@@ -95,6 +96,7 @@ export class StackExchange {
     checkSignal(signal);
     const cached = this.cached(path, fresh); if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh); if (again) return again;
       const method = path.split("?")[0];
       const pause = Math.max(this.limits.gap - (this.monotonic() - this.lastRequest), (this.backoff.get(method) ?? 0) - this.monotonic(), 0);
@@ -111,12 +113,21 @@ export class StackExchange {
         const at = this.now(); validate(raw, at); this.save(path, raw, at); this.lastOK = at; this.lastError = undefined;
         return { raw, at };
       } catch (error) {
-        if (signal?.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        if (signal?.aborted) {
+          const reason = signal.reason;
+          if (reason instanceof ReadError) {
+            if (reason.code !== "not_found") this.lastError = { code: reason.code, status: reason.status, at: this.monotonic() };
+            throw reason;
+          }
+          throw reason instanceof Error && reason.name === "AbortError" ? reason : new DOMException("Cancelled", "AbortError");
+        }
         const failure = error instanceof ReadError ? error
           : request.signal.aborted ? (request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow"))
           : error instanceof Error && error.name === "AbortError" ? error
           : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally { this.lastRequest = this.monotonic(); request.dispose(); }
     });
@@ -133,7 +144,7 @@ export class StackExchange {
     const t = textsFor(this.locale);
     return { state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok", account: t.account,
       ...(this.lastOK === undefined ? {} : { last_sync: new Date(this.lastOK).toISOString() }),
-      ...(this.lastError ? { error: t[this.lastError.code] } : {}) };
+      ...(this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}) };
   }
   async search(query: string, site: Site = "stackoverflow", tag = "", limit = 12, refresh = false, signal?: AbortSignal): Promise<SearchResult> {
     const rd = await this.read(searchPath(query, siteID(site), tagText(tag), limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => { parseQuestions(raw, site, at); });

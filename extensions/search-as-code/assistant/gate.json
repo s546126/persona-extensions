@@ -1,7 +1,7 @@
 {
   "command": "sac",
   "script": "sac-remote/scripts/sac.sh",
-  "title": "代码化搜索",
+  "title": "AI 聊天记录搜索",
   "env": ["SAC_BASE", "SAC_TOKEN"],
   "base_env": "SAC_BASE",
   "secret": ["SAC_TOKEN"],
@@ -14,8 +14,8 @@
     {"method": "*", "path": "**", "action": "deny"}
   ],
   "actions": [
-    {"pattern": "^GET /search/", "what": "读取 Agent 会话历史（其他电脑或其他项目）"},
-    {"pattern": "^POST /restore/", "what": "把已上云的会话恢复到它所在电脑的原路径"}
+    {"pattern": "^GET /search/", "what": "读取 AI 聊天记录（其他电脑或其他项目）"},
+    {"pattern": "^POST /restore/", "what": "把已移到云端的聊天恢复到它所在电脑上原来的位置"}
   ],
   "tool": {
     "name": "sac",

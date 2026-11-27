@@ -63,24 +63,33 @@ func TestRunFast(t *testing.T) {
 	if c.St.S.FastSeen["chats/persona-1@2026-11-09"] == 0 || len(c.St.S.ActiveDays) != 0 {
 		t.Errorf("seen %v, active %v", c.St.S.FastSeen, c.St.S.ActiveDays)
 	}
+	// Any newly observed interaction/tools correction rule from RunFast is tagged fast_hot:<day> for the hot slot.
+	for _, e := range c.St.S.Entries {
+		if entry.KindOf(e) == entry.KindRules && (e.Type == "correction" || e.Rejected != "" || entry.Hard(e)) {
+			if got := entry.FastHotDay(e); got != "2026-11-09" {
+				t.Errorf("fast path correction %s missing fast_hot:2026-11-09, got %q", e.ID, got)
+			}
+		}
+	}
 }
 
-// A correction made on two days within a week, or with a ban in the user's words, is a hard rule: it stands at once
-// (exits count it stable) and scores at least 90; a single plain one is not.
+// A correction made on two days within a week, or explicitly Pinned, is Hard (0.4.0 §2: single-day anger/ban cue
+// no longer auto-promotes to Hard).
 func TestHardRule(t *testing.T) {
 	ev := func(day, q string) entry.Evidence { return entry.Evidence{Who: entry.WhoSelf, Day: day, Quote: q} }
 	one := &entry.Entry{Facet: entry.Interaction, Type: "correction", Status: entry.Candidate, Evidence: []entry.Evidence{ev("2026-11-20", "please answer in Chinese")}}
 	twice := &entry.Entry{Facet: entry.Interaction, Type: "correction", Status: entry.Candidate,
 		Evidence: []entry.Evidence{ev("2026-11-20", "please answer in Chinese"), ev("2026-11-23", "answer in Chinese")}}
 	ban := &entry.Entry{Facet: entry.Interaction, Type: "correction", Status: entry.Candidate, Evidence: []entry.Evidence{ev("2026-11-20", "以后一律用中文回我")}}
-	if entry.Hard(one) || !entry.Hard(twice) || !entry.Hard(ban) {
-		t.Fatalf("hard: one %v twice %v ban %v", entry.Hard(one), entry.Hard(twice), entry.Hard(ban))
+	pinned := &entry.Entry{Facet: entry.Interaction, Type: "correction", Status: entry.Candidate, Pinned: true, Evidence: []entry.Evidence{ev("2026-11-20", "answer in Chinese")}}
+	if entry.Hard(one) || !entry.Hard(twice) || entry.Hard(ban) || !entry.Hard(pinned) {
+		t.Fatalf("hard: one %v twice %v ban %v pinned %v", entry.Hard(one), entry.Hard(twice), entry.Hard(ban), entry.Hard(pinned))
 	}
-	if !export.Stable(ban) || export.Stable(one) {
-		t.Error("a hard rule stands at once; a plain candidate does not")
+	if !export.Stable(twice) || export.Stable(one) || export.Stable(ban) {
+		t.Error("multi-day hard rule stands at once; single-day candidate (even with ban cue) does not")
 	}
-	if entry.Score(twice) < 90 || entry.Score(one) >= 90 {
-		t.Errorf("scores %d %d", entry.Score(twice), entry.Score(one))
+	if entry.Score(twice) <= entry.Score(one) {
+		t.Errorf("scores %d <= %d", entry.Score(twice), entry.Score(one))
 	}
 	far := &entry.Entry{Facet: entry.Interaction, Type: "correction", Evidence: []entry.Evidence{ev("2026-10-01", "a"), ev("2026-11-20", "b")}}
 	if entry.Hard(far) {

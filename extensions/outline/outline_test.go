@@ -206,7 +206,8 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 	if len(f.creates) != 1 {
 		t.Fatal("restart repeated draft creation")
 	}
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(args), Status: "pending", StartedAt: time.Now()}})
+	key, _ := json.Marshal(createArgs{CollectionID: "personal", Title: "Private reading", Text: "Keep the source."})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "outline_create_document:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

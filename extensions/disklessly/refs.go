@@ -122,7 +122,7 @@ const refProbeFunc = `__dkl_refs() {
 }`
 
 // refProbeFailed is the message of a run aborted because no process listing was available.
-const refProbeFailed = "无法列出目标机器上运行中的进程（/proc 与 ps 都不可用），不能确认哪些会话仍被引用；已中止，未上传或删除任何会话"
+const refProbeFailed = "列不出这台电脑上正在运行的程序（/proc 和 ps 都用不了），确认不了哪些对话还在用；已经停下，一个对话都没有搬走或删除"
 
 // ReferencedSessionsScript runs the reference probe on its own: `@@REF <id or path>` per
 // reference, then `@@REFS_OK`, or `@@REFS_FAIL` when processes cannot be listed.
@@ -167,7 +167,7 @@ func parseReferences(out string) ([]string, error) {
 		}
 	}
 	if !ok {
-		return nil, errors.New("引用探测没有返回结果，未上传或删除任何会话")
+		return nil, errors.New("查哪些对话还在用的脚本没有返回结果，一个对话都没有搬走或删除")
 	}
 	return refs, nil
 }

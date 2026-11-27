@@ -1303,8 +1303,8 @@ func (a *app) startOffloadJob(p offloadParams, loc string, t *offloadTarget, rou
 		}
 	}
 	runner, streamer := a.run(), a.stream()
-	label := map[string]string{"offload": "正在把所选内容上云", "restore": "正在从云端取回所选内容"}[action]
-	kind := map[string]string{"offload": jobOffload, "restore": jobRestore}[action]
+	label := map[string]string{"offload": "正在把选中的内容搬到网盘", "restore": "正在从网盘拿回选中的内容"}[action]
+	kind := map[string]string{"offload": jobFileOffload, "restore": jobFileRestore}[action]
 	a.offloadMu().Lock()
 	if a.offloadData.jobs == nil {
 		a.offloadData.jobs = map[string]*offloadJob{}
@@ -1565,7 +1565,7 @@ func (a *app) runOffloadJob(ctx context.Context, runner Runner, streamer StreamR
 	if j.action == "restore" && slices.ContainsFunc(j.items, func(it offloadJobItem) bool { return it.restore.how == "session" && it.Status == "done" }) {
 		_, _ = RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
 	}
-	verb := map[string]string{"offload": "上云", "restore": "取回"}[j.action]
+	verb := map[string]string{"offload": "搬到网盘", "restore": "拿回来"}[j.action]
 	switch {
 	case canceled:
 		finish(ojCanceled, otr(loc, "canceled"))

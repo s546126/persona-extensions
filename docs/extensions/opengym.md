@@ -7,7 +7,7 @@
 | Extension point | Contribution | Behavior |
 | --- | --- | --- |
 | `ui` | `opengym`, placement `nav_page` ("健身") | Tab 总览: this week's sessions, volume (with a 12-week sparkline), time and body weight; the next planned session with its exercises; a bar chart of the last 12 weeks' volume; the last 10 workouts (tap one for its exercises and sets, PRs marked); a 90-day body-weight line. Tab 计划: the next session, the next 7 days and why each is planned, the running coach week, and every routine. |
-| `ui` | `opengym-card`, placement `overview_card` | This week's sessions and volume against last week, and the next session. Opens the page. |
+| `ui` | `opengym-card`, placement `overview_card` ("健身 · 概况", so it does not read as the page listed twice among the contribution switches) | This week's sessions and volume against last week, and the next session. Opens the page. |
 | `connectors` | `opengym`, capabilities `status`, `tools` and `actions` | Read tools `opengym_summary`, `opengym_workouts`, `opengym_plan`, `opengym_bodyweight`, `opengym_exercises`; writes `opengym_log_workout`, `opengym_create_routine`, `opengym_schedule_day`, all confirmed on the phone every time. |
 | `skills` | `opengym` | When the assistant uses which tool, units, and the confirmation rules. |
 
@@ -29,11 +29,11 @@
 | --- | --- |
 | `server_url` | The openGym server the hub's machine reaches, with its `BASE_PATH` if it has one (`https://gym.example.com`, `https://example.com/gym`). Plain `http` only for addresses that stay on the local network: loopback, private and link-local IPs, a name without a dot, or a name under `.local`, `.lan`, `.home.arpa` or `.internal`. User info, a query or a fragment is refused. |
 | `refresh_minutes` | How often the background loop checks the revision, 5 to 1440, default 15. The whole document is read only when the revision moved. |
-| `exercise_names` | Show exercises by their Chinese names (default on): openGym's public catalogue names (`catalogue/i18n/zh.json` on GitHub) are downloaded at most once a week, conditionally, and only id → name is kept in the data directory. Off or unreachable: the profile's own exercises by name, others as `动作 <id>`. |
+| `exercise_names` | Show exercises by their Chinese names (default on): openGym's public catalogue names (`catalogue/i18n/zh.json` on GitHub) are downloaded at most once a week, conditionally, and only id → name is kept in the data directory. Off or unreachable: the profile's own exercises by name, others as `动作 <id>`, and `opengym_exercises` finds by name only the exercises the profile used or made. Workout data is not affected. |
 
 | Secret | Meaning |
 | --- | --- |
-| `api_token` | An openGym API token (`ogt_…`): in the app, 设置 › 集成 › API 令牌 (Settings → Integrations → API tokens), shown once. Fill it in on the extension's settings card on the phone, never in a chat. Scopes: 训练 (workouts), 计划 (plans) and 体重 (bodyweight) at 查看 (view) to read, at 应用 (apply) for the assistant's writes; 测量 and 笔记 are not used. It is sent only to `server_url` (redirects to another host or from https to http are refused) and never appears in logs, errors, status or tool output. |
+| `api_token` | Not required by the manifest, so the extension starts before it is filled in (see [First use](#first-use)). An openGym API token (`ogt_…`): in the app, 设置 › 集成 › API 令牌 (Settings → Integrations → API tokens), shown once. Fill it in on the extension's settings card on the phone, never in a chat. Scopes: 训练 (workouts), 计划 (plans) and 体重 (bodyweight) at 查看 (view) to read, at 应用 (apply) for the assistant's writes; 测量 and 笔记 are not used. It is sent only to `server_url` (redirects to another host or from https to http are refused) and never appears in logs, errors, status or tool output. |
 
 openGym limits a token to 120 requests a minute and 60 writes an hour. The extension makes a revision check per `refresh_minutes`, a page or tool reads at most once a minute, and each write is one `PUT` (two after a conflict) plus a read back.
 
@@ -60,6 +60,16 @@ All writes are `confirm_always`. `actions.describe` checks the arguments against
 | `opengym_schedule_day` | `date` (today or later) and one of `routine_id`, `rest: true`, `clear: true` | Sets or removes one date in `dayPlan`. Needs plans at apply. |
 
 An exercise is an id the profile used, its own, or a catalogue id, or a name that matches exactly one exercise; anything else is refused with candidates (never guessed), unless `create_custom` makes it a custom exercise.
+
+## First use
+
+Neither `server_url` nor `api_token` is required in the manifest. A required secret keeps the extension in the hub's "needs setup" state without starting its program, so nothing could draw the page; instead the program starts unconfigured and:
+
+- the page shows what it is for and the two settings to fill in at 设置 › 扩展 › openGym 健身记录, each with an example and a badge (已填 / 还没填 / 用不了);
+- the card says which of the two is still missing and where;
+- `connector.status` is `not_configured`, its `error` naming what is missing and where, with two `guide` steps;
+- read tools answer that sentence as their text, and writes refuse with it;
+- the background loop is not started and makes no request and writes no log line beyond one at start. Saving the settings restarts the program with them.
 
 ## Status
 

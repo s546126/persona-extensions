@@ -234,7 +234,7 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 		t.Fatal("restart repeated state update")
 	}
 	key, _ := json.Marshal(updateArgs{StoryID: 42, WorkflowStateID: 11})
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(key), Status: "pending", StartedAt: time.Now()}})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "shortcut_update_story_state:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

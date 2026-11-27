@@ -89,6 +89,19 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 		if err := validText(in.Description, 100000, true); err != nil {
 			return nil, err
 		}
+		if in.Priority != nil && (*in.Priority < 0 || *in.Priority > 4) {
+			return nil, errors.New("priority must be 0–4")
+		}
+		if in.AssigneeID != "" {
+			if err := validID(in.AssigneeID); err != nil {
+				return nil, err
+			}
+		}
+		if in.StateID != "" {
+			if err := validID(in.StateID); err != nil {
+				return nil, err
+			}
+		}
 		summary = "Create Linear issue: " + in.Title + "\nTeam ID: " + in.TeamID
 	case "linear_update":
 		var in updateArgs

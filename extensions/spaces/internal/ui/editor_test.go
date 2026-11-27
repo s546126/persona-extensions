@@ -194,7 +194,7 @@ func TestEditorAddsAType(t *testing.T) {
 func TestEditorAddsWithoutASpace(t *testing.T) {
 	st := store.Open("")
 	res := act(t, newApp(st), state{D: newSlot}, "typenew", map[string]string{"t_key": "x", "t_name": "x"})
-	if res.Toast != "还没有空间" {
+	if res.Toast != "还没有空间。请先从模板新建一个空间" {
 		t.Fatalf("toast = %q", res.Toast)
 	}
 }
@@ -285,11 +285,11 @@ func TestEditorPropertyDefaultsAndRefusals(t *testing.T) {
 
 	before := baseJSON(t, st)
 	res := act(t, a, ed, "propnew:number", map[string]string{"p_key": "progress", "p_name": "重复"})
-	if res.Toast != "已经有属性「progress」" {
+	if res.Toast != "这个分类已经有代号是「progress」的填写项了，请换一个代号" {
 		t.Fatalf("duplicate key toast = %q", res.Toast)
 	}
 	res = act(t, a, ed, "propnew:nope", map[string]string{"p_key": "fine", "p_name": "无"})
-	if res.Toast != "没有属性类型「nope」" {
+	if res.Toast != "没有「nope」这种填写项。请从列表里重新选一种" {
 		t.Fatalf("unknown kind toast = %q", res.Toast)
 	}
 	res = act(t, a, ed, "propnew:text", map[string]string{"p_key": "title", "p_name": "内置"})
@@ -449,7 +449,7 @@ func TestEditorEditsCardAndViews(t *testing.T) {
 	}
 
 	res = act(t, a, state{S: sp, D: "idea", F: "view:2"}, "viewdrop:2:列表", nil)
-	if res.Toast != "已删除视图" || len(mustType(t, st, sp, "idea").Views) != 2 {
+	if res.Toast != "已删除显示方式" || len(mustType(t, st, sp, "idea").Views) != 2 {
 		t.Fatalf("view delete: toast %q", res.Toast)
 	}
 	res = act(t, a, state{S: sp, D: "idea"}, "viewdrop:9:x", nil)
@@ -567,14 +567,14 @@ func TestEditorPropertyOptionsAndOrder(t *testing.T) {
 
 	act(t, a, ed, "propnew:text", map[string]string{"p_key": "extra", "p_name": "额外"})
 	res = act(t, a, state{S: sp, D: "idea", F: "prop:extra"}, "propdrop:extra", nil)
-	if res.Toast != "已删除属性" {
+	if res.Toast != "已删除填写项" {
 		t.Fatalf("delete toast = %q", res.Toast)
 	}
 	wantRefused(t, act(t, a, ed, "propdrop:nope", nil), ed)
 
 	// A text that names a field the type does not have is refused before anything is saved.
 	res = act(t, a, state{S: sp, D: "idea", F: "card"}, "cardsave", map[string]string{"c_pills": "没有"})
-	if res.Toast != "没有字段「没有」" {
+	if res.Toast != "没有叫「没有」的填写项。请写这个分类里已有的名称，用、分隔" {
 		t.Fatalf("pill toast = %q", res.Toast)
 	}
 }
@@ -610,7 +610,7 @@ func TestEditorStagesFromAnEmptyFlow(t *testing.T) {
 		t.Fatalf("leaving one stage on the main line is refused: %+v", res)
 	}
 	res = act(t, a, state{S: sp, D: "plain"}, "stagedrop:2:搁置", nil)
-	if res.Toast != "已删除阶段" || len(mustType(t, st, sp, "plain").Flow) != 2 {
+	if res.Toast != "已删除状态" || len(mustType(t, st, sp, "plain").Flow) != 2 {
 		t.Fatalf("drop the dropped stage: toast %q", res.Toast)
 	}
 	res = act(t, a, state{S: sp, D: "plain"}, "stagedrop:1:完成", nil)
@@ -791,7 +791,7 @@ func TestHostileEditorStaysValid(t *testing.T) {
 			switch s.F {
 			case "prop:p05":
 				// 50 options of 40 runes do not fit a text of 2000 runes: a caption, and no field.
-				if fieldNamedOK(page, "o_options") || !slices.Contains(textOfCaptions(page), "选项太多，不能在这里编辑，请在助手中修改") {
+				if fieldNamedOK(page, "o_options") || !slices.Contains(textOfCaptions(page), "选项太多，这里放不下，可以让助手改") {
 					t.Fatalf("%s: options that do not fit are not offered as a caption", label)
 				}
 				sawLong = true
@@ -908,31 +908,31 @@ func TestEditorHelpers(t *testing.T) {
 	if got := c.propSummary(kernel.Prop{Kind: kernel.KindNumber}); got != "数字" {
 		t.Fatalf("plain number summary = %q", got)
 	}
-	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRelation, Target: "task", Many: true}); got != "关联 → 任务 · 多个" {
+	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRelation, Target: "task", Many: true}); got != "连到「任务」 · 可以连多条" {
 		t.Fatalf("relation summary = %q", got)
 	}
-	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRelation, Target: "gone"}); got != "关联 → gone" {
+	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRelation, Target: "gone"}); got != "连到「gone」" {
 		t.Fatalf("relation to a missing type = %q", got)
 	}
-	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRollup, Op: "percent_done", Via: "task.goal"}); got != "汇总 · 完成度 · task.goal" {
+	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRollup, Op: "percent_done", Via: "task.goal"}); got != "自动统计 · 完成度 · task.goal" {
 		t.Fatalf("rollup summary = %q", got)
 	}
-	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRollup, Op: "count"}); got != "汇总 · 数量" {
+	if got := c.propSummary(kernel.Prop{Kind: kernel.KindRollup, Op: "count"}); got != "自动统计 · 数量" {
 		t.Fatalf("rollup without a path = %q", got)
 	}
 
 	ty := &kernel.Type{Key: "t", Name: "T", Props: []kernel.Prop{{Key: "lead", Name: "主", Kind: kernel.KindText}, {Key: "pct", Name: "百分", Kind: kernel.KindRollup}}}
 	sp2 := &kernel.Space{Types: []*kernel.Type{ty}}
 	c2 := &ctx{sp: sp2}
-	if got := c2.cardSummary(ty); got != "按默认" {
+	if got := c2.cardSummary(ty); got != "默认样子" {
 		t.Fatalf("empty card summary = %q", got)
 	}
 	ty.Card = kernel.Card{Lead: "lead", Pills: []string{"pct"}, Progress: &kernel.Ratio{Of: "pct", Over: "lead"}}
-	if got := c2.cardSummary(ty); got != "主行 主 · 标签 百分 · 进度 百分 / 主" {
+	if got := c2.cardSummary(ty); got != "下面一行 主 · 旁边 百分 · 进度条 百分 / 主" {
 		t.Fatalf("card summary = %q", got)
 	}
 	ty.Card = kernel.Card{Progress: &kernel.Ratio{Of: "pct"}}
-	if got := c2.cardSummary(ty); got != "进度 百分" {
+	if got := c2.cardSummary(ty); got != "进度条 百分" {
 		t.Fatalf("progress only summary = %q", got)
 	}
 	if got := c2.viewSummary(ty, kernel.View{Kind: "board", Lens: kernel.Lens{Group: "lead"}}); got != "看板 · 按 主 分组" {
@@ -1092,7 +1092,7 @@ func TestStaleStageAndViewActionsAreRefused(t *testing.T) {
 	if got := mustType(t, st, sp, "plain").Flow[1].Name; got != "丁" {
 		t.Fatalf("stage 1 = %q, want 丁", got)
 	}
-	if res := act(t, a, state{S: sp, D: "plain"}, "viewdrop:1:列表", nil); res.Toast != "已删除视图" {
+	if res := act(t, a, state{S: sp, D: "plain"}, "viewdrop:1:列表", nil); res.Toast != "已删除显示方式" {
 		t.Fatalf("named view drop: toast %q", res.Toast)
 	}
 	if views := mustType(t, st, sp, "plain").Views; len(views) != 1 || views[0].Name != "看板" {

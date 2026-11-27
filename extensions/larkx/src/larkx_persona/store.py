@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS messages (
   root TEXT NOT NULL DEFAULT '', parent TEXT NOT NULL DEFAULT '', at_me INTEGER NOT NULL DEFAULT 0,
   media TEXT NOT NULL DEFAULT '[]', mentions TEXT NOT NULL DEFAULT '[]', markdown TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS messages_chat ON messages (chat, position);
+CREATE INDEX IF NOT EXISTS messages_topic ON messages (chat, root) WHERE root NOT IN ('', '0');
 CREATE TABLE IF NOT EXISTS names (id TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sends (key TEXT PRIMARY KEY, result TEXT);
 """
@@ -107,6 +108,39 @@ class Store:
         rows = self._all("SELECT * FROM messages WHERE %s ORDER BY position DESC, at DESC, seq DESC LIMIT ?" % where, *args, limit)
         return [_message(r) for r in reversed(rows)]
 
+    def inbox_topics(self, chat, since, limit):
+        """Recent group messages partitioned by topic, with the empty key for chat-level traffic."""
+        rows = self._all(
+            """
+            WITH scoped AS (
+                SELECT m.seq, m.position, m.at,
+                    CASE WHEN m.root NOT IN ('', '0') THEN m.root
+                         WHEN EXISTS (SELECT 1 FROM messages AS reply
+                                      WHERE reply.chat = m.chat AND reply.root = m.id
+                                        AND reply.root NOT IN ('', '0') AND reply.type != 'SYSTEM') THEN m.id
+                         ELSE '' END AS topic
+                FROM messages AS m WHERE m.chat = ? AND m.at >= ? AND m.type != 'SYSTEM'
+            ), ranked AS (
+                SELECT seq, topic, ROW_NUMBER() OVER (
+                    PARTITION BY topic ORDER BY position DESC, at DESC, seq DESC
+                ) AS rank FROM scoped
+            )
+            SELECT messages.*, ranked.topic FROM ranked JOIN messages USING (seq)
+            WHERE ranked.rank <= ? ORDER BY ranked.topic, ranked.rank DESC
+            """, chat, since, limit)
+        topics = {}
+        for row in rows:
+            topic = row.pop("topic")
+            topics.setdefault(topic, []).append(_message(row))
+        return topics
+
+    def topic_messages(self, chat, root, before, limit):
+        rows = self._all(
+            """SELECT * FROM messages WHERE chat = ? AND (root = ? OR id = ?)
+               AND (? = 0 OR position < ?) ORDER BY position DESC, at DESC, seq DESC LIMIT ?""",
+            chat, root, root, before, before, limit)
+        return [_message(row) for row in reversed(rows)]
+
     def oldest_position(self, chat):
         row = self._one("SELECT MIN(position) AS p FROM messages WHERE chat = ? AND position > 0", chat)
         return (row or {}).get("p") or 0
@@ -140,6 +174,10 @@ class Store:
                 return True, ""
             row = self._db.execute("SELECT result FROM sends WHERE key = ?", (key,)).fetchone()
         return False, row["result"] or ""
+
+    def claimed(self, key):
+        """True when key was taken for a send, whatever that send ended with."""
+        return self._one("SELECT 1 AS one FROM sends WHERE key = ?", key) is not None
 
     def finish_send(self, key, result):
         self._do("UPDATE sends SET result = ? WHERE key = ?", result, key)

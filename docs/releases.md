@@ -4,6 +4,20 @@
 
 Publishing packages, changing package visibility and dispatching publication workflows require authorization. Code and tests can merge after affected local verification passes **before** cutover, but publication cannot. Hosted CI is explicit-dispatch only, not a PR merge gate. The cutover owner handles repository renaming and visibility; this workflow does neither. Local CI and synthetic fixtures are not evidence of a published package or a working hub installation.
 
+## Extension notes
+
+### Relingo 0.2.0 (formerly termwise)
+
+`relingo` 0.2.0 replaces the `termwise` extension (last packaged as 0.1.2; installed data from 0.1.1 uses the same `reading.json`). The source manifest declares `replaces: "termwise"`. That field is market-entry metadata only: `scripts/manifest.py packaged` strips it, and the program's runtime manifest omits it. Publication follows [Renamed identities](#renamed-identities): a new package namespace, the predecessor removed from the next generated catalog, and no deletion of the old package or release. Hubs that support identity transitions keep the original storage slot, so settings and `reading.json` carry over. The program reads that file as before; saved words are not renamed or dropped.
+
+`text_lookup` (`relingo`, English) answers `state`, `lookup`, `save` and `remove` on the same saved-word list as the reading page. `underline_saved` defaults to false.
+
+The page is titled 英文阅读 and opens with a one-line explanation of the two modes; the description and the `underline_saved` text use plain wording, and a failed translation says to try again later.
+
+The name Relingo is also the name of an existing commercial English-vocabulary product. This extension is not that product. Maintainers should weigh the name before publication.
+
+Relingo needs no command line: the dictionary and rules are built into the program and it starts no other program. The separate CLI `s546126/termwise` is neither called nor required; it should stay named `termwise`, and this release does not rename any repository.
+
 ## Market and indexes
 
 The repository has one catalog, `persona-extensions.json`, with embedded signatures:
@@ -29,7 +43,7 @@ Every official source manifest declares `icon`, a square PNG (at least 256 × 25
 
 `icon` is source-only metadata, like `tags` and `replaces`: older hubs reject unknown runtime manifest fields. The signed catalog entry retains its source `icon` path for generation provenance and adds `icon_url`, an absolute HTTPS raw URL containing the full trusted source commit SHA. It never uses `main` or a mutable release tag. Anonymous archive verification checks that the packaged icon is byte-identical to that source image. Clients display `icon_url`, not `manifest.icon`; old clients can ignore the new entry fields.
 
-On every changed publication, [scripts/downloads.py](../scripts/downloads.py) reads the **exact cumulative Total downloads** counter on each official package's public GitHub detail page. GitHub's documented Packages REST API does not expose this statistic; release asset downloads and rounded organization-list numbers are not substitutes. Requests are anonymous, bounded, retried for transient transport/rate-limit errors, and limited to four concurrent requests. Missing pages/counters, rounded or ambiguous counters and incomplete snapshots fail publication rather than recording zero. No third-party analytics service or secret is required.
+On every changed publication, [scripts/downloads.py](../scripts/downloads.py) reads the **exact cumulative Total downloads** counter directly on each official package's canonical public GitHub detail page. GitHub's documented Packages REST API does not expose this statistic; release asset downloads and rounded organization-list numbers are not substitutes. Requests are anonymous, paced across two concurrent workers, and retried with `Retry-After` cooldowns and exponential backoff for transient transport or rate-limit errors. Missing pages/counters, rounded or ambiguous counters and incomplete snapshots fail publication rather than recording zero. No third-party analytics service or secret is required.
 
 The signed payload adds `downloads_updated_at` (RFC 3339 UTC), every entry adds integer `downloads`, and entries sort by downloads descending with ID ascending as the deterministic tie-breaker. Ranking does not alter source inventory order: continuity validation compares the complete source inventory in ID order. All these metadata fields are inside the signed payload. Real zero counts are allowed; fetch failures are not zero counts. These are registry download counters, including publication/verification traffic, not unique users or installations.
 

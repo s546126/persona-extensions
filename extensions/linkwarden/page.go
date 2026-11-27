@@ -24,9 +24,14 @@ type pageState struct {
 	SaveURL      string `json:"u,omitempty"`
 }
 
+const maxQueryChars = 200
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.CollectionID < 0 || st.LinkID < 0 || len(st.DraftID) > 128 || len(st.SaveURL) > 8192 {
+	if err := r.DecodeState(&st); err != nil || st.CollectionID < 0 || st.LinkID < 0 || len([]rune(st.Query)) > maxQueryChars || len(st.DraftID) > 128 || len(st.SaveURL) > 8192 {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode != "" && st.Mode != "list" && st.Mode != "detail" && st.Mode != "save" && st.Mode != "review-save" {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -47,7 +52,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Mode = r.Values["q"], "list"
+		st.Query, st.Mode = clipText(strings.TrimSpace(r.Values["q"]), maxQueryChars), "list"
 	case "collection":
 		id, err := strconv.ParseInt(r.Values["collection"], 10, 64)
 		if err != nil || id < 0 {
@@ -83,6 +88,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if st.LinkID <= 0 {
 			return nil, errors.New("invalid link ID")
 		}
+		if st.DraftID == "" {
+			return nil, errors.New("the link view expired; reopen it")
+		}
 		raw := []byte(`{"id":` + strconv.FormatInt(st.LinkID, 10) + `}`)
 		out, err := a.doAction(ctx, "ui-archive:"+st.DraftID, "linkwarden_archive", raw)
 		if err != nil {
@@ -108,6 +116,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return reviewSaveView(r, st), nil
 	}
 	if st.Mode == "detail" {
+		if st.LinkID <= 0 {
+			return nil, errors.New("invalid link ID")
+		}
 		item, err := a.client.link(ctx, st.LinkID)
 		a.record(err)
 		if err != nil {
@@ -122,19 +133,31 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		}
 		return detailView(r, st, item, highlights), nil
 	}
+	if st.Mode != "" && st.Mode != "list" {
+		return nil, errors.New("invalid links view")
+	}
 	items, err := a.client.search(ctx, st.Query, st.CollectionID)
 	a.record(err)
 	if err != nil {
 		return nil, err
 	}
-	v := &wire.View{Title: t.links, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
+	v := &wire.View{Title: t.links, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: clipText(st.Query, maxQueryChars), Action: wire.Action{ID: "search"}}}
 	if collections, err := a.client.collections(ctx); err == nil {
-		// A drop-down has at most 100 choices: the first collections, and the one being looked at in the last place
+		// A drop-down has 2 to 100 choices: the first collections, and the one being looked at in the last place
 		// when it is beyond them.
 		choices := []wire.Choice{{Value: "0", Title: t.all}}
+		seenCol := map[int64]bool{0: true}
 		selected := st.CollectionID == 0
 		for _, c := range collections {
-			choice := wire.Choice{Value: strconv.FormatInt(c.ID, 10), Title: c.Name}
+			if c.ID <= 0 || seenCol[c.ID] {
+				continue
+			}
+			seenCol[c.ID] = true
+			title := strings.TrimSpace(c.Name)
+			if title == "" {
+				title = "#" + strconv.FormatInt(c.ID, 10)
+			}
+			choice := wire.Choice{Value: strconv.FormatInt(c.ID, 10), Title: clipText(title, wire.StringMost)}
 			switch {
 			case len(choices) < maxFilterChoices:
 				choices = append(choices, choice)
@@ -143,17 +166,28 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			}
 			selected = selected || c.ID == st.CollectionID
 		}
-		if selected {
+		if selected && len(choices) >= 2 {
 			v.Filter = &wire.Filter{Name: "collection", Title: t.collections, Value: strconv.FormatInt(st.CollectionID, 10), Choices: choices, Action: wire.Action{ID: "collection"}}
 		}
 	}
-	section := wire.Section{Title: fmt.Sprintf(t.results, len(items)), Items: []wire.Component{{
+	section := wire.Section{Items: []wire.Component{{
 		Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "save-form", Push: &wire.Push{State: ext.EncodeState(pageState{Mode: "save", DraftID: randomID()}), Title: t.save}},
 	}}}
-	for _, item := range items[:min(len(items), maxViewLinks)] {
+	seenLinks := map[int64]bool{}
+	rendered := 0
+	for _, item := range items {
+		if item.ID <= 0 || seenLinks[item.ID] {
+			continue
+		}
+		seenLinks[item.ID] = true
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "link-" + strconv.FormatInt(item.ID, 10), Title: clipText(linkTitle(item), 2000), Subtitle: clipText(item.URL, 2000), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": strconv.FormatInt(item.ID, 10)}}})
+		rendered++
+		if rendered >= maxViewLinks {
+			break
+		}
 	}
-	if len(items) == 0 {
+	section.Title = fmt.Sprintf(t.results, rendered)
+	if rendered == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noLinks})
 	}
 	v.Sections = []wire.Section{section}
@@ -177,9 +211,9 @@ func detailView(r *ext.UIRequest, st pageState, item link, highlights []highligh
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: item.URL})
 	}
 	if item.Collection != nil && strings.TrimSpace(item.Collection.Name) != "" {
-		items = append(items, wire.Component{Type: wire.ComponentText, Text: item.Collection.Name, Style: wire.TextStyleSecondary})
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(strings.TrimSpace(item.Collection.Name), wire.StringMost), Style: wire.TextStyleSecondary})
 	}
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.archive, Action: &wire.Action{ID: "archive", Confirm: t.archive + "\n" + item.Name}})
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.archive, Action: &wire.Action{ID: "archive", Confirm: t.archive + "\n" + clipText(linkTitle(item), 500)}})
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
 	v := &wire.View{Title: clipText(linkTitle(item), 2000), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.read, Items: items}}}
 	used := len(items)

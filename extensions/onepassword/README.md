@@ -14,6 +14,7 @@ References need a Persona hub with secret providers ([nwverse/persona#3962](http
 - [Manifest](persona-extension.json)
 
 
-Version 0.4.0 adds phone-approved encrypted storage through the configured resident `op` node. See
-[phone-approved writes](../../docs/extensions/onepassword.md#phone-approved-writes) for local file input, supported
-categories, restrictions and authorization expiry. The metadata query tools remain read-only.
+Version 0.4.1 adds native `OTP` field support (raw base32 or `otpauth://`), built-in `LOGIN` `username`/`password`
+mapping without duplicate custom fields, and `edit` field deletion and in-place type conversion (including passkey-free
+`LOGIN` items). See [phone-approved writes](../../docs/extensions/onepassword.md#phone-approved-writes) for local file
+input, supported categories, restrictions and authorization expiry. The metadata query tools remain read-only.

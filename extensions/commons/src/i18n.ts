@@ -11,5 +11,12 @@ export function errorText(error: unknown, locale = ""): string {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 export function readTime(at: number, timeZone = "Local", locale = "en"): string {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? undefined : timeZone }).format(at);
+  if (!Number.isFinite(at) || Number.isNaN(new Date(at).getTime())) return "";
+  const loc = locale || "en";
+  const tz = timeZone && timeZone !== "Local" ? timeZone : undefined;
+  const opts: Intl.DateTimeFormatOptions = { year: "numeric", month: "short", day: "numeric" };
+  try { return new Intl.DateTimeFormat(loc, { ...opts, timeZone: tz }).format(at); } catch {}
+  if (tz) { try { return new Intl.DateTimeFormat(loc, { ...opts, timeZone: "UTC" }).format(at); } catch {} }
+  try { return new Intl.DateTimeFormat("en", { ...opts, timeZone: tz }).format(at); } catch {}
+  return new Intl.DateTimeFormat("en", { ...opts, timeZone: "UTC" }).format(at);
 }

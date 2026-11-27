@@ -255,11 +255,11 @@ func TestEveryScreenAtEveryVersion(t *testing.T) {
 func TestEmptyStoreShowsWelcomeAndCard(t *testing.T) {
 	a := newApp(storeWith(t, true))
 	v := drawPage(t, a, state{}, 5)
-	if len(v.Sections) != 1 {
+	if len(v.Sections) != 2 {
 		t.Fatalf("welcome sections = %d", len(v.Sections))
 	}
 	rows := 0
-	for _, it := range v.Sections[0].Items {
+	for _, it := range v.Sections[1].Items {
 		if it.Type == wire.ComponentRow {
 			rows++
 			if it.Action == nil || !strings.HasPrefix(it.Action.ID, "new:") {
@@ -342,7 +342,7 @@ func TestRoutingFallsThroughStaleIds(t *testing.T) {
 			}
 		}},
 		{"editor for a new type", state{S: projectSpace, D: "+"}, func(t *testing.T, v *wire.View, got state) {
-			if got.D != "+" || v.Title != "新建类型" {
+			if got.D != "+" || v.Title != "新建分类" {
 				t.Fatalf("new type editor = %+v", got)
 			}
 		}},
@@ -390,7 +390,7 @@ func TestActions(t *testing.T) {
 			}
 		}},
 		{"stale tab is refused", project, "tab:nope", nil, func(t *testing.T, res *wire.ActionResult, got state) {
-			if res.Toast != "没有类型「nope」" || got.T != "" {
+			if res.Toast != "找不到分类「nope」，它可能刚被删掉了。请回到概览重新选" || got.T != "" {
 				t.Fatalf("refused tab = %q / %+v", res.Toast, got)
 			}
 		}},
@@ -450,7 +450,7 @@ func TestActions(t *testing.T) {
 			}
 		}},
 		{"add an entity", state{S: projectSpace, T: "idea", F: "new"}, "add", map[string]string{"title": "新的点子"}, func(t *testing.T, res *wire.ActionResult, got state) {
-			if got.F != "" || res.Toast != "已创建「新的点子」" {
+			if got.F != "" || res.Toast != "已添加「新的点子」" {
 				t.Fatalf("added = %q / %+v", res.Toast, got)
 			}
 		}},
@@ -460,7 +460,7 @@ func TestActions(t *testing.T) {
 			}
 		}},
 		{"add without a type is refused", project, "add", map[string]string{"title": "x"}, func(t *testing.T, res *wire.ActionResult, _ state) {
-			if res.Toast != "先选择一个类型" {
+			if res.Toast != "还没选分类。请先点上面的一个分类，再添加条目" {
 				t.Fatalf("add without type = %q", res.Toast)
 			}
 		}},
@@ -490,7 +490,7 @@ func TestActions(t *testing.T) {
 			}
 		}},
 		{"new with an unknown template is refused", state{S: projectSpace, C: pickSlot}, "new:nope", nil, func(t *testing.T, res *wire.ActionResult, got state) {
-			if res.Toast != "没有模板「nope」" || got.C != pickSlot {
+			if res.Toast != "找不到模板「nope」。请从模板列表里重新选一个" || got.C != pickSlot {
 				t.Fatalf("refused new = %q / %+v", res.Toast, got)
 			}
 		}},
@@ -500,7 +500,7 @@ func TestActions(t *testing.T) {
 			}
 		}},
 		{"create with an unknown template is refused", state{}, "create:nope", nil, func(t *testing.T, res *wire.ActionResult, _ state) {
-			if res.Toast != "没有模板「nope」" {
+			if res.Toast != "找不到模板「nope」。请从模板列表里重新选一个" {
 				t.Fatalf("refused create = %q", res.Toast)
 			}
 		}},
@@ -539,10 +539,10 @@ func TestActionsWithoutSpace(t *testing.T) {
 		action string
 		toast  string
 	}{
-		{"save", "还没有空间"},
-		{"drop", "还没有空间"},
-		{"tab:x", "没有类型「x」"},
-		{"add", "先选择一个类型"},
+		{"save", "还没有空间。请先从模板新建一个空间"},
+		{"drop", "还没有空间，没有可以删除的"},
+		{"tab:x", "找不到分类「x」，它可能刚被删掉了。请回到概览重新选"},
+		{"add", "还没选分类。请先点上面的一个分类，再添加条目"},
 	}
 	for _, tc := range cases {
 		res := act(t, a, state{}, tc.action, map[string]string{"title": "x"})
@@ -649,8 +649,9 @@ func TestSpaceOverviewShowsEveryPart(t *testing.T) {
 	if head.Type != wire.ComponentHeader || head.Title != "项目与目标" {
 		t.Fatalf("header = %+v", head)
 	}
+	// The four type rows, then the button that adds a type.
 	types := v.Sections[1]
-	if types.Title != "类型" || len(types.Items) != 4 {
+	if types.Title != "分类" || len(types.Items) != 5 || types.Items[4].Title != "新建分类" {
 		t.Fatalf("type rows = %+v", types)
 	}
 	if types.Items[0].Action == nil || types.Items[0].Action.ID != "tab:idea" {
@@ -659,9 +660,10 @@ func TestSpaceOverviewShowsEveryPart(t *testing.T) {
 	if !strings.Contains(types.Items[0].Subtitle, "看板") {
 		t.Fatalf("idea subtitle = %q", types.Items[0].Subtitle)
 	}
-	last := v.Sections[len(v.Sections)-1]
-	if len(last.Items) != 3 || last.Items[1].Action.ID != "fold:space" || last.Items[2].Title != "新建空间" || last.Items[2].Action.ID != "new" {
-		t.Fatalf("button row = %+v", last.Items)
+	// The header's card ends with the settings and new-space buttons.
+	hs := v.Sections[0].Items
+	if n := len(hs); n < 2 || hs[n-2].Action.ID != "fold:space" || hs[n-1].Title != "新建空间" || hs[n-1].Action.ID != "new" {
+		t.Fatalf("header card = %+v", hs)
 	}
 }
 
@@ -753,7 +755,7 @@ func TestTypeTabShowsBoardFeedProgressTableAndQuickAdd(t *testing.T) {
 		t.Fatalf("table stats = %+v", grid)
 	}
 	index := v.Sections[2]
-	if index.Title != "打开" || len(index.Items) != len(table.Rows) {
+	if index.Title != "点开查看" || len(index.Items) != len(table.Rows) {
 		t.Fatalf("index section = %q with %d rows, want %d", index.Title, len(index.Items), len(table.Rows))
 	}
 	badges := 0
@@ -769,10 +771,10 @@ func TestTypeTabShowsBoardFeedProgressTableAndQuickAdd(t *testing.T) {
 		t.Fatal("index rows lack the status badge")
 	}
 
-	// Quick add: opened, it shows one title and a primary create, just above the buttons.
+	// Quick add: opened, it shows one title, a caption and a primary add, just above the buttons.
 	v = drawPage(t, a, state{S: id, T: "idea", F: "new"}, 5)
 	fold := v.Sections[len(v.Sections)-2]
-	if len(fold.Items) != 2 || fold.Items[0].Name != "title" || !fold.Items[1].Action.Submit {
+	if len(fold.Items) != 3 || fold.Items[0].Name != "title" || fold.Items[1].Type != wire.ComponentText || !fold.Items[2].Action.Submit {
 		t.Fatalf("quick add = %+v", fold.Items)
 	}
 }
@@ -834,7 +836,7 @@ func TestSpaceWithoutTypesOffersATypeAndNoTabs(t *testing.T) {
 		t.Fatalf("tabs in a space with no types: %+v", v.Tabs)
 	}
 	empty := v.Sections[1].Items[0]
-	if empty.Type != wire.ComponentEmpty || empty.Button == nil || empty.Button.Title != "新建类型" {
+	if empty.Type != wire.ComponentEmpty || empty.Button == nil || empty.Button.Title != "新建分类" {
 		t.Fatalf("no types = %+v", empty)
 	}
 }
@@ -847,7 +849,7 @@ func TestCardListsEntitiesInProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkView(t, "card", card, true)
-	if len(card.Sections) != 2 || card.Sections[1].Title != "在办" {
+	if len(card.Sections) != 2 || card.Sections[1].Title != "正在进行" {
 		t.Fatalf("card sections = %+v", card.Sections)
 	}
 	rows := card.Sections[1].Items
@@ -956,7 +958,7 @@ func TestFormFieldsAndSubmittedValues(t *testing.T) {
 	if _, ok := c.field(kernel.Prop{Key: "x", Name: "未知", Kind: "nope"}, "x", nil); ok {
 		t.Fatal("an unknown kind has a field")
 	}
-	if f, _ := c.field(kernel.Prop{Key: "u", Name: "链接", Kind: kernel.KindURL}, "u", nil); f.Placeholder != "https://" {
+	if f, _ := c.field(kernel.Prop{Key: "u", Name: "链接", Kind: kernel.KindURL}, "u", nil); f.Placeholder != "例如 https://example.com" {
 		t.Fatalf("url placeholder = %q", f.Placeholder)
 	}
 	rel, _ := kernel.KindOf(kernel.KindRelation)

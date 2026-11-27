@@ -18,7 +18,7 @@ type updateArgs struct {
 
 type pinArgs struct {
 	MemoID string `json:"memo_id"`
-	Pinned bool   `json:"pinned"`
+	Pinned *bool  `json:"pinned"`
 }
 
 func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
@@ -53,7 +53,10 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 		if err := validMemoID(in.MemoID); err != nil {
 			return nil, err
 		}
-		summary = fmt.Sprintf("Set pinned=%v for Memos note %s", in.Pinned, in.MemoID)
+		if in.Pinned == nil {
+			return nil, errors.New("pinned must be true or false")
+		}
+		summary = fmt.Sprintf("Set pinned=%v for Memos note %s", *in.Pinned, in.MemoID)
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
@@ -61,6 +64,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 }
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
+	var keyArgs any
 	var fn func() (string, error)
 	switch name {
 	case "memos_create":
@@ -71,6 +75,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := validContent(in.Content); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			item, err := a.client.create(ctx, in.Content)
 			if err != nil {
@@ -92,6 +97,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := a.checkOwner(ctx, in.MemoID); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			if _, err := a.client.updateContent(ctx, in.MemoID, in.Content); err != nil {
 				return "", err
@@ -106,20 +112,25 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := validMemoID(in.MemoID); err != nil {
 			return nil, err
 		}
+		if in.Pinned == nil {
+			return nil, errors.New("pinned must be true or false")
+		}
 		if err := a.checkOwner(ctx, in.MemoID); err != nil {
 			return nil, err
 		}
+		pinned := *in.Pinned
+		keyArgs = in
 		fn = func() (string, error) {
-			if _, err := a.client.updatePinned(ctx, in.MemoID, in.Pinned); err != nil {
+			if _, err := a.client.updatePinned(ctx, in.MemoID, pinned); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("Set pinned=%v for Memos note %s", in.Pinned, in.MemoID), nil
+			return fmt.Sprintf("Set pinned=%v for Memos note %s", pinned, in.MemoID), nil
 		}
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(keyArgs)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

@@ -11,5 +11,11 @@ export function errorText(error: unknown, locale = ""): string {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 export function readTime(at: number | string, timeZone = "Local", locale = "en"): string {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? undefined : timeZone }).format(new Date(at));
+  const value = new Date(at);
+  if (Number.isNaN(value.getTime())) return "";
+  const tz = timeZone === "Local" ? undefined : timeZone;
+  try { return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: tz }).format(value); } catch {}
+  try { return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }).format(value); } catch {}
+  try { return new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }).format(value); } catch {}
+  return value.toISOString().slice(0, 10);
 }

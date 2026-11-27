@@ -55,14 +55,40 @@ const (
 	PerspCrossSource = "cross_source"
 )
 
+// Kinds of L1 patterns (v0.4.0 §1.3): profile core (A1), cognitive principles (A2), universal collaboration
+// contracts (B), and environment/tool ops runbooks (C).
+const (
+	KindProfileCore = "profile_core"
+	KindPrinciple   = "principle"
+	KindContract    = "contract"
+	KindOpsRunbook  = "ops_runbook"
+)
+
+// Contract polarities (unified design §1.3 step C): action direction of a collaboration contract so downstream
+// standing selection can balance autonomous execution against verification and communication.
+const (
+	PolarityAct         = "act"
+	PolarityCheck       = "check"
+	PolarityCommunicate = "communicate"
+	PolarityRoute       = "route"
+)
+
+// Polarities lists the allowed contract polarity values.
+var Polarities = []string{PolarityAct, PolarityCheck, PolarityCommunicate, PolarityRoute}
+
 // Facets are the six the overview covers. People's cards (⑤′) feed World with their facts and commitments only;
 // their evaluations and inferences never come in (privacy line, design 2.8).
-var Facets = []entry.Facet{entry.Interaction, entry.Tools, entry.Judgement, entry.Workflow, entry.World, entry.Persona}
+var (
+	Facets          = []entry.Facet{entry.Interaction, entry.Tools, entry.Judgement, entry.Workflow, entry.World, entry.Persona}
+	ContractFacets  = []entry.Facet{entry.Interaction, entry.Tools}
+	PrincipleFacets = []entry.Facet{entry.Judgement, entry.Workflow, entry.World, entry.Persona}
+)
 
-// Pattern is one cross-event pattern.
+// Pattern is one cross-event L1 principle or collaboration contract.
 type Pattern struct {
 	ID          string `json:"id"` // ov:<10 hex>
 	Facet       string `json:"facet"`
+	Kind        string `json:"kind,omitempty"` // principle | contract (empty inferred from Facet)
 	Perspective string `json:"perspective"`
 	Lifecycle   string `json:"lifecycle"`
 	Text        string `json:"text"`
@@ -75,10 +101,18 @@ type Pattern struct {
 	Poles           []Pole   `json:"poles,omitempty"`
 	DefaultContrast string   `json:"default_contrast,omitempty"`
 	HoldsForAnyone  bool     `json:"holds_for_anyone,omitempty"`
-	EvidenceIDs     []string `json:"evidence_ids"`          // the curated entries it rests on (classes, actions)
-	CounterIDs      []string `json:"counter_ids,omitempty"` // entries the counter-search judged against it
-	ScenesCount     int      `json:"scenes_count"`          // distinct projects and source kinds among the evidence
-	SourcesCount    int      `json:"sources_count"`         // distinct quoted units·days among the evidence
+	Dimension       string   `json:"dimension,omitempty"`       // principle cognitive dimension (decision/thinking/reaction/attention/communication)
+	Polarity        string   `json:"polarity,omitempty"`        // contract polarity (act/check/communicate/route)
+	RuleType        string   `json:"rule_type,omitempty"`       // contract occasion/type (e.g. correction, dispatch, report)
+	Hard            bool     `json:"hard,omitempty"`            // contract: hard rule (corrected >=2 days within 7d or ban/anger)
+	ViolationCount  int      `json:"violation_count,omitempty"` // contract: distinct days the user had to correct it
+	CoveredIDs      []string `json:"covered_ids,omitempty"`     // contract: user-edited/handwritten entries covered (never deleted)
+	Rooted          bool     `json:"rooted,omitempty"`          // core >=4 ISO weeks or hard contract: never auto-closed by silence
+	EvidenceIDs     []string `json:"evidence_ids"`              // the curated entries it rests on (classes, actions)
+	CounterIDs      []string `json:"counter_ids,omitempty"`     // entries the counter-search judged against it
+	ScenesCount     int      `json:"scenes_count"`              // distinct projects and source kinds among the evidence
+	SourcesCount    int      `json:"sources_count"`             // distinct quoted units·days among the evidence
+	UniqueQuotes    int      `json:"unique_quotes,omitempty"`   // distinct normalised user quotes among the evidence
 	ActiveWeeks     []string `json:"active_weeks,omitempty"`
 	CounterRatio    float64  `json:"counter_ratio,omitempty"`
 	Gate            string   `json:"gate,omitempty"`   // the first gate it fails, "" when through
@@ -92,6 +126,34 @@ type Pattern struct {
 	Created         string   `json:"created"`
 	UpdatedAt       string   `json:"updated_at"`
 }
+
+// KindOf returns the pattern's L1 kind (profile_core, principle, contract, or ops_runbook), inferring from Facet for
+// states written before Kind.
+func (p *Pattern) KindOf() string {
+	switch p.Kind {
+	case KindProfileCore, KindPrinciple, KindContract, KindOpsRunbook:
+		return p.Kind
+	}
+	if p.Facet == string(entry.Tools) {
+		return KindOpsRunbook
+	}
+	if p.Facet == string(entry.Interaction) {
+		return KindContract
+	}
+	return KindPrinciple
+}
+
+// IsProfileCore reports whether p is an A1 user profile & anti-misread boundary entry.
+func (p *Pattern) IsProfileCore() bool { return p.KindOf() == KindProfileCore }
+
+// IsContract reports whether p is a B universal collaboration contract.
+func (p *Pattern) IsContract() bool { return p.KindOf() == KindContract }
+
+// IsPrinciple reports whether p is an A2 cognitive principle.
+func (p *Pattern) IsPrinciple() bool { return p.KindOf() == KindPrinciple }
+
+// IsOpsRunbook reports whether p is a C environment/tool operational runbook (never global 4 KB standing).
+func (p *Pattern) IsOpsRunbook() bool { return p.KindOf() == KindOpsRunbook }
 
 // Pole is one end of a pattern the user goes both ways on: in which situation, and what they do then.
 type Pole struct {
@@ -117,17 +179,19 @@ type Run struct {
 // Holdout is one forward check: the patterns frozen before a week, asked to predict the user's choices in it, against
 // the scattered entries in the same space and against no memory.
 type Holdout struct {
-	Week     string             `json:"week"`
-	At       string             `json:"at"`
-	Backtest bool               `json:"backtest,omitempty"` // patterns built with a cutoff at the week's start
-	N        int                `json:"n"`
-	Hits     map[string]int     `json:"hits"` // arm → right answers
-	Rate     map[string]float64 `json:"rate"`
-	Chars    map[string]int     `json:"chars"` // arm → characters of memory shown
-	Patterns int                `json:"patterns"`
-	Excluded int                `json:"excluded,omitempty"` // patterns left out because they rest on a test item
-	Calls    int                `json:"calls"`
-	Notes    []string           `json:"notes,omitempty"`
+	Week        string             `json:"week"`
+	At          string             `json:"at"`
+	Backtest    bool               `json:"backtest,omitempty"` // patterns built with a cutoff at the week's start
+	N           int                `json:"n"`
+	Candidates  int                `json:"candidates,omitempty"`   // choice candidates scanned before dropping easy ones
+	DroppedEasy int                `json:"dropped_easy,omitempty"` // candidates a no-memory model got right in both orders
+	Hits        map[string]int     `json:"hits"`                   // arm → right answers
+	Rate        map[string]float64 `json:"rate"`
+	Chars       map[string]int     `json:"chars"` // arm → characters of memory shown
+	Patterns    int                `json:"patterns"`
+	Excluded    int                `json:"excluded,omitempty"` // patterns left out because they rest on a test item
+	Calls       int                `json:"calls"`
+	Notes       []string           `json:"notes,omitempty"`
 }
 
 // Audit is a blind spot check of patterns by a model, kept for the user to go over.
@@ -157,8 +221,10 @@ type State struct {
 	Audits   []Audit             `json:"audits,omitempty"`
 	// Refreshed is the last light refresh that changed anything, and Dead the evidence ids it found gone (so a
 	// snapshot with nothing new is not counted again).
-	Refreshed string   `json:"refreshed,omitempty"`
-	Dead      []string `json:"dead,omitempty"`
+	Refreshed      string   `json:"refreshed,omitempty"`
+	Dead           []string `json:"dead,omitempty"`
+	ContractsSig   string   `json:"contracts_sig,omitempty"`    // signature of the last aggregated contract rule set
+	ProfileCoreSig string   `json:"profile_core_sig,omitempty"` // signature of the last profile-core input set
 }
 
 func newState() *State {
@@ -381,4 +447,4 @@ func SaveScratch(dir, name string, s *State) error {
 }
 
 // Prompt is the version of the overview's prompts, recorded in the run log.
-const Prompt = "overview/1"
+const Prompt = "overview/4"

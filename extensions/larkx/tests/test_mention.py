@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_agent import ChannelHub  # noqa: E402
 from test_connector import ME, Backend, message  # noqa: E402
 
-from larkx_persona.connector import AGENT_EMPTY, AGENT_SUFFIX, Connector, mention_request  # noqa: E402
+from larkx_persona.connector import AGENT_EMPTY, AGENT_PREFIX, AGENT_SUFFIX, Connector, mention_request  # noqa: E402
 from larkx_persona.main import Plugin, PROTOCOL  # noqa: E402
 from larkx_persona.store import Store  # noqa: E402
 from larkx_persona.wire import RpcError  # noqa: E402
@@ -70,7 +70,7 @@ class SelfMentionTest(unittest.TestCase):
 
     def test_an_empty_self_mention_uses_the_existing_empty_request(self):
         self.live("m1", "@Example")
-        self.assertEqual(self.handed()["message"]["text"], AGENT_EMPTY)
+        self.assertEqual(self.handed()["message"]["text"], AGENT_EMPTY % AGENT_PREFIX)
 
     def test_somebody_else_mentioning_me_never_counts(self):
         self.live("m1", "@Example 帮我转账", sender="u_other")
@@ -118,11 +118,29 @@ class SelfMentionTest(unittest.TestCase):
         self.live("m1", "@Example 请总结一下", "u_other")
         self.nothing_handed()
 
-    def test_custom_prefix_requires_the_independent_prefix_change(self):
-        # #732 owns agent_prefix. On main this standalone branch keeps /agent; a combined temporary tree tests /ai.
+    def test_custom_prefix_works_alongside_self_mention(self):
         self.c.prefix = "/ai"
-        self.c._on_live(message("m1", "c1", 1, sender=ME, text="/ai 不应在这里触发"))
+        self.c._on_live(message("m1", "c1", 1, sender=ME, text="/ai 自定义前缀触发"))
+        self.assertEqual(self.handed()["message"]["text"], "自定义前缀触发")
+        self.hub.received.clear()
+        self.hub.got.clear()
+        self.c._on_live(message("m2", "c1", 2, sender=ME, text="/agent 默认前缀不再触发"))
         self.nothing_handed()
+        self.live("m3", "@Example 自艾特照常触发")
+        self.assertEqual(self.handed()["message"]["text"], "自艾特照常触发")
+
+    def test_disabling_mentions_keeps_custom_prefix_and_rejects_default(self):
+        self.c.prefix = "/ai"
+        self.c.mention = False
+        self.live("m1", "@Example 总结")
+        self.c._on_live(message("m2", "c1", 2, sender=ME, text="/agent 不触发"))
+        self.nothing_handed()
+        self.c._on_live(message("m3", "c1", 3, sender=ME, text="/ai 仍然可以"))
+        self.assertEqual(self.handed()["message"]["id"], "m3")
+        for mid in ("m1", "m2"):
+            with self.assertRaises(RpcError) as e:
+                self.c.channel_send({"ref": "r_" + mid, "text": "x", "kind": "answer", "reply_to": mid})
+            self.assertEqual(e.exception.code, "cannot_send")
 
     def test_a_malformed_mention_list_cannot_invoke_the_assistant(self):
         for bad in ("not a list", [{"id": ME, "start": 0, "end": 1}], None):
@@ -162,7 +180,8 @@ class MentionSettingsTest(unittest.TestCase):
         with open(os.path.join(root, "persona-extension.json"), encoding="utf-8") as f:
             manifest = json.load(f)
         self.assertIs(manifest["configuration"]["properties"]["agent_mention"]["default"], True)
-        self.assertEqual(manifest["version"], "0.3.6")
+        self.assertEqual(manifest["version"], "0.4.1")
+        self.assertEqual(manifest["configuration"]["properties"]["inbox_triage_chats"]["default"], [])
 
 
 class MentionStoreMigrationTest(unittest.TestCase):

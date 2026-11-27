@@ -1,25 +1,31 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 )
 
-// The program on a computer (the manifest's node section). It does the three things an attempt needs on the
+// The program on a computer (the manifest's node section). It does what an attempt needs on the
 // computer where it runs, and nothing else:
 //
+//	ats.probe_launcher  check whether a configured launcher gateway accepts TCP connections
 //	ats.prepare  check the repository out into a worktree of its own, at the commit the ref names now
 //	ats.accept   run the task's acceptance command there (started here, reported with the event ats.accepted)
 //	ats.release  remove the worktree again, unless it holds work that is not committed
@@ -31,24 +37,38 @@ const (
 	outputTailBytes   = 4 << 10
 	defaultAcceptTime = 10 * time.Minute
 	maxAcceptTime     = 60 * time.Minute
+	invalidRefMessage = "ref must be a branch, tag or commit"
 )
 
 var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,80}$`)
+var errInvalidRef = errors.New("invalid_ref: " + invalidRefMessage)
 
 type nodeWorker struct {
-	data   string
-	notify func(event string, params any)
+	data                string
+	launcherSettingsDir string
+	notify              func(event string, params any)
 
 	mu      sync.Mutex
 	repos   []string
 	running map[string]context.CancelFunc
 }
 
+type probeLauncherParams struct {
+	Launcher string `json:"launcher"`
+}
+
+type probeLauncherResult struct {
+	Reachable bool   `json:"reachable"`
+	Endpoint  string `json:"endpoint,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Skipped   bool   `json:"skipped,omitempty"`
+}
+
 type prepareParams struct {
 	TaskID   string `json:"task_id"`
 	Attempt  int    `json:"attempt"`
 	Repo     string `json:"repo"`
-	Ref      string `json:"ref"`
+	Ref      string `json:"ref,omitempty"`
 	Readonly bool   `json:"readonly"`
 }
 
@@ -76,14 +96,15 @@ type acceptResult struct {
 	OutputTail string `json:"output_tail,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
 	HeadSHA    string `json:"head_sha,omitempty"`
-	Dirty      bool   `json:"dirty,omitempty"`
+	Dirty      *bool  `json:"dirty,omitempty"`
 }
 
 type releaseParams struct {
-	TaskID  string `json:"task_id"`
-	Attempt int    `json:"attempt"`
-	Repo    string `json:"repo"`
-	BaseSHA string `json:"base_sha"`
+	TaskID   string `json:"task_id"`
+	Attempt  int    `json:"attempt"`
+	Repo     string `json:"repo"`
+	BaseSHA  string `json:"base_sha"`
+	Readonly bool   `json:"readonly,omitempty"`
 	// CommitMessage, when set, has uncommitted work committed to the attempt's branch with this message, so the
 	// work is on the branch and the worktree can go.
 	CommitMessage string `json:"commit_message,omitempty"`
@@ -91,13 +112,97 @@ type releaseParams struct {
 
 type releaseResult struct {
 	Removed bool   `json:"removed"`
-	Kept    string `json:"kept,omitempty"` // the worktree, when it was left because of uncommitted work
+	Kept    string `json:"kept,omitempty"`
 	Branch  string `json:"branch,omitempty"`
 	HeadSHA string `json:"head_sha,omitempty"`
+	Dirty   *bool  `json:"dirty,omitempty"`
 }
 
 func newNodeWorker(data string, repos []string, notify func(string, any)) *nodeWorker {
 	return &nodeWorker{data: data, repos: repos, notify: notify, running: map[string]context.CancelFunc{}}
+}
+
+func (n *nodeWorker) findLauncherSettingsDir() string {
+	if n.launcherSettingsDir != "" {
+		return n.launcherSettingsDir
+	}
+	dir := filepath.Clean(n.data)
+	for range 4 {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+		settings := filepath.Join(dir, "launcher-settings")
+		if info, err := os.Stat(settings); err == nil && info.IsDir() {
+			return settings
+		}
+	}
+	return ""
+}
+
+func (n *nodeWorker) probeLauncher(ctx context.Context, p probeLauncherParams) (probeLauncherResult, error) {
+	skipped := probeLauncherResult{Reachable: true, Skipped: true}
+	if strings.TrimSpace(p.Launcher) == "" {
+		return skipped, nil
+	}
+	if !safeIDPattern.MatchString(p.Launcher) || strings.Contains(p.Launcher, "..") {
+		return probeLauncherResult{}, errors.New("invalid launcher name")
+	}
+	dir := n.findLauncherSettingsDir()
+	if dir == "" {
+		return skipped, nil
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, p.Launcher+"-env-settings.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		raw, err = os.ReadFile(filepath.Join(dir, p.Launcher+"-settings.json"))
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return skipped, nil
+	}
+	if err != nil {
+		return probeLauncherResult{}, fmt.Errorf("read launcher settings: %w", err)
+	}
+	var settings struct {
+		Env struct {
+			AnthropicBaseURL string `json:"ANTHROPIC_BASE_URL"`
+			OpenAIBaseURL    string `json:"OPENAI_BASE_URL"`
+		} `json:"env"`
+		BaseURL string `json:"base_url"`
+	}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return probeLauncherResult{}, fmt.Errorf("decode launcher settings: %w", err)
+	}
+	baseURL := cmp.Or(strings.TrimSpace(settings.Env.AnthropicBaseURL), strings.TrimSpace(settings.Env.OpenAIBaseURL), strings.TrimSpace(settings.BaseURL))
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return probeLauncherResult{}, errors.New("invalid launcher base URL")
+	}
+	host, port := u.Hostname(), u.Port()
+	if host == "" {
+		return skipped, nil
+	}
+	if port == "" {
+		switch u.Scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		default:
+			return skipped, nil
+		}
+	}
+	addr := net.JoinHostPort(host, port)
+	const timeout = 2 * time.Second
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(pctx, "tcp", addr)
+	if err != nil {
+		return probeLauncherResult{Endpoint: addr, Error: err.Error()}, nil
+	}
+	_ = conn.Close()
+	return probeLauncherResult{Reachable: true, Endpoint: addr}, nil
 }
 
 func attemptKey(taskID string, attempt int) (string, error) {
@@ -157,26 +262,117 @@ func (n *nodeWorker) allowedRepo(repo string) (string, error) {
 }
 
 func git(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	bin, err := findGit()
+	if err != nil {
+		return "", fmt.Errorf("find git: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, bin, append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(cleanEnv(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	s := strings.TrimSpace(string(out))
 	if err != nil {
-		return s, fmt.Errorf("git %s: %s", args[0], firstLinePreview(s, 300))
+		if s == "" {
+			return s, fmt.Errorf("git %s: %w", args[0], err)
+		}
+		return s, fmt.Errorf("git %s: %w: %s", args[0], err, firstLinePreview(s, 300))
 	}
 	return s, nil
 }
 
-// cleanEnv is this program's environment without what the hub put there for it.
+// findGit also checks the appended directories because exec resolves a command before applying Cmd.Env.
+func findGit() (string, error) {
+	bin, err := exec.LookPath("git")
+	if !errors.Is(err, exec.ErrNotFound) {
+		return bin, err
+	}
+	for _, dir := range additionalToolDirs(os.Getenv("PATH")) {
+		if path, err := exec.LookPath(filepath.Join(dir, "git")); err == nil {
+			return path, nil
+		}
+	}
+	return "", err
+}
+
+func additionalToolDirs(path string) []string {
+	dirs := []string{"/usr/local/bin", "/opt/homebrew/bin"}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
+	}
+	existing := filepath.SplitList(path)
+	var added []string
+	for _, dir := range dirs {
+		if slices.ContainsFunc(existing, func(entry string) bool { return filepath.Clean(entry) == dir }) {
+			continue
+		}
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			added = append(added, dir)
+			existing = append(existing, dir)
+		}
+	}
+	return added
+}
+
+// cleanEnv removes Persona-injected variables and completes the tool search path.
 func cleanEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "PERSONA_") {
+		if strings.HasPrefix(kv, "PERSONA_") || strings.HasPrefix(kv, "PATH=") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	return env
+	path := os.Getenv("PATH")
+	dirs := append(filepath.SplitList(path), additionalToolDirs(path)...)
+	return append(env, "PATH="+strings.Join(dirs, string(os.PathListSeparator)))
+}
+
+func worktreeDirty(ctx context.Context, dir string) (bool, error) {
+	status, err := git(ctx, dir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	return status != "", err
+}
+
+func validateRef(ref string) error {
+	if ref == "" || len(ref) > 200 || strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, "+") ||
+		strings.HasPrefix(ref, "^") || strings.ContainsRune(ref, ':') {
+		return errInvalidRef
+	}
+	for _, r := range ref {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return errInvalidRef
+		}
+	}
+	return nil
+}
+
+// resolveCommit finds ref in repo, fetching configured remotes if the commit is missing locally so
+// multi-machine tasks sharing a Git remote can run seamlessly on another node.
+func resolveCommit(ctx context.Context, repo, ref string) (string, error) {
+	if err := validateRef(ref); err != nil {
+		return "", err
+	}
+	if sha, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && sha != "" {
+		return sha, nil
+	}
+	remotes, err := git(ctx, repo, "remote")
+	if err != nil || strings.TrimSpace(remotes) == "" {
+		return "", fmt.Errorf("ref_not_found: %s names no commit in the repository", ref)
+	}
+	_, _ = git(ctx, repo, "fetch", "--all", "--prune", "--quiet")
+	if sha, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && sha != "" {
+		return sha, nil
+	}
+	if ref != "HEAD" {
+		// 禁用远端的引用映射，使定向 fetch 只记录 FETCH_HEAD。
+		if _, ferr := git(ctx, repo, "fetch", "--no-tags", "--quiet", "--refmap=", "origin", "--", ref); ferr == nil {
+			if sha, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && sha != "" {
+				return sha, nil
+			}
+			if sha, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"); err == nil && sha != "" {
+				return sha, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("ref_not_found: %s names no commit in the repository", ref)
 }
 
 func (n *nodeWorker) prepare(ctx context.Context, p prepareParams) (prepareResult, error) {
@@ -188,16 +384,13 @@ func (n *nodeWorker) prepare(ctx context.Context, p prepareParams) (prepareResul
 	if err != nil {
 		return prepareResult{}, err
 	}
-	ref := strings.TrimSpace(p.Ref)
-	if ref == "" {
-		ref = "HEAD"
+	ref := cmpOr(p.Ref, "HEAD")
+	if err := validateRef(ref); err != nil {
+		return prepareResult{}, err
 	}
-	if strings.HasPrefix(ref, "-") {
-		return prepareResult{}, errors.New("ref must be a commit-ish that does not start with -")
-	}
-	sha, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	if err != nil || sha == "" {
-		return prepareResult{}, fmt.Errorf("ref_not_found: %s names no commit in the repository", ref)
+	sha, err := resolveCommit(ctx, repo, ref)
+	if err != nil {
+		return prepareResult{}, err
 	}
 	path := n.worktree(key)
 	res := prepareResult{Path: path, BaseSHA: sha}
@@ -259,8 +452,10 @@ func (n *nodeWorker) accept(p acceptParams) error {
 		if sha, err := git(gctx, dir, "rev-parse", "HEAD"); err == nil {
 			res.HeadSHA = sha
 		}
-		if st, err := git(gctx, dir, "status", "--porcelain"); err == nil {
-			res.Dirty = st != ""
+		if dirty, err := worktreeDirty(gctx, dir); err == nil {
+			res.Dirty = boolPtr(dirty)
+		} else {
+			res.Error = cmpOr(res.Error, "check worktree: "+err.Error())
 		}
 		gcancel()
 		if raw, err := json.Marshal(res); err == nil {
@@ -282,7 +477,7 @@ func (n *nodeWorker) accept(p acceptParams) error {
 func runAcceptance(ctx context.Context, dir, command string) acceptResult {
 	start := time.Now()
 	tail := &tailBuffer{max: outputTailBytes}
-	cmd := exec.Command("sh", "-c", command)
+	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = cleanEnv()
 	cmd.Stdout, cmd.Stderr = tail, tail
@@ -342,8 +537,8 @@ func (n *nodeWorker) acceptStatus(taskID string, attempt int) (acceptResult, err
 	return res, nil
 }
 
-// release stops the attempt's acceptance command if it still runs and removes its worktree. A worktree with
-// uncommitted changes stays, and so does a branch with commits: the work is the user's to look at.
+// release 停止验收命令并尝试移除工作树。无法自动提交的修改、只读任务中产生的提交都会保留工作树。
+// 有新提交的分支会保留。
 func (n *nodeWorker) release(ctx context.Context, p releaseParams) (releaseResult, error) {
 	key, err := attemptKey(p.TaskID, p.Attempt)
 	if err != nil {
@@ -356,17 +551,30 @@ func (n *nodeWorker) release(ctx context.Context, p releaseParams) (releaseResul
 	n.mu.Unlock()
 	_ = os.Remove(n.resultFile(key))
 	path := n.worktree(key)
-	if _, err := os.Stat(path); err != nil {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return releaseResult{Removed: true}, nil
+	} else if err != nil {
+		return releaseResult{}, fmt.Errorf("check worktree: %w", err)
 	}
 	res := releaseResult{}
-	if sha, err := git(ctx, path, "rev-parse", "HEAD"); err == nil {
-		res.HeadSHA = sha
+	head, err := git(ctx, path, "rev-parse", "HEAD")
+	if err != nil {
+		return res, err
 	}
+	res.HeadSHA = head
 	if b, err := git(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD"); err == nil {
 		res.Branch = b
 	}
-	if st, err := git(ctx, path, "status", "--porcelain"); err == nil && st != "" {
+	dirty, err := worktreeDirty(ctx, path)
+	if err != nil {
+		return res, err
+	}
+	res.Dirty = boolPtr(dirty)
+	if p.Readonly && p.BaseSHA != "" && head != p.BaseSHA {
+		res.Dirty, res.Kept = boolPtr(true), path
+		return res, nil
+	}
+	if res.Dirty != nil && *res.Dirty {
 		if res.Branch == "" || strings.TrimSpace(p.CommitMessage) == "" || commitAll(ctx, path, p.CommitMessage) != nil {
 			res.Kept = path
 			return res, nil
@@ -374,16 +582,21 @@ func (n *nodeWorker) release(ctx context.Context, p releaseParams) (releaseResul
 		if sha, err := git(ctx, path, "rev-parse", "HEAD"); err == nil {
 			res.HeadSHA = sha
 		}
-		if st, err := git(ctx, path, "status", "--porcelain"); err != nil || st != "" {
-			res.Kept = path // something the commit did not take
+		if dirty, err := worktreeDirty(ctx, path); err != nil || dirty {
+			res.Dirty, res.Kept = boolPtr(true), path
 			return res, nil
 		}
+		res.Dirty = boolPtr(false)
 	}
 	repo, err := n.allowedRepo(p.Repo)
 	if err != nil {
 		return res, err
 	}
-	if _, err := git(ctx, repo, "worktree", "remove", "--force", path); err != nil {
+	remove := []string{"worktree", "remove"}
+	if !p.Readonly {
+		remove = append(remove, "--force")
+	}
+	if _, err := git(ctx, repo, append(remove, path)...); err != nil {
 		return res, err
 	}
 	res.Removed = true
@@ -474,10 +687,19 @@ func nodeProgram(id, version string) ext.Program {
 // rpc answers the hub program's calls (ats.<method> over nodes.call).
 func (n *nodeWorker) rpc(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
-	case "prepare":
-		var p prepareParams
+	case "probe_launcher":
+		var p probeLauncherParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, err
+		}
+		return n.probeLauncher(ctx, p)
+	case "prepare":
+		p := prepareParams{Ref: "HEAD"}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		if p.Ref == "" {
+			return nil, errInvalidRef
 		}
 		return n.prepare(ctx, p)
 	case "accept":

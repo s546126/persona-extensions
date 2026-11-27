@@ -28,14 +28,15 @@ export const clip = (text: string, most: number) => {
   return chars.slice(0, most - 1).join("").trimEnd() + "…";
 };
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
+const hasLoneSurrogate = (value: string) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
 export function queryText(value: unknown): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value) || hasLoneSurrogate(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 200) throw new ReadError("invalid");
   return query;
 }
 export function titleText(value: unknown): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value) || hasLoneSurrogate(value)) throw new ReadError("invalid");
   const title = oneLine(value);
   if (!title || Array.from(title).length > 500) throw new ReadError("invalid");
   return title;
@@ -96,6 +97,7 @@ function canonicalURL(raw: string, host: string, path: RegExp): string {
   if (url.protocol !== "https:" || url.hostname !== host || url.port || url.username || url.password || !path.test(url.pathname)) throw new ReadError("bad_answer");
   url.search = "";
   url.hash = "";
+  if (url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 export interface Question {
@@ -135,7 +137,11 @@ export function parseQuestions(raw: unknown, site: Site, at: number): SearchResu
     if (seen.has(id)) throw new ReadError("bad_answer"); seen.add(id);
     const title = clip(oneLine(decodeEntities(string(question.title))), 500);
     if (!title) throw new ReadError("bad_answer");
-    const tags = array(question.tags).slice(0, 10).map(value => tagText(string(value)));
+    const tags = array(question.tags).slice(0, 10).map(value => {
+      const rawTag = string(value);
+      if (!rawTag) throw new ReadError("bad_answer");
+      try { return tagText(rawTag); } catch { throw new ReadError("bad_answer"); }
+    });
     if (new Set(tags).size !== tags.length) throw new ReadError("bad_answer");
     const acceptedAnswerID = question.accepted_answer_id == null ? undefined : integer(question.accepted_answer_id, 1, 9_999_999_999);
     return { id, title, url: canonicalURL(string(question.link), host, new RegExp(`^/questions/${id}(?:/|$)`)), score: integer(question.score, -1_000_000), answerCount: integer(question.answer_count), ...(acceptedAnswerID ? { acceptedAnswerID } : {}), tags, license: license(question.content_license), ...person(question.owner, host) };

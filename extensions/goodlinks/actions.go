@@ -13,7 +13,7 @@ type readArgs struct {
 
 type starArgs struct {
 	LinkID  string `json:"link_id"`
-	Starred bool   `json:"starred"`
+	Starred *bool  `json:"starred"`
 }
 
 func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
@@ -36,7 +36,10 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 		if err := validLinkID(in.LinkID); err != nil {
 			return nil, err
 		}
-		summary = fmt.Sprintf("Set starred=%v for GoodLinks link %s", in.Starred, in.LinkID)
+		if in.Starred == nil {
+			return nil, errors.New("starred is required")
+		}
+		summary = fmt.Sprintf("Set starred=%v for GoodLinks link %s", *in.Starred, in.LinkID)
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
@@ -45,6 +48,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
 	var fn func() (string, error)
+	var keyData []byte
 	switch name {
 	case "goodlinks_mark_read":
 		var in readArgs
@@ -54,6 +58,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := validLinkID(in.LinkID); err != nil {
 			return nil, err
 		}
+		keyData, _ = json.Marshal(in)
 		fn = func() (string, error) {
 			if _, err := a.client.update(ctx, in.LinkID, map[string]any{"read": true}); err != nil {
 				return "", err
@@ -68,17 +73,21 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := validLinkID(in.LinkID); err != nil {
 			return nil, err
 		}
+		if in.Starred == nil {
+			return nil, errors.New("starred is required")
+		}
+		starred := *in.Starred
+		keyData, _ = json.Marshal(in)
 		fn = func() (string, error) {
-			if _, err := a.client.update(ctx, in.LinkID, map[string]any{"starred": in.Starred}); err != nil {
+			if _, err := a.client.update(ctx, in.LinkID, map[string]any{"starred": starred}); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("Set starred=%v for GoodLinks link %s", in.Starred, in.LinkID), nil
+			return fmt.Sprintf("Set starred=%v for GoodLinks link %s", starred, in.LinkID), nil
 		}
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

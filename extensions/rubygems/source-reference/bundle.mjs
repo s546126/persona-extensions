@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "rubygems", name: "RubyGems", version: "0.1.3", icon: "assets/icon.png", description: "Search Ruby gems on the official RubyGems JSON API. Compare current versions, licenses, runtime dependencies, release dates, download activity, documentation and repository links. Get an exact-version gem install command without executing it.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/rubygems/README.md", tags: ["Development", "Ruby", "RubyGems", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/rubygems.mjs", sha256: "" } }, contributes: { connectors: [{ id: "rubygems", name: "RubyGems", capabilities: ["status", "tools"], hosts: ["rubygems.org"], agent_tools: ["rubygems_*"] }], ui: [{ id: "rubygems", title: "RubyGems", placement: "nav_page", icon: "code" }] }, permissions: { network: ["rubygems.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "rubygems", name: "RubyGems", version: "0.1.4", icon: "assets/icon.png", description: "Search Ruby gems on the official RubyGems JSON API. Compare current versions, licenses, runtime dependencies, release dates, download activity, documentation and repository links. Get an exact-version gem install command without executing it.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/rubygems/README.md", tags: ["Development", "Ruby", "RubyGems", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/rubygems.mjs", sha256: "" } }, contributes: { connectors: [{ id: "rubygems", name: "RubyGems", capabilities: ["status", "tools"], hosts: ["rubygems.org"], agent_tools: ["rubygems_*"] }], ui: [{ id: "rubygems", title: "RubyGems", placement: "nav_page", icon: "code" }] }, permissions: { network: ["rubygems.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 1 << 20, fresh: 15 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 250 });
@@ -779,14 +779,36 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, raw, most = 128) {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 function gemName(value) {
   if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)) throw new ReadError("invalid");
   return value;
 }
 function queryText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -830,14 +852,14 @@ function httpsURL(value) {
   } catch {
     return void 0;
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.port) return void 0;
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) return void 0;
   return url.href;
 }
 function license(value) {
   if (value == null || Array.isArray(value) && value.length === 0) return "Unspecified";
   const licenses = Array.isArray(value) ? value.slice(0, 10).map((item) => string(item)) : [string(value)];
   const text = clip(oneLine(licenses.join(" OR ")), 120);
-  if (!text || /[\u0000-\u001f\u007f]/u.test(text)) throw new ReadError("bad_answer");
+  if (!text || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(text)) throw new ReadError("bad_answer");
   return text;
 }
 function date(value) {
@@ -850,15 +872,16 @@ function summary(value) {
   const item = object(value), name = gemName(item.name), version = versionText(item.version);
   const project = httpsURL(item.project_uri);
   if (project !== `https://rubygems.org/gems/${name}` && project !== `https://rubygems.org/gems/${encodeURIComponent(name)}`) throw new ReadError("bad_answer");
+  const repository = httpsURL(item.source_code_uri), homepage = httpsURL(item.homepage_uri), documentation = httpsURL(item.documentation_uri);
   return {
     name,
     version,
-    description: clip(oneLine(string(item.info, "")), 500),
+    description: clip(oneLine(string(item.info, "").replace(/[\ud800-\udfff]/gu, "")), 500),
     license: license(item.licenses),
     url: project,
-    ...httpsURL(item.source_code_uri) ? { repository: httpsURL(item.source_code_uri) } : {},
-    ...httpsURL(item.homepage_uri) ? { homepage: httpsURL(item.homepage_uri) } : {},
-    ...httpsURL(item.documentation_uri) ? { documentation: httpsURL(item.documentation_uri) } : {},
+    ...repository ? { repository } : {},
+    ...homepage ? { homepage } : {},
+    ...documentation ? { documentation } : {},
     totalDownloads: integer(item.downloads),
     ...item.version_downloads == null ? {} : { versionDownloads: integer(item.version_downloads) }
   };
@@ -880,13 +903,17 @@ function parseGem(raw, at) {
   for (const dependency of development) {
     object(dependency);
   }
+  const seenDeps = /* @__PURE__ */ new Set();
   const runtime = array(dependencies.runtime ?? []).slice(0, 100).map((value) => {
     const item = object(value);
-    const name = gemName(item.name), requirements = clip(oneLine(string(item.requirements)), 100);
-    if (!requirements) throw new ReadError("bad_answer");
+    const name = gemName(item.name), requirements = clip(oneLine(string(item.requirements).replace(/[\ud800-\udfff]/gu, "")), 100);
+    const normalized = name.toLowerCase();
+    if (!requirements || seenDeps.has(normalized)) throw new ReadError("bad_answer");
+    seenDeps.add(normalized);
     return { name, requirements };
   });
-  return { ...result, install: `gem install ${result.name} -v ${result.version}`, yanked: boolean(root2.yanked ?? false), ...date(root2.version_created_at) ? { published: date(root2.version_created_at) } : {}, dependencies: runtime };
+  const published = date(root2.version_created_at);
+  return { ...result, install: `gem install ${result.name} -v ${result.version}`, yanked: boolean(root2.yanked ?? false), ...published ? { published } : {}, dependencies: runtime };
 }
 
 // src/locales/en.json
@@ -1022,7 +1049,11 @@ var ja_default = {
 var textsFor = (locale = "") => locale.toLowerCase().startsWith("ja") ? ja_default : locale.toLowerCase().startsWith("zh") ? zh_Hans_default : en_default;
 var fmt = (text, values) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ""));
 var number = (value) => new Intl.NumberFormat("en-US").format(value);
-var dateText = (value) => value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "";
+var dateText = (value) => {
+  if (!value) return "";
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(time) : "";
+};
 function errorText(error, locale = "") {
   const t = textsFor(locale);
   if (!(error instanceof ReadError)) return t.network;
@@ -1067,18 +1098,26 @@ var RubyGems = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    if (item && this.monotonic() - item.used < fresh) {
-      item.used = this.monotonic();
+    const nowMono = this.monotonic();
+    if (item && nowMono - item.saved < fresh) {
+      item.used = nowMono;
       return item;
     }
     return void 0;
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
+    if (bytes > this.limits.cacheBytes) {
+      if (old) {
+        this.bytes -= old.bytes;
+        this.cache.delete(path);
+      }
+      return;
+    }
     if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    const nowMono = this.monotonic();
+    this.cache.set(path, { raw, at, saved: nowMono, used: nowMono, bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       let oldest;
@@ -1096,6 +1135,21 @@ var RubyGems = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1112,7 +1166,8 @@ var RubyGems = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1133,9 +1188,6 @@ var RubyGems = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
@@ -1147,6 +1199,7 @@ var RubyGems = class {
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1173,9 +1226,16 @@ var RubyGems = class {
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        if (request.signal.aborted) {
+          const aborted = cancellation(request.signal);
+          if (aborted instanceof ReadError) {
+            this.lastError = { code: aborted.code, status: aborted.status, at: this.monotonic() };
+            throw aborted;
+          }
+          throw error instanceof Error && error.name === "AbortError" ? error : aborted;
+        }
         const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1192,7 +1252,7 @@ var RubyGems = class {
       const old = this.cache.get(path);
       if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
         old.used = this.monotonic();
-        return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+        return { raw: old.raw, at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
       }
       throw error;
     }
@@ -1203,7 +1263,7 @@ var RubyGems = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 12, refresh = false, signal) {
@@ -1212,7 +1272,8 @@ var RubyGems = class {
     const rd = await this.read(path, refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
       parseSearch(raw, at);
     });
-    return { ...parseSearch(rd.raw, rd.at), gems: parseSearch(rd.raw, rd.at).gems.slice(0, limit), stale: rd.stale };
+    const parsed = parseSearch(rd.raw, rd.at);
+    return { ...parsed, gems: parsed.gems.slice(0, limit), stale: rd.stale };
   }
   async gem(name, refresh = false, signal) {
     const rd = await this.read(gemPath(gemName(name)), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
@@ -1259,14 +1320,36 @@ ${gem.homepage}` : ""}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const field of ["query", "name"]) for (const token of exact.fieldValues(field)) {
+      if (token.raw === "null") {
+        delete args[field];
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[field] = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = Number(limit);
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1277,23 +1360,34 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "rubygems_search" && name !== "rubygems_gem") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "rubygems_search") {
-      const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(query, limit, false, request.signal);
-      return clip((result.gems.length ? result.gems.map((gem, index) => summaryLine(gem, index, service.locale)).join("\n") : t.empty) + `
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result2 = await service.search(query, limit, false, request.signal);
+      return clip((result2.gems.length ? result2.gems.map((gem, index) => summaryLine(gem, index, service.locale)).join("\n") : t.empty) + `
+${t.attribution}${result2.stale ? `
+${errorText(result2.stale, service.locale)}` : ""}`, 29999);
+    }
+    const result = await service.gem(gemName(args.name), false, request.signal);
+    return clip(detailText(result.gem, service.locale) + `
 ${t.attribution}${result.stale ? `
 ${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    if (name === "rubygems_gem") {
-      const result = await service.gem(gemName(args.name), false, request.signal);
-      return clip(detailText(result.gem, service.locale) + `
-${t.attribution}${result.stale ? `
-${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1325,12 +1419,31 @@ var jsx = createElement;
 var jsxs = createElement;
 
 // src/page.tsx
+var TEXT_MAX = 2e3;
+var KEY_MAX = 128;
+var ITEMS_MAX = 300;
+var STATE_MAX = 16384;
+var FRAME_MAX = 512 * 1024;
+var utf8 = new TextEncoder();
+var byteLength = (text) => utf8.encode(text).byteLength;
+function uniqueKey(used, prefix, raw) {
+  let key = boundedID(prefix, raw, KEY_MAX);
+  let attempt = 2;
+  while (used.has(key)) {
+    key = boundedID(prefix, `${raw}#${attempt}`, KEY_MAX);
+    attempt++;
+  }
+  used.add(key);
+  return key;
+}
 var initialState = { q: "", found: false };
 function summaryState(value) {
   if (value == null) return void 0;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("invalid");
   const raw = value, name = gemName(raw.name);
   if (typeof raw.version !== "string" || !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,99}$/.test(raw.version) || typeof raw.totalDownloads !== "number" || !Number.isSafeInteger(raw.totalDownloads) || raw.totalDownloads < 0 || raw.totalDownloads > 2e12) throw new ReadError("invalid");
+  if (raw.description != null && (typeof raw.description !== "string" || /[\ud800-\udfff]/u.test(raw.description))) throw new ReadError("invalid");
+  if (raw.license != null && (typeof raw.license !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(raw.license))) throw new ReadError("invalid");
   const summary2 = { name, version: raw.version, description: clip(typeof raw.description === "string" ? raw.description : "", 500), license: clip(typeof raw.license === "string" ? raw.license : "", 120), url: `https://rubygems.org/gems/${name}`, totalDownloads: raw.totalDownloads };
   for (const field of ["repository", "homepage", "documentation"]) {
     if (raw[field] == null) continue;
@@ -1345,16 +1458,29 @@ function summaryState(value) {
   return summary2;
 }
 function readState(raw) {
-  if (typeof raw !== "string" || raw.length > 1e4) return initialState;
+  if (typeof raw !== "string" || byteLength(raw) > STATE_MAX) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value) || typeof value.found !== "boolean") return initialState;
-    return { q: queryText(value.q), found: value.found, gem: summaryState(value.gem) };
+    if (!value.found && (value.q === "" || value.q == null) && value.gem == null) return initialState;
+    return { q: queryText(value.q), found: value.found, ...value.gem == null ? {} : { gem: summaryState(value.gem) } };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+var encodeState = (state) => {
+  const encoded = JSON.stringify(state);
+  if (byteLength(encoded) <= STATE_MAX) return encoded;
+  const slim = JSON.stringify({ q: state.q, found: state.found });
+  return byteLength(slim) <= STATE_MAX ? slim : JSON.stringify(initialState);
+};
+function safeState(state) {
+  try {
+    return readState(JSON.stringify(state));
+  } catch {
+    return initialState;
+  }
+}
 function gemTransition(state, result, id) {
   if (!id.startsWith("gem:")) return state;
   const gem = result.gems.find((candidate) => id === `gem:${candidate.name}`);
@@ -1397,72 +1523,103 @@ async function loadPage(service, state, refresh, signal) {
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale);
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "rubygems", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2800), style }, key);
-  const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "rubygems-query"),
-    /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "rubygems-submit")
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), stateJSON = encodeState(state), t = textsFor(props.locale ?? service.locale);
+  const act = (id, next, title) => {
+    const cleanTitle = title ? clip(title, TEXT_MAX) : void 0;
+    return props.action?.(id, next, cleanTitle) ?? (next && uiVersion >= 3 ? { id, push: { ui: "rubygems", state: encodeState(next), ...cleanTitle ? { title: cleanTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, TEXT_MAX), style }, key);
+  const search = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, TEXT_MAX), children: [
+    /* @__PURE__ */ jsx(Field, { name: "query", label: clip(t.search, TEXT_MAX), kind: "text", placeholder: clip(t.searchHint, TEXT_MAX), value: state.q }, "rubygems-query"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.searchAction, TEXT_MAX), action: act("search") }, "rubygems-submit")
   ] }, "rubygems-search");
   const attribution = /* @__PURE__ */ jsx(Section, { children: text("rubygems-license", t.attribution, "caption") }, "rubygems-attribution");
   const footer = /* @__PURE__ */ jsxs(Section, { children: [
-    /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "rubygems-refresh"),
-    state.gem ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "rubygems-back") : null,
-    /* @__PURE__ */ jsx(Button, { title: t.home, action: act("home") }, "rubygems-home")
+    /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "rubygems-refresh"),
+    state.gem ? /* @__PURE__ */ jsx(Button, { title: clip(t.back, TEXT_MAX), action: act("back") }, "rubygems-back") : null,
+    /* @__PURE__ */ jsx(Button, { title: clip(t.home, TEXT_MAX), action: act("home") }, "rubygems-home")
   ] }, "rubygems-footer");
   const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("rubygems-stale-text", errorText(error, props.locale ?? service.locale)) }, "rubygems-stale") : null;
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "rubygems-loading-indicator") }, "rubygems-loading"),
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, TEXT_MAX) }, "rubygems-loading-indicator") }, "rubygems-loading"),
     attribution
   ] }, "rubygems");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
       text("rubygems-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "rubygems-retry")
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "rubygems-retry")
     ] }, "rubygems-error"),
     attribution
   ] }, "rubygems");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: clip(t.search, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("rubygems-welcome-text", t.welcome, "body") }, "rubygems-welcome"),
     attribution
   ] }, "rubygems");
   if (loaded.kind === "detail") {
     const gem = loaded.result.gem;
-    return /* @__PURE__ */ jsxs(View, { title: gem.name, state: encodeState(state), children: [
+    const usedDetailKeys = /* @__PURE__ */ new Set(["rubygems-search", "rubygems-query", "rubygems-submit", "rubygems-detail", "rubygems-description", "rubygems-total", "rubygems-version-downloads", "rubygems-yanked", "rubygems-dependencies", "rubygems-no-dependencies", "rubygems-install", "rubygems-install-command", "rubygems-install-hint", "rubygems-links", "rubygems-gem-link", "rubygems-docs-link", "rubygems-repository-link", "rubygems-homepage-link", "rubygems-stale", "rubygems-stale-text", "rubygems-footer", "rubygems-refresh", "rubygems-back", "rubygems-home", "rubygems-attribution", "rubygems-license"]);
+    const gemURL = httpsURL(gem.url), docsURL = httpsURL(gem.documentation), repoURL = httpsURL(gem.repository), homeURL = httpsURL(gem.homepage);
+    const hasLinks = Boolean(gemURL || docsURL || repoURL || homeURL);
+    return /* @__PURE__ */ jsxs(View, { title: clip(gem.name, TEXT_MAX), state: stateJSON, children: [
       search,
-      /* @__PURE__ */ jsxs(Section, { title: `${gem.name}@${gem.version}`, footer: [fmt(t.license, { license: gem.license }), gem.published ? dateText(gem.published) : ""].filter(Boolean).join(" \xB7 "), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(`${gem.name}@${gem.version}`, TEXT_MAX), footer: clip([fmt(t.license, { license: gem.license }), gem.published ? dateText(gem.published) : ""].filter(Boolean).join(" \xB7 "), TEXT_MAX), children: [
         text("rubygems-description", gem.description, "body"),
         text("rubygems-total", fmt(t.total, { count: number(gem.totalDownloads) })),
         gem.versionDownloads !== void 0 ? text("rubygems-version-downloads", fmt(t.versionDownloads, { count: number(gem.versionDownloads) })) : null,
         gem.yanked ? text("rubygems-yanked", t.yanked, "caption") : null
       ] }, "rubygems-detail"),
-      /* @__PURE__ */ jsx(Section, { title: fmt(t.dependencies, { count: number(gem.dependencies.length) }), children: gem.dependencies.length ? gem.dependencies.slice(0, 30).map((dependency) => text(`dependency-${dependency.name}`, `${dependency.name} (${dependency.requirements})`)) : text("rubygems-no-dependencies", t.noDependencies) }, "rubygems-dependencies"),
-      /* @__PURE__ */ jsxs(Section, { title: t.install, children: [
+      /* @__PURE__ */ jsx(Section, { title: clip(fmt(t.dependencies, { count: number(gem.dependencies.length) }), TEXT_MAX), children: gem.dependencies.length ? gem.dependencies.slice(0, 30).map((dependency) => text(uniqueKey(usedDetailKeys, "dependency-", dependency.name), `${dependency.name} (${dependency.requirements})`)) : text("rubygems-no-dependencies", t.noDependencies) }, "rubygems-dependencies"),
+      /* @__PURE__ */ jsxs(Section, { title: clip(t.install, TEXT_MAX), children: [
         text("rubygems-install-command", gem.install, "body"),
         text("rubygems-install-hint", t.installHint, "caption")
       ] }, "rubygems-install"),
-      /* @__PURE__ */ jsxs(Section, { children: [
-        /* @__PURE__ */ jsx(Link, { title: t.openGem, url: gem.url }, "rubygems-gem-link"),
-        gem.documentation ? /* @__PURE__ */ jsx(Link, { title: t.openDocs, url: gem.documentation }, "rubygems-docs-link") : null,
-        gem.repository ? /* @__PURE__ */ jsx(Link, { title: t.openRepository, url: gem.repository }, "rubygems-repository-link") : null,
-        gem.homepage ? /* @__PURE__ */ jsx(Link, { title: t.openHomepage, url: gem.homepage }, "rubygems-homepage-link") : null
-      ] }, "rubygems-links"),
+      hasLinks ? /* @__PURE__ */ jsxs(Section, { children: [
+        gemURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openGem, TEXT_MAX), url: gemURL }, "rubygems-gem-link") : null,
+        docsURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openDocs, TEXT_MAX), url: docsURL }, "rubygems-docs-link") : null,
+        repoURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openRepository, TEXT_MAX), url: repoURL }, "rubygems-repository-link") : null,
+        homeURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openHomepage, TEXT_MAX), url: homeURL }, "rubygems-homepage-link") : null
+      ] }, "rubygems-links") : null,
       stale(loaded.result.stale),
       footer,
       attribution
     ] }, "rubygems");
   }
-  return /* @__PURE__ */ jsxs(View, { title: `${t.title}: ${clip(state.q, 100)}`, state: encodeState(state), children: [
+  const usedKeys = /* @__PURE__ */ new Set(["rubygems-search", "rubygems-query", "rubygems-submit", "rubygems-result-count", "rubygems-total-results", "rubygems-empty-results", "rubygems-empty", "rubygems-stale", "rubygems-stale-text", "rubygems-footer", "rubygems-refresh", "rubygems-back", "rubygems-home", "rubygems-attribution", "rubygems-license"]);
+  const reservedItems = 2 + 1 + (loaded.result.stale ? 1 : 0) + (state.gem ? 3 : 2) + 1;
+  let remainingItems = Math.max(0, ITEMS_MAX - reservedItems);
+  let remainingBytes = FRAME_MAX - byteLength(stateJSON) - 8192;
+  const cards = [];
+  for (const gem of loaded.result.gems) {
+    const gemURL = httpsURL(gem.url);
+    const neededItems = gemURL ? 3 : 2;
+    if (neededItems > remainingItems) break;
+    const sectionKey = uniqueKey(usedKeys, "gem-", gem.name);
+    const descKey = uniqueKey(usedKeys, "description-", gem.name);
+    const openKey = uniqueKey(usedKeys, "open-", gem.name);
+    const linkKey = gemURL ? uniqueKey(usedKeys, "link-", gem.name) : "";
+    const title = clip(`${gem.name}@${gem.version}`, TEXT_MAX);
+    const cardFooter = clip([fmt(t.license, { license: gem.license }), fmt(t.total, { count: number(gem.totalDownloads) })].join(" \xB7 "), TEXT_MAX);
+    const description = clip(gem.description || t.unknown, TEXT_MAX);
+    const nextState = { ...state, gem };
+    const nextStateJSON = uiVersion >= 3 ? encodeState(nextState) : "";
+    const actionID = `gem:${gem.name}`;
+    const estimatedBytes = byteLength(sectionKey) + byteLength(descKey) + byteLength(openKey) + byteLength(linkKey) + byteLength(title) + byteLength(cardFooter) + byteLength(description) + byteLength(nextStateJSON) + byteLength(actionID) + (gemURL ? byteLength(gemURL) : 0) + 512;
+    if (estimatedBytes > remainingBytes) break;
+    remainingItems -= neededItems;
+    remainingBytes -= estimatedBytes;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, footer: cardFooter, children: [
+      text(descKey, description, "body"),
+      /* @__PURE__ */ jsx(Button, { title: clip(t.details, TEXT_MAX), action: act(actionID, nextState, gem.name) }, openKey),
+      gemURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openGem, TEXT_MAX), url: gemURL }, linkKey) : null
+    ] }, sectionKey));
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(`${t.title}: ${clip(state.q, 100)}`, TEXT_MAX), state: stateJSON, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("rubygems-total-results", fmt(t.results, { total: number(loaded.result.gems.length) }), "caption") }, "rubygems-result-count"),
-    loaded.result.gems.length ? loaded.result.gems.map((gem) => /* @__PURE__ */ jsxs(Section, { title: `${gem.name}@${gem.version}`, footer: [fmt(t.license, { license: gem.license }), fmt(t.total, { count: number(gem.totalDownloads) })].join(" \xB7 "), children: [
-      text(`description-${gem.name}`, gem.description, "body"),
-      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(`gem:${gem.name}`, { ...state, gem }, gem.name) }, `open-${gem.name}`),
-      /* @__PURE__ */ jsx(Link, { title: t.openGem, url: gem.url }, `link-${gem.name}`)
-    ] }, `gem-${gem.name}`)) : /* @__PURE__ */ jsx(Section, { children: text("rubygems-empty", t.empty) }, "rubygems-empty-results"),
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("rubygems-empty", t.empty) }, "rubygems-empty-results"),
     stale(loaded.result.stale),
     footer,
     attribution
@@ -1493,8 +1650,12 @@ function Root(options) {
         if (id === "refresh") setRefresh((previous) => previous + 1);
         else if (id.startsWith("gem:")) {
           if (loaded.kind !== "results") return;
+          setRefresh(0);
           setState((previous) => gemTransition(previous, loaded.result, id));
-        } else setState((previous) => transition(previous, id, values));
+        } else {
+          setRefresh(0);
+          setState((previous) => transition(previous, id, values));
+        }
       }, { submit: true });
     }
   });

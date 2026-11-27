@@ -32,10 +32,10 @@ const (
 
 // Where an indexed session is, as far as the last check knows. Unknown is never treated as absent.
 const (
-	LocCloud   = "在云端"
-	LocMissing = "云端缺失"
-	LocLocal   = "本地"
-	LocUnknown = "未知"
+	LocCloud   = "在网盘里"
+	LocMissing = "网盘里找不到"
+	LocLocal   = "还在电脑上"
+	LocUnknown = "暂时不确定"
 )
 
 // ColdBackend is the backup backend as last checked from a machine.
@@ -167,9 +167,9 @@ const coldRefreshTimeout = 3 * time.Minute
 func cliOldMessage(cat *ColdCatalog, m *Machine) string {
 	v := shortVersion(cmp.Or(cat.CLI.Version, m.BinaryVersion))
 	if v == "" {
-		v = "（版本未知）"
+		v = "（版本不清楚）"
 	}
-	return "这台电脑上的 disklessly " + v + " 太旧：本页需要支持 sessions list 和 sessions status 的版本"
+	return "这台电脑上的配套小工具 disklessly " + v + " 太旧：需要支持 sessions list 和 sessions status 的版本"
 }
 
 // RefreshColdIndex re-reads machine m's session index and backend state into st.Cold[m.ID] and
@@ -222,7 +222,7 @@ func RefreshColdIndex(ctx context.Context, runner Runner, st *State, m *Machine,
 	m.Reachable = true
 	if strings.Contains(out, "@@COLD_NOCLI") {
 		cat.CLI = ColdCLI{}
-		return fail(ColdNoCLI, errors.New("目标机器未安装 disklessly CLI，无法读取云端会话索引"))
+		return fail(ColdNoCLI, errors.New("这台电脑还没装配套小工具（未安装 disklessly CLI），读不到网盘里的对话"))
 	}
 	if _, ok := sections["COLD_CLI"]; ok {
 		cat.CLI = parseCLIInfo(sections["COLD_CLI"])
@@ -238,13 +238,13 @@ func RefreshColdIndex(ctx context.Context, runner Runner, st *State, m *Machine,
 			return fail(ColdCLIOld, errors.New(cliOldMessage(cat, m)))
 		case noBackendError(ce):
 			cat.Detail = ce.Message
-			return fail(ColdNoBackend, errors.New("disklessly 还没有设置备份后端："+ce.Message))
+			return fail(ColdNoBackend, errors.New("配套小工具还没有设置网盘："+ce.Message))
 		case ce != nil:
 			cat.Detail = firstLine(sections["COLD_LIST"])
-			return fail(ColdUnreadable, rawError("disklessly 读取会话索引时报错", cmpOr(ce.Message, ce.Name)))
+			return fail(ColdUnreadable, rawError("配套小工具读取对话列表时出错了", cmpOr(ce.Message, ce.Name)))
 		}
 		cat.Detail = firstLine(sections["COLD_LIST"])
-		return fail(ColdUnreadable, errors.New("disklessly sessions list 没有返回可解析的结果"))
+		return fail(ColdUnreadable, errors.New("配套小工具（disklessly sessions list）给的结果看不懂"))
 	}
 	var status CloudStatus
 	statusOK := parseCLIJSONLine(sections["COLD_STATUS"], &status)
@@ -338,7 +338,7 @@ func RefreshColdIndex(ctx context.Context, runner Runner, st *State, m *Machine,
 		cat.Detail = ce.Message
 	default:
 		cat.State = ColdUnreadable
-		cat.Error = "disklessly sessions status 没有返回可解析的结果，云端状态未知"
+		cat.Error = "配套小工具（disklessly sessions status）给的结果看不懂，网盘里的情况暂时不确定"
 		cat.Detail = firstLine(sections["COLD_STATUS"])
 	}
 	return cat, nil
@@ -588,7 +588,10 @@ func SearchCold(st *State, query, machine string, limit int, now time.Time) []Co
 			}
 			if len(tokens) > 0 {
 				hay := strings.ToLower(strings.Join([]string{e.Title, e.FirstPrompt, strings.Join(e.Keywords, " "),
-					e.Cwd, e.Project, e.Path, e.SessionID, e.Tool, toolLabel(e.Tool), name, m.ID}, "\n"))
+					e.Cwd, e.Project, e.Path, e.SessionID, e.Tool, toolLabel(e.Tool), name, m.ID,
+					// The stored name and address too: "local (<hostname>)" is shown as 运行 Persona 的电脑,
+					// and searching for the host name still finds that computer's sessions.
+					m.Name, m.Host, m.Hostname}, "\n"))
 				if !allIn(hay, tokens) {
 					continue
 				}
@@ -654,9 +657,9 @@ func parseDeepSearch(raw string) ([]cliSearchHit, error) {
 		Error *cliError `json:"error"`
 	}
 	if json.Unmarshal([]byte(raw), &fail) == nil && fail.Error != nil && fail.Error.Message != "" {
-		return nil, rawError("disklessly 全文搜索报错", fail.Error.Message)
+		return nil, rawError("配套小工具搜全文时出错了", fail.Error.Message)
 	}
-	return nil, errors.New("全文搜索没有返回可解析的结果")
+	return nil, errors.New("搜全文给的结果看不懂")
 }
 
 type cliSearchHit struct {
@@ -712,10 +715,10 @@ func deepSearchMachines(ctx context.Context, runner Runner, ms []*Machine, words
 			defer cancel()
 			out, err := runner(cctx, m, deepSearchScript(words, limit), timeout)
 			if cctx.Err() != nil && err != nil {
-				err = fmt.Errorf("%d 秒内没有返回，稍后再试或换更具体的词", int(timeout/time.Second))
+				err = fmt.Errorf("%d 秒内没搜完，过一会儿再试，或者换个更具体的词", int(timeout/time.Second))
 			}
 			if err == nil && strings.Contains(out, "@@COLD_NOCLI") {
-				err = errors.New("未安装 disklessly CLI")
+				err = errors.New("还没装配套小工具")
 			}
 			var found []cliSearchHit
 			if err == nil {
@@ -754,7 +757,7 @@ func mergeDeepSearch(st *State, query, machine string, limit int, now time.Time,
 	hits = local
 	if len(deepSearchWords(query)) == 0 {
 		sortHits(hits)
-		return hits[:min(len(hits), limit)], []string{"全文搜索需要至少一个查询词"}
+		return hits[:min(len(hits), limit)], []string{"搜全文至少要输入一个词"}
 	}
 	for _, m := range deepTargets(st, machine) {
 		run, ok := runs[m.ID]
@@ -847,11 +850,11 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 		runner = DefaultRunner
 	}
 	if m == nil {
-		return nil, "", errors.New("找不到目标机器")
+		return nil, "", errors.New("找不到这台电脑")
 	}
 	entryID = strings.TrimSpace(entryID)
 	if entryID == "" || strings.HasPrefix(entryID, "-") || strings.ContainsAny(entryID, "\r\n\x00") {
-		return nil, "", fmt.Errorf("无效的会话 ID %q", entryID)
+		return nil, "", fmt.Errorf("对话编号 %q 不对", entryID)
 	}
 	cat := st.cold(m.ID)
 	if cat == nil {
@@ -864,8 +867,8 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 		e = cat.Entries[idx]
 	}
 	if !e.Local {
-		return nil, "", fmt.Errorf("会话 %q 来自另一台设备（%s），原路径属于那台设备；请在原设备上恢复，或在终端运行 disklessly sessions restore %s --to <本机路径>",
-			cmp.Or(e.Title, e.ID), cmp.Or(e.DeviceID, "未知设备"), e.ID)
+		return nil, "", fmt.Errorf("对话「%s」来自另一台电脑（%s），原来的位置在那台电脑上，请到那台电脑上拿回来。也可以在这台电脑上运行命令：disklessly sessions restore %s --to <放到哪个目录>",
+			cmp.Or(e.Title, e.ID), cmp.Or(e.DeviceID, "不清楚是哪台"), e.ID)
 	}
 	out, err := runner(ctx, m, restoreScript(e), 10*time.Minute)
 	if err != nil {
@@ -896,13 +899,13 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 	}
 	switch {
 	case rc == -1:
-		return nil, "", errors.New("恢复脚本没有返回结果")
+		return nil, "", errors.New("拿回对话的脚本没有返回结果")
 	case rc == cliExitMissing:
-		return nil, "", errors.New("目标机器未安装 disklessly CLI，无法恢复会话")
+		return nil, "", errors.New("这台电脑还没装配套小工具，没法把对话拿回来")
 	case rc == cliExitBackend:
-		return nil, "", rawError("备份后端连不上，这个会话暂时恢复不了；确认后端在线后再试", msg)
+		return nil, "", rawError("网盘连不上，这个对话暂时拿不回来；确认网盘在线后再试", msg)
 	case rc != 0 || !resp.OK:
-		return nil, "", rawError(fmt.Sprintf("disklessly 恢复会话失败（退出码 %d），本地没有改动", rc), msg)
+		return nil, "", rawError(fmt.Sprintf("配套小工具拿回对话时出错了（退出码 %d），电脑上什么都没改", rc), msg)
 	}
 	if resp.Path != "" && resp.Path != e.Path {
 		// The CLI restored somewhere the catalog did not know: check that path.
@@ -910,7 +913,7 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 		present = err == nil && strings.Contains(check, "@@RESTORE_PRESENT")
 	}
 	if !present {
-		return nil, "", fmt.Errorf("disklessly 报告已恢复，但 %s 不存在或为空", cmp.Or(resp.Path, e.Path, e.ID))
+		return nil, "", fmt.Errorf("配套小工具说已经拿回来了，但 %s 不存在或是空的", cmp.Or(resp.Path, e.Path, e.ID))
 	}
 	e.State = "restored"
 	e.ID = cmp.Or(resp.ID, e.ID)
@@ -925,9 +928,9 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 		cat.Entries = slices.Insert(cat.Entries, 0, e)
 	}
 	hint := resumeHint(e)
-	note := "已从云端恢复到原路径 " + e.Path
+	note := "已从网盘拿回来，放回原来的位置 " + e.Path
 	if hint != "" {
-		note += "，可运行 " + hint
+		note += "，可以运行 " + hint
 	}
 	rec := &CleanRecord{
 		ID:          fmt.Sprintf("restore-%s-%d", m.ID, now.UnixNano()/1e6),
@@ -937,7 +940,7 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 		Categories:  []string{"session-restore"},
 		Items: []CleanItemResult{{ID: e.ID, Category: CatColdAgentSession, Title: cmp.Or(e.Title, e.SessionID, e.ID), Path: e.Path,
 			ScannedBytes: e.Bytes, Note: note}},
-		Summary:   "恢复会话 " + clipRunes(cmp.Or(e.Title, e.SessionID, e.ID), 40) + " → " + cmp.Or(hint, e.Path),
+		Summary:   "拿回对话 " + clipRunes(cmp.Or(e.Title, e.SessionID, e.ID), 40) + " → " + cmp.Or(hint, e.Path),
 		CreatedAt: now,
 	}
 	st.History = slices.Insert(st.History, 0, rec)
@@ -951,20 +954,20 @@ func RestoreCold(ctx context.Context, runner Runner, st *State, m *Machine, entr
 // plan only), then refreshes the machine's cold index.
 func OffloadSessions(ctx context.Context, runner Runner, st *State, m *Machine, dryRun bool, excludes []string, now time.Time) (*CleanPlan, *CleanRecord, error) {
 	if m == nil {
-		return nil, nil, errors.New("找不到目标机器")
+		return nil, nil, errors.New("找不到这台电脑")
 	}
 	scan, err := ScanMachine(ctx, runner, st, m, now)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !dryRun && !scan.Sessions.CLIReady {
-		return nil, nil, errors.New(cmpOr(scan.Sessions.Note, "目标机器没有可用的 disklessly CLI"))
+		return nil, nil, errors.New(cmpOr(scan.Sessions.Note, "这台电脑上没有能用的配套小工具"))
 	}
 	if !dryRun && !slices.ContainsFunc(scan.Items, func(it ScanItem) bool { return it.Category == CatColdAgentSession }) {
 		if note := scan.Sessions.Note; note != "" {
 			return nil, nil, errors.New(note)
 		}
-		return nil, nil, errors.New("当前没有可上云的冷会话（7 天外、未被引用的会话）")
+		return nil, nil, errors.New("现在没有要搬的对话（超过 7 天没动、也没有程序在用的）")
 	}
 	return ExecuteClean(ctx, runner, st, m, []string{CatColdAgentSession}, nil, false, dryRun, excludes, now)
 }

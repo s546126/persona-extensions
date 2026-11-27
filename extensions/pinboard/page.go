@@ -24,9 +24,17 @@ type pageState struct {
 	NewTags string `json:"g,omitempty"`
 }
 
+const (
+	maxViewRecords   = 250
+	maxTagFilterRune = 800
+)
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Start < 0 || len(st.DraftID) > 128 || len(st.URL) > 4096 || len([]rune(st.Title)) > maxTitleChars || len(st.Notes) > 66000 || len(st.Tags) > 300 || len(st.NewTags) > 1000 {
+	if err := r.DecodeState(&st); err != nil || st.Start < 0 || len(st.DraftID) > 128 || len(st.URL) > 4096 || len([]rune(st.Title)) > maxTitleChars || len([]rune(st.Notes)) > 65536 || len([]rune(st.Tags)) > maxTagFilterRune || len([]rune(st.NewTags)) > 1000 {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode != "" && st.Mode != "recent" && st.Mode != "archive" && st.Mode != "create" && st.Mode != "review-create" {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -72,7 +80,13 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, err
 		}
 		st.URL, st.Title, st.Notes, st.NewTags, st.Mode = in.URL, in.Title, in.Notes, in.Tags, "review-create"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("bookmark draft exceeds page state limit; use the pinboard_add action")
+		}
 	case "confirm-create":
+		if st.DraftID == "" {
+			return nil, errors.New("draft is required")
+		}
 		raw, _ := json.Marshal(addArgs{URL: st.URL, Title: st.Title, Notes: st.Notes, Tags: st.NewTags})
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "pinboard_add", raw)
 		if err != nil {
@@ -99,7 +113,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 	}
-	if st.Mode != "" && st.Mode != "archive" {
+	if st.Mode != "" && st.Mode != "recent" && st.Mode != "archive" {
 		return nil, errors.New("invalid bookmark view")
 	}
 	var items bookmarkList
@@ -118,6 +132,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if item.Description == "" || item.Href == "" {
 			continue
 		}
+		if len(section.Items) >= maxViewRecords {
+			break
+		}
 		row := wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("bookmark-%d-%d", st.Start, i), Title: clipText(item.Description, 1800), Subtitle: clipText(item.Tags+" · "+item.Time, 1800)}
 		if link := safeBookmarkLink(item.Href); link != "" {
 			row = wire.Component{Type: wire.ComponentLink, Key: fmt.Sprintf("bookmark-%d-%d", st.Start, i), Title: clipText(item.Description, 1800), URL: link}
@@ -134,7 +151,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if view == "" {
 		view = "recent"
 	}
-	v := &wire.View{Title: t.bookmarks, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.tags, Value: st.Tags, Action: wire.Action{ID: "search"}}, Filter: &wire.Filter{
+	v := &wire.View{Title: t.bookmarks, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.tags, Value: clipText(st.Tags, wire.StringMost), Action: wire.Action{ID: "search"}}, Filter: &wire.Filter{
 		Name: "view", Title: t.bookmarks, Value: view, Action: wire.Action{ID: "view"},
 		Choices: []wire.Choice{{Value: "recent", Title: t.recent}, {Value: "archive", Title: t.archive}},
 	}, Sections: []wire.Section{section, {Title: t.bookmarks, Items: []wire.Component{
@@ -154,14 +171,14 @@ func (a *app) createView(r *ext.UIRequest, st pageState) *wire.View {
 		if st.Notes != "" {
 			items = append(items, textComponents(st.Notes)...)
 		}
-		items = append(items, wire.Component{Type: wire.ComponentText, Text: t.tags + ": " + st.NewTags}, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Title}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(t.tags+": "+st.NewTags, wire.StringMost)}, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Title}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}
 	}
 	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "url", Label: t.url, Value: st.URL},
-		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: st.Title},
-		{Type: wire.ComponentField, Kind: "text", Name: "notes", Label: t.notes, Value: st.Notes},
-		{Type: wire.ComponentField, Kind: "text", Name: "tags", Label: t.tags, Value: st.NewTags},
+		{Type: wire.ComponentField, Kind: "text", Name: "url", Label: t.url, Value: clipText(st.URL, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: clipText(st.Title, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "notes", Label: t.notes, Value: clipText(st.Notes, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "tags", Label: t.tags, Value: clipText(st.NewTags, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}

@@ -172,15 +172,36 @@ func (a *App) tokenRequest(ctx context.Context, form url.Values) (tokenGrant, er
 	return g, err
 }
 
-// save keeps t as the sign-in, in memory and in the hub's secrets. A refresh token works once, so a new one is
-// saved before anything uses it.
-func (a *App) save(ctx context.Context, t tokens) error {
+func (a *App) rootContextLocked() context.Context {
+	if a.ctx != nil {
+		return a.ctx
+	}
+	return context.Background()
+}
+
+func (a *App) rootContext() context.Context {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.rootContextLocked()
+}
+
+func (a *App) signedOutErrorLocked() error {
+	if a.expired {
+		return errExpired
+	}
+	return errNotSignedIn
+}
+
+// saveLocked keeps t as the sign-in, in memory and in the hub's secrets. A refresh token works once, so a new one is
+// saved before anything uses it. Caller holds refreshMu.
+func (a *App) saveLocked(ctx context.Context, t tokens) error {
 	data, err := json.Marshal(secret{Version: 1, Tokens: t})
 	if err != nil {
 		return err
 	}
 	a.mu.Lock()
 	a.tok, a.expired = &t, false
+	a.authGen++
 	hub := a.hub
 	a.mu.Unlock()
 	if hub == nil {
@@ -191,6 +212,35 @@ func (a *App) save(ctx context.Context, t tokens) error {
 		return err
 	}
 	return nil
+}
+
+// completeLogin commits t for device login l if l is still active and uncanceled. Holding refreshMu serializes it
+// with Logout so a canceled poll can neither resurrect a logged-out session nor overwrite DeleteSecret.
+func (a *App) completeLogin(ctx context.Context, l *deviceLogin, t tokens) bool {
+	data, err := json.Marshal(secret{Version: 1, Tokens: t})
+	if err != nil {
+		return false
+	}
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	a.mu.Lock()
+	if ctx.Err() != nil || a.login != l {
+		a.mu.Unlock()
+		return false
+	}
+	a.tok, a.expired = &t, false
+	a.authGen++
+	l.done = true
+	a.clearCachesLocked()
+	hub := a.hub
+	saveCtx := a.rootContextLocked()
+	a.mu.Unlock()
+	if hub != nil {
+		if err := hub.SaveSecret(saveCtx, connectorID, data); err != nil {
+			log.Printf("could not store the sign-in (kept in memory until the extension restarts): %v", err)
+		}
+	}
+	return true
 }
 
 func (a *App) current() *tokens {
@@ -208,34 +258,36 @@ func (a *App) access(ctx context.Context) (tokens, error) {
 	a.waitLoaded(ctx)
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
-	t := a.current()
-	if t == nil {
-		a.mu.Lock()
-		expired := a.expired
+	a.mu.Lock()
+	if a.tok == nil {
+		err := a.signedOutErrorLocked()
 		a.mu.Unlock()
-		if expired {
-			return tokens{}, errExpired
-		}
-		return tokens{}, errNotSignedIn
+		return tokens{}, err
 	}
+	t := *a.tok
+	a.mu.Unlock()
 	if exp := t.expiry(); !exp.IsZero() && exp.After(a.now().Add(2*time.Minute)) {
-		return *t, nil
+		return t, nil
 	}
-	return a.refreshLocked(ctx, *t)
+	return a.refreshLocked(ctx, t)
 }
 
 // refreshAfter401 refreshes after the backend refused used's access token, unless another call has already.
 func (a *App) refreshAfter401(ctx context.Context, used string) (tokens, error) {
 	a.refreshMu.Lock()
 	defer a.refreshMu.Unlock()
-	t := a.current()
-	if t == nil {
-		return tokens{}, errNotSignedIn
+	a.mu.Lock()
+	if a.tok == nil {
+		err := a.signedOutErrorLocked()
+		a.mu.Unlock()
+		return tokens{}, err
 	}
+	t := *a.tok
+	a.mu.Unlock()
 	if t.AccessToken != used {
-		return *t, nil
+		return t, nil
 	}
-	return a.refreshLocked(ctx, *t)
+	return a.refreshLocked(ctx, t)
 }
 
 func (a *App) refreshLocked(ctx context.Context, t tokens) (tokens, error) {
@@ -249,10 +301,16 @@ func (a *App) refreshLocked(ctx context.Context, t tokens) (tokens, error) {
 		log.Printf("refresh refused (%d): signed out", he.Status)
 		a.mu.Lock()
 		a.tok, a.expired = nil, true
+		if a.login != nil && a.login.done {
+			a.login = nil
+		}
+		a.authGen++
+		a.clearCachesLocked()
 		hub := a.hub
+		deleteCtx := a.rootContextLocked()
 		a.mu.Unlock()
 		if hub != nil {
-			_ = hub.DeleteSecret(ctx, connectorID)
+			_ = hub.DeleteSecret(deleteCtx, connectorID)
 		}
 		a.changed()
 		return tokens{}, errExpired
@@ -261,7 +319,7 @@ func (a *App) refreshLocked(ctx context.Context, t tokens) (tokens, error) {
 		return tokens{}, fmt.Errorf("refreshing the ChatGPT sign-in: %w", err)
 	}
 	n := fromGrant(t, g)
-	_ = a.save(ctx, n)
+	_ = a.saveLocked(a.rootContext(), n)
 	log.Printf("sign-in refreshed")
 	return n, nil
 }
@@ -363,11 +421,7 @@ func (a *App) startLogin(ctx context.Context) (wire.AuthPrompt, error) {
 	if a.login != nil && a.login.cancel != nil {
 		a.login.cancel()
 	}
-	root := a.ctx
-	if root == nil {
-		root = context.Background()
-	}
-	pctx, cancel := context.WithDeadline(root, l.expires)
+	pctx, cancel := context.WithDeadline(a.rootContextLocked(), l.expires)
 	l.cancel = cancel
 	a.login = l
 	text := a.text
@@ -378,9 +432,18 @@ func (a *App) startLogin(ctx context.Context) (wire.AuthPrompt, error) {
 
 // poll asks whether the user entered the code, every interval until it expires; on success it signs in.
 func (a *App) poll(ctx context.Context, l *deviceLogin) {
-	defer l.cancel()
+	defer func() {
+		l.cancel()
+		if a.afterPoll != nil {
+			a.afterPoll()
+		}
+	}()
 	fail := func(msg string) {
 		a.mu.Lock()
+		if a.login != l || l.done {
+			a.mu.Unlock()
+			return
+		}
 		l.err = msg
 		a.mu.Unlock()
 		a.changed()
@@ -427,6 +490,15 @@ func (a *App) poll(ctx context.Context, l *deviceLogin) {
 			"redirect_uri": {a.ep.Auth + "/deviceauth/callback"}, "client_id": {clientID}, "code_verifier": {got.CodeVerifier},
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					a.mu.Lock()
+					text := a.text
+					a.mu.Unlock()
+					fail(text.authCodeExpired)
+				}
+				return
+			}
 			log.Printf("code exchange refused: %v", statusOnly(err))
 			a.mu.Lock()
 			text := a.text
@@ -434,14 +506,19 @@ func (a *App) poll(ctx context.Context, l *deviceLogin) {
 			fail(fmt.Sprintf(text.authFailed, statusOnly(err)))
 			return
 		}
-		a.refreshMu.Lock()
-		_ = a.save(context.WithoutCancel(ctx), fromGrant(tokens{}, g))
-		a.refreshMu.Unlock()
-		a.mu.Lock()
-		l.done = true
-		a.mu.Unlock()
+		if a.beforeCompleteLogin != nil {
+			a.beforeCompleteLogin()
+		}
+		if !a.completeLogin(ctx, l, fromGrant(tokens{}, g)) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				a.mu.Lock()
+				text := a.text
+				a.mu.Unlock()
+				fail(text.authCodeExpired)
+			}
+			return
+		}
 		log.Printf("signed in")
-		a.clearCaches()
 		a.changed()
 		return
 	}
@@ -457,23 +534,29 @@ func (a *App) Logout(ctx context.Context) (wire.AuthStatus, error) {
 		a.login.cancel()
 	}
 	a.login, a.tok, a.expired = nil, nil, false
+	a.authGen++
+	a.clearCachesLocked()
 	hub := a.hub
+	deleteCtx := a.rootContextLocked()
 	a.mu.Unlock()
-	a.clearCaches()
 	if hub != nil {
-		if err := hub.DeleteSecret(ctx, connectorID); err != nil {
+		if err := hub.DeleteSecret(deleteCtx, connectorID); err != nil {
 			log.Printf("could not delete the stored sign-in: %v", err)
 		}
 	}
 	return wire.AuthStatus{State: wire.AuthStateSignedOut}, nil
 }
 
-func (a *App) clearCaches() {
-	a.mu.Lock()
+func (a *App) clearCachesLocked() {
 	a.tools, a.toolsAt = nil, time.Time{}
 	a.plugins = map[string]pluginDetail{}
 	clear(a.listings)
 	a.inst, a.instAt = nil, time.Time{}
+}
+
+func (a *App) clearCaches() {
+	a.mu.Lock()
+	a.clearCachesLocked()
 	a.mu.Unlock()
 }
 

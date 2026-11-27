@@ -31,11 +31,11 @@ var validID = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,47}$`)
 var scopes = []string{"conversation", "all", "user", "assistant", "errors"}
 
 var scopeLabels = map[string]string{
-	"conversation": "纯对话 (Without tools)",
-	"all":          "全部 (含工具)",
-	"user":         "仅用户提问",
-	"assistant":    "仅助手回复",
-	"errors":       "报错与异常",
+	"conversation": "只看对话",
+	"all":          "全部（含命令和工具输出）",
+	"user":         "只看我说的",
+	"assistant":    "只看助手说的",
+	"errors":       "只看报错",
 }
 
 func isValidScope(s string) bool {
@@ -129,9 +129,9 @@ func (st *State) setRestore(n RestoreNotice) {
 var builtinRecipes = []Recipe{
 	{
 		ID:          "error-triage",
-		Name:        "近期报错会话分诊",
+		Name:        "最近的报错",
 		Icon:        "warning",
-		Description: "扫描本机 Agent 会话中的报错、异常与非零退出，排除工具输出噪音，关联同文件上下文并按项目聚合排序。",
+		Description: "找出最近聊天里出现过的报错和失败，按项目分好，还会带上聊到同一个文件的其他聊天。",
 		Scope:       "errors",
 		Code: "scan_sessions(query=\"\", scope=\"errors\")\n" +
 			"|> exclude_tools()\n" +
@@ -143,9 +143,9 @@ var builtinRecipes = []Recipe{
 	},
 	{
 		ID:          "cross-session-context",
-		Name:        "跨会话决策与上下文溯源",
+		Name:        "以前是怎么定的",
 		Icon:        "branch",
-		Description: "在纯对话模式（Without tools）下检索模块设计与修改讨论，按项目与关联文件串联历次会话并去重。",
+		Description: "只看你和助手说的话，找回以前讨论设计、做决定的那几次聊天，按项目串起来。加几个词搜得更准。",
 		Scope:       "conversation",
 		Code: "scan_sessions(query=\"\", scope=\"conversation\")\n" +
 			"|> exclude_tools()\n" +
@@ -158,9 +158,9 @@ var builtinRecipes = []Recipe{
 	},
 	{
 		ID:          "model-harness-audit",
-		Name:        "模型与 Harness 产出审计",
+		Name:        "各个模型都做了什么",
 		Icon:        "chart",
-		Description: "跨 Claude Code 与 Codex 会话统计各模型与 Harness 的近期会话产出、关联改动文件与异常分布。",
+		Description: "看看 Claude Code 和 Codex 里各个模型最近做了哪些事、改了哪些文件、出了多少报错。",
 		Scope:       "all",
 		Code: "scan_sessions(query=\"\", scope=\"all\")\n" +
 			"|> correlate(by=\"file\")\n" +
@@ -227,16 +227,16 @@ func (st *State) upsertRecipe(in RecipeInput, now time.Time) (*Recipe, error) {
 		id = slugify(name)
 	}
 	if !validID.MatchString(id) {
-		return nil, fmt.Errorf("配方 ID %q 必须是小写字母开头的字母、数字、连字符或下划线（2-48 字符）", id)
+		return nil, fmt.Errorf("代号 %q 不行：要用小写字母开头，只能有小写字母、数字、- 和 _，2 到 48 个字", id)
 	}
 	if name == "" || utf8.RuneCountInString(name) > 80 {
-		return nil, errors.New("配方名称必填，且不超过 80 个字符")
+		return nil, errors.New("名称必须填，最多 80 个字")
 	}
 	if !isValidScope(scope) {
-		return nil, fmt.Errorf("不支持的检索范围 %q（可选：%s）", scope, strings.Join(scopes, ", "))
+		return nil, fmt.Errorf("不支持的范围 %q（可选：%s）", scope, strings.Join(scopes, ", "))
 	}
 	if code == "" || len(code) > maxCodeLen {
-		return nil, fmt.Errorf("Search-as-Code 代码必填，且不超过 %d 字节", maxCodeLen)
+		return nil, fmt.Errorf("搜索步骤必须填，最多 %d 个字节", maxCodeLen)
 	}
 	if !slices.Contains(
 		[]string{"code", "search", "warning", "branch", "chart", "doc", "folder", "star", "check", "clock", "tag", "list", "file"},
@@ -245,7 +245,7 @@ func (st *State) upsertRecipe(in RecipeInput, now time.Time) (*Recipe, error) {
 		icon = "code"
 	}
 	if _, err := CompileProgram(CompileInput{Code: code, Scope: scope}); err != nil {
-		return nil, fmt.Errorf("Search-as-Code 代码语法错误：%w", err)
+		return nil, fmt.Errorf("搜索步骤写得不对：%w", err)
 	}
 
 	for _, r := range st.Recipes {
@@ -260,7 +260,7 @@ func (st *State) upsertRecipe(in RecipeInput, now time.Time) (*Recipe, error) {
 		}
 	}
 	if len(st.Recipes) >= maxRecipes {
-		return nil, fmt.Errorf("最多保存 %d 个自定义搜索配方", maxRecipes)
+		return nil, fmt.Errorf("自己建的常用搜索最多 %d 个，先删掉几个", maxRecipes)
 	}
 	r := &Recipe{
 		ID:          id,
@@ -285,10 +285,10 @@ func (st *State) deleteRecipe(id string) error {
 	}
 	for _, b := range builtinRecipes {
 		if b.ID == id {
-			return fmt.Errorf("预置配方 %q 处于默认状态，无需删除", id)
+			return fmt.Errorf("自带的常用搜索 %q 没改过，不用删", id)
 		}
 	}
-	return fmt.Errorf("找不到配方 %q", id)
+	return fmt.Errorf("找不到常用搜索 %q", id)
 }
 
 func (st *State) recordRun(res *ExecutionResult, now time.Time) {

@@ -132,3 +132,66 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     assert.ok(JSON.stringify(view).includes("Newtonsoft.Json@13.0.4"));
   } finally { h.p.close(); }
 });
+
+test("ExactJSON rejects limit: 0 and checks unknown tool before args validation", async () => {
+  const h = await setup();
+  try {
+    const zeroLimit = await h.call("connector.tools.call", { name: "nuget_search", args: { query: "Newtonsoft.Json", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
+    const unknownTool = await h.call("connector.tools.call", { name: "nuget_unknown", args: { limit: "bad" } });
+    assert.equal(unknownTool.error?.code, "unknown_method");
+  } finally { h.p.close(); }
+});
+
+test("128-char package IDs navigate cleanly within key/action limits and refresh resets after navigation", async () => {
+  const h = await setup();
+  try {
+    const longID = "A." + "x".repeat(126);
+    const longPkg = {
+      id: longID, version: "1.0.0", description: "Long package ID",
+      projectUrl: "https://example.com/long", licenseUrl: "https://licenses.nuget.org/MIT",
+      totalDownloads: 42, published: "2025-09-16T08:13:09.313Z",
+    };
+    const longSearch12 = `/query?${new URLSearchParams({ q: "longpkg", take: "12" })}`;
+    const longSearch20 = `/query?${new URLSearchParams({ q: longID, take: "20" })}`;
+    const longLeaf = `/v3/registration5-semver1/${longID.toLowerCase()}/1.0.0.json`;
+    const longNuspec = `/v3-flatcontainer/${longID.toLowerCase()}/1.0.0/${longID.toLowerCase()}.nuspec`;
+    h.fixture.put(longSearch12, { totalHits: 1, data: [longPkg] });
+    h.fixture.put(longSearch20, { totalHits: 1, data: [longPkg] });
+    h.fixture.put(longLeaf, { listed: true, registration: `https://api.nuget.org/v3/registration5-semver1/${longID.toLowerCase()}/index.json` });
+    h.fixture.put(longNuspec, `<?xml version="1.0" encoding="utf-8"?><package><metadata><id>${longID}</id><version>1.0.0</version><license type="expression">MIT</license><description>Long package ID</description></metadata></package>`);
+
+    await h.call("ui.page.mount", { session: "long-v1", params: { contribution: "nuget", locale: "en", ui_version: 1 } });
+    let snap = await settled(h, "long-v1", "nuget-welcome-text");
+    await h.call("ui.page.event", { session: "long-v1", ticket: "host-ticket", interaction: interaction(snap, "nuget-submit", { query: "longpkg" }) });
+    snap = await settled(h, "long-v1", `${longID}@1.0.0`);
+    const openItem = snap.view.sections.flatMap(s => s.items).find(item => typeof item.key === "string" && item.key.startsWith("open-"));
+    assert.ok(openItem && typeof openItem.key === "string" && "action" in openItem && openItem.action);
+    assert.ok(Array.from(openItem.key).length <= 128);
+    assert.ok(Array.from(openItem.action.id).length <= 128);
+    await h.call("ui.page.event", { session: "long-v1", ticket: "host-ticket", interaction: interaction(snap, openItem.key) });
+    snap = await settled(h, "long-v1", `dotnet add package ${longID} --version 1.0.0`);
+
+    // Refresh once, then navigate back: cached search should NOT be bypassed.
+    await h.call("ui.page.event", { session: "long-v1", ticket: "host-ticket", interaction: interaction(snap, "nuget-refresh") });
+    snap = await settled(h, "long-v1", `dotnet add package ${longID} --version 1.0.0`);
+    const hitsBeforeBack = h.fixture.hits.get("https://azuresearch-usnc.nuget.org" + longSearch12) ?? 0;
+    await h.call("ui.page.event", { session: "long-v1", ticket: "host-ticket", interaction: interaction(snap, "nuget-back") });
+    await settled(h, "long-v1", `${longID}@1.0.0`);
+    assert.equal(h.fixture.hits.get("https://azuresearch-usnc.nuget.org" + longSearch12), hitsBeforeBack, "refresh must reset after navigation");
+
+    // Modern ui_version: 5 also keeps bounded keys/action.id and pushes validated detail state.
+    await h.call("ui.page.mount", { session: "long-v5", params: { contribution: "nuget", locale: "en", ui_version: 5 } });
+    let snap5 = await settled(h, "long-v5", "nuget-welcome-text");
+    await h.call("ui.page.event", { session: "long-v5", ticket: "host-ticket", interaction: interaction(snap5, "nuget-submit", { query: "longpkg" }) });
+    snap5 = await settled(h, "long-v5", `${longID}@1.0.0`);
+    const open5 = snap5.view.sections.flatMap(s => s.items).find(item => typeof item.key === "string" && item.key.startsWith("open-"));
+    assert.ok(open5 && typeof open5.key === "string" && "action" in open5 && open5.action);
+    assert.ok(Array.from(open5.key).length <= 128);
+    assert.ok(Array.from(open5.action.id).length <= 128);
+    const nav5 = (await h.call("ui.page.event", { session: "long-v5", ticket: "host-ticket", interaction: interaction(snap5, open5.key) })).result;
+    assert.equal(nav5.result.push.ui, "nuget");
+    await h.call("ui.page.mount", { session: "long-v5-detail", params: { contribution: "nuget", locale: "en", ui_version: 5, state: nav5.result.push.state } });
+    await settled(h, "long-v5-detail", `dotnet add package ${longID} --version 1.0.0`);
+  } finally { h.p.close(); }
+});

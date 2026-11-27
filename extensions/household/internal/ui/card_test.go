@@ -45,9 +45,9 @@ func TestCardRowsAreMostUrgentFirstAndHaveNoActions(t *testing.T) {
 	st := newStore(t, true)
 	a, _ := newApp(st)
 	v := renderCard(t, a)
-	sec, ok := sectionTitled(v, "需要处理")
+	sec, ok := sectionTitled(v, cardRowsTitle)
 	if !ok {
-		t.Fatal("no 需要处理 section on the card")
+		t.Fatalf("no %s section on the card", cardRowsTitle)
 	}
 	h := home(t, st)
 	findings := rules.Findings(h, testToday)
@@ -79,5 +79,21 @@ func TestCardHasNoFieldsOrSearch(t *testing.T) {
 		if c.Type == wire.ComponentField {
 			t.Fatal("card has a field")
 		}
+	}
+}
+
+// TestCardRowsAreNotTitledLikeTheCount keeps the card's rows from sitting under the 需要处理 label: they include the
+// items about to expire, which 需要处理 does not count. The card's 需要处理 says what it adds up, like the page's.
+func TestCardRowsAreNotTitledLikeTheCount(t *testing.T) {
+	st := newStore(t, true)
+	a, _ := newApp(st)
+	v := renderCard(t, a)
+	if _, ok := sectionTitled(v, "需要处理"); ok {
+		t.Fatal("card rows titled 需要处理, but they include items about to expire")
+	}
+	sum := rules.Summarize(home(t, st), testToday)
+	got := v.Sections[0].Items[0].Stats[0]
+	if want := alertsStat(sum); got != want {
+		t.Fatalf("card 需要处理 %+v, want %+v as on the page", got, want)
 	}
 }

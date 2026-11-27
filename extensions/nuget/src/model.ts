@@ -4,14 +4,37 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+export function boundedID(prefix: string, raw: string, most = 128): string {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
+export function packageActionID(id: string): string { return boundedID("package:", id, 128); }
 export function packageID(value: unknown): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value) || value.includes("..")) throw new ReadError("invalid");
   return value;
 }
 export function queryText(value: unknown): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -23,6 +46,9 @@ export function versionText(value: unknown): string {
 export function searchPath(query: string, limit = 12): string {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
   return `/query?${new URLSearchParams({ q: queryText(query), take: String(limit) })}`;
+}
+export function packageSearchPath(id: string): string {
+  return `/query?${new URLSearchParams({ q: packageID(id), take: "20" })}`;
 }
 export function registrationPath(id: string, version: string): string {
   return `/v3/registration5-semver1/${packageID(id).toLowerCase()}/${versionText(version).toLowerCase()}.json`;
@@ -50,14 +76,14 @@ function optionalHTTPSURL(value: unknown): string | undefined {
   let url: URL;
   try { url = new URL(string(value)); } catch { throw new ReadError("bad_answer"); }
   if (url.protocol !== "https:") return undefined;
-  if (url.username || url.password || url.port) throw new ReadError("bad_answer");
+  if (url.username || url.password || url.port || url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function httpsURL(value: unknown): string | undefined {
   if (value == null || value === "") return undefined;
   let url: URL;
   try { url = new URL(string(value)); } catch { throw new ReadError("bad_answer"); }
-  if (url.protocol !== "https:" || url.username || url.password || url.port) throw new ReadError("bad_answer");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function apiURL(value: unknown, host: string, path: RegExp): string {
@@ -75,7 +101,7 @@ function date(value: unknown): string | undefined {
 }
 function license(value: unknown): string {
   const license = clip(oneLine(string(value, "See license link")), 120);
-  if (!license || /[\u0000-\u001f\u007f]/u.test(license)) throw new ReadError("bad_answer");
+  if (!license || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(license)) throw new ReadError("bad_answer");
   return license;
 }
 export interface PackageSummary {
@@ -90,7 +116,8 @@ export interface DetailResult { package: PackageDetail; at: number; stale?: Read
 function summary(value: unknown): PackageSummary {
   const item = object(value), id = packageID(item.id), version = versionText(item.version);
   const licenseValue = item.licenseExpression ?? item.license ?? (item.licenseUrl ? "See license link" : undefined);
-  return { id, version, description: clip(oneLine(string(item.description, "")), 500), license: license(licenseValue), url: `https://www.nuget.org/packages/${id}/${version}`, ...(optionalHTTPSURL(item.projectUrl) ? { projectURL: optionalHTTPSURL(item.projectUrl) } : {}), ...(optionalHTTPSURL(item.licenseUrl) ? { licenseURL: optionalHTTPSURL(item.licenseUrl) } : {}), ...(item.totalDownloads == null ? {} : { totalDownloads: integer(item.totalDownloads) }), ...(date(item.published) ? { published: date(item.published) } : {}) };
+  const projectURL = optionalHTTPSURL(item.projectUrl), licenseURL = optionalHTTPSURL(item.licenseUrl), published = date(item.published);
+  return { id, version, description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), license: license(licenseValue), url: `https://www.nuget.org/packages/${id}/${version}`, ...(projectURL ? { projectURL } : {}), ...(licenseURL ? { licenseURL } : {}), ...(item.totalDownloads == null ? {} : { totalDownloads: integer(item.totalDownloads) }), ...(published ? { published } : {}) };
 }
 export function parseSearch(raw: unknown, at: number): SearchResult {
   const root = object(raw), total = integer(root.totalHits, 1_000_000_000_000), seen = new Set<string>();
@@ -122,14 +149,15 @@ export function parseNuspec(raw: string, id: string, version: string, listed: bo
   const groups = Array.from(dependenciesBlock.matchAll(/<group\b[^>]*targetFramework="([^"]+)"[^>]*>/gi)).map(match => {
     const start = match.index ?? 0, opening = match[0];
     if (opening.endsWith("/>")) return [match[1], ""] as const;
-    const end = dependenciesBlock.indexOf("</group>", start + opening.length);
+    const rest = dependenciesBlock.slice(start + opening.length);
+    const end = rest.search(/<\/group\s*>/i);
     if (end < 0) throw new ReadError("bad_answer");
-    return [match[1], dependenciesBlock.slice(start + opening.length, end)] as const;
+    return [match[1], rest.slice(0, end)] as const;
   });
   const frameworks: string[] = [];
   let dependencies = 0;
   for (const [rawFramework, body] of groups.slice(0, 40)) {
-    const framework = clip(oneLine(rawFramework), 100);
+    const framework = clip(oneLine(rawFramework.replace(/[\ud800-\udfff]/gu, "")), 100);
     if (frameworks.includes(framework)) throw new ReadError("bad_answer");
     frameworks.push(framework);
     dependencies += Array.from((body ?? "").matchAll(/<dependency\b[^>]*\bid="[^"]+"/gi)).length;
@@ -144,7 +172,7 @@ export function parseCatalog(raw: unknown, id: string, version: string, listed: 
   const groups = item.dependencyGroups == null ? [] : array(item.dependencyGroups), frameworks: string[] = [];
   let dependencies = 0;
   for (const rawGroup of groups.slice(0, 40)) {
-    const group = object(rawGroup), framework = clip(oneLine(string(group.targetFramework, "Unspecified")), 100);
+    const group = object(rawGroup), framework = clip(oneLine(string(group.targetFramework, "Unspecified").replace(/[\ud800-\udfff]/gu, "")), 100);
     if (frameworks.includes(framework)) throw new ReadError("bad_answer");
     frameworks.push(framework);
     dependencies += array(group.dependencies ?? []).length;

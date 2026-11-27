@@ -14,8 +14,18 @@ func weekdayName(date string) string { return weekdayNames[weekdayOf(date)] }
 
 // num writes v with at most one decimal and thousands separators: 3,845 · 82.5 · 0.
 func num(v float64) string {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return "0"
+	}
 	neg := v < 0
 	v = math.Abs(v)
+	if v >= 1e15 {
+		s := strconv.FormatFloat(v, 'g', 6, 64)
+		if neg {
+			return "-" + s
+		}
+		return s
+	}
 	v = math.Round(v*10) / 10
 	whole := int64(v)
 	frac := int64(math.Round((v - float64(whole)) * 10))
@@ -126,6 +136,13 @@ func byText(by string) string {
 	return ""
 }
 
+func shortDate(date string) string {
+	if len(date) >= 5 {
+		return date[5:]
+	}
+	return date
+}
+
 // dayLabel is a date for a person: 今天 / 明天 / 11-16 周一.
 func dayLabel(date, today string) string {
 	t, _ := time.Parse(time.DateOnly, today)
@@ -135,7 +152,7 @@ func dayLabel(date, today string) string {
 	case t.AddDate(0, 0, 1).Format(time.DateOnly):
 		return "明天"
 	}
-	return date[5:] + " " + weekdayName(date)
+	return shortDate(date) + " " + weekdayName(date)
 }
 
 func clockOf(ms float64, loc *time.Location) string {
@@ -146,9 +163,15 @@ func clockOf(ms float64, loc *time.Location) string {
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
+	}
+	if n == 1 {
+		return string(r[:1])
 	}
 	return string(r[:n-1]) + "…"
 }

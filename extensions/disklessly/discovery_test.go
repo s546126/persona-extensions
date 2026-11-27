@@ -268,7 +268,7 @@ func TestUnscannedStatusAndFleetUI(t *testing.T) {
 	if ms.Level != HealthUnscanned || ms.LastScannedAt != nil {
 		t.Fatalf("unscanned status=%+v", ms)
 	}
-	if b := healthBadge(ms); b.Text != "未扫描" || b.Tone != wire.ToneNeutral {
+	if b := healthBadge(ms); b.Text != "还没检查" || b.Tone != wire.ToneNeutral {
 		t.Fatalf("badge=%+v", b)
 	}
 	sections := (draw{st: st, now: t0}).fleetTab(page{}, st.statuses(), m)
@@ -276,7 +276,7 @@ func TestUnscannedStatusAndFleetUI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "全部正常") || !strings.Contains(string(raw), "1 台未扫描") {
+	if strings.Contains(string(raw), "都还宽裕") || !strings.Contains(string(raw), "1 台还没检查") {
 		t.Fatalf("misleading fleet: %s", raw)
 	}
 	m.Reachable = false

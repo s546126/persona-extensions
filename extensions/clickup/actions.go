@@ -91,6 +91,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
 	var fn func() (string, error)
+	var keyArgs any
 	switch name {
 	case "clickup_create_task":
 		var in createArgs
@@ -100,6 +101,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := in.validate(); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		me, err := a.client.user(ctx)
 		if err != nil {
 			return nil, err
@@ -126,6 +128,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := in.validate(); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			if _, err := a.client.updateStatus(ctx, in.TaskID, in.Status); err != nil {
 				return "", err
@@ -135,8 +138,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(keyArgs)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

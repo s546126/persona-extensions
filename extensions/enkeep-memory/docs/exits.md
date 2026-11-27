@@ -61,8 +61,8 @@ Since beta.52 the extension picks the standing set itself, by leverage, to fit:
   last, corrected the assistant, edited or confirmed it). Entries read before daily/17 are estimated from their scope,
   grain and durability. Candidates count 0.8, dormant ones 0.5; pinned entries 100.
 - **Two sides, two shares.** The understanding of the user (③ ④ ⑥, and ⑤'s decisions, evaluations and commitments)
-  takes 60% of 1400 bytes, the assistant's rules (① ②) 40%, so rules never crowd out the understanding; what one side
-  leaves goes to the other. At most 12 lines. Two lines alike in words (character-bigram Jaccard ≥ 0.45) are one: the
+  takes 40% of the room, the assistant's rules (① ②) 60% (0.2.5; 60/40 the other way before: the collaboration
+  evaluation showed the rules side was what avoided mistakes); what one side leaves goes to the other. At most 12 lines. Two lines alike in words (character-bigram Jaccard ≥ 0.45) are one: the
   higher score stays. Ranks interleave the sides from 989 down, so a smaller room shrinks both.
 - **The line.** An understanding with a principle stands as `原则：<principle>（如 <situation>：<choice>）`; a rule as
   what the assistant does. At most 240 bytes.
@@ -81,7 +81,15 @@ Since beta.52 the extension picks the standing set itself, by leverage, to fit:
 - **Not templates, corrections first.** An entry resting only on template lines (a sentence the user is said to have
   typed into three or more agent sessions word for word) never stands, nor a pattern resting mostly on such entries.
   A correction scores more each day the user had to repeat it; a hard rule (two days within a week, or a ban or anger
-  in the user's words) stands at once and scores at least 90. Alike scores go by days of evidence, then the latest.
+  in the user's words) stands at once and scores 90 to 99 by its own leverage (0.2.5: before, every hard rule scored
+  exactly 90, and with over a hundred of them the tie, broken by days of evidence and id, decided which stood). Times
+  seen add at most 25 (15 before 0.2.5), so a rule distilled from dozens of observations ranks above one seen seven
+  times. Alike scores go by days of evidence, then the latest.
+- **Exceptions and classes (0.2.6).** A rule's line ends with `（例外：…）` when its exception is not in its words;
+  the line's other words are cut first. No class (a facet and its type) takes more than 20% of the room. Rules the
+  rule merge found to say what a stronger one says are merged into it, or marked covered by it (`covered_by:`) and kept
+  out of the set while it stands. A rule's subjects carry its occasion's words (派活, 汇报, 提问, 开工…) for
+  decisions_query tags.
 - **The room** is the `resident_bytes` setting (1400 by default), one more line per 120 bytes beyond it.
 - **Fast path.** Every `fast_minutes`, today's assistant conversations with a new correction are read at once and
   the set is chosen again, without waiting for the night.

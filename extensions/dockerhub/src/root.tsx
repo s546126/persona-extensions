@@ -1,12 +1,15 @@
 import { callback, useLoadEffect, useState, type Node } from "@persona/extension/ui";
-import { imageTransition, encodeState, loadPage, page, readState, transition, type Loaded } from "./page.tsx";
+import { imageTransition, encodeState, loadPage, page, readState, transition, type Loaded, type PageState } from "./page.tsx";
 import type { DockerHub } from "./service.ts";
 export interface RootOptions { service: DockerHub; locale?: string; uiVersion?: number; state?: unknown }
+function sameState(a: PageState, b: PageState): boolean {
+  return a.q === b.q && a.found === b.found && a.image?.name === b.image?.name;
+}
 export function Root(options: RootOptions): Node {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState<{ service: DockerHub; identity: string; loaded: Loaded } | undefined>(undefined);
-  const identity = JSON.stringify(state) + ":" + refresh;
+  const identity = JSON.stringify([state, refresh]);
   useLoadEffect(async signal => {
     const loaded = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult(previous => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded)
@@ -20,11 +23,17 @@ export function Root(options: RootOptions): Node {
         return callback(() => ({ push }), { push });
       }
       return callback(values => {
-        if (id === "refresh") setRefresh(previous => previous + 1);
+        if (id === "refresh") setView(previous => ({ state: previous.state, refresh: previous.refresh + 1 }));
         else if (id.startsWith("image:")) {
           if (loaded.kind !== "results") return;
-          setState(previous => imageTransition(previous, loaded.result, id));
-        } else setState(previous => transition(previous, id, values));
+          setView(previous => {
+            const nextState = imageTransition(previous.state, loaded.result, id);
+            return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+          });
+        } else setView(previous => {
+          const nextState = transition(previous.state, id, values);
+          return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     } });
 }

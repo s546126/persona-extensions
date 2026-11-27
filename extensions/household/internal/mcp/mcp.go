@@ -13,6 +13,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/nwverse/persona-extensions/extensions/household/internal/imports"
 	"github.com/nwverse/persona-extensions/pluginkit/spaces/kernel"
 )
 
@@ -36,8 +37,13 @@ const (
 // ctx is done. A message without an id is a notification and is never answered. Each tool call runs on st. loc is the
 // hub's time zone: "today" is the day in it.
 func Serve(ctx context.Context, in io.Reader, out io.Writer, st kernel.Storage, loc *time.Location) error {
+	return ServeImports(ctx, in, out, st, imports.Open(""), loc)
+}
+
+// ServeImports is Serve with the store of the import drafts, which the page shares.
+func ServeImports(ctx context.Context, in io.Reader, out io.Writer, st kernel.Storage, imp *imports.Store, loc *time.Location) error {
 	r := bufio.NewReader(in)
-	s := &server{st: st, loc: loc}
+	s := &server{st: st, loc: loc, imp: imp}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -63,6 +69,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, st kernel.Storage, 
 type server struct {
 	st  kernel.Storage
 	loc *time.Location
+	imp *imports.Store
 }
 
 // request is one incoming message. ID is nil for a notification; a null id keeps the bytes "null".
@@ -242,10 +249,22 @@ func (s *server) run(t Tool, raw json.RawMessage) ([]byte, error) {
 		return err
 	}
 	var err error
+	var after []func(ok bool)
 	if t.Read {
-		err = s.st.View(func(b *kernel.Base) error { return do(env{b: b, now: time.Now(), loc: s.loc}) })
+		err = s.st.View(func(b *kernel.Base) error { return do(env{b: b, now: time.Now(), loc: s.loc, imp: s.imp}) })
 	} else {
-		err = s.st.Update(func(b *kernel.Base, now time.Time) error { return do(env{b: b, now: now, loc: s.loc}) })
+		err = s.st.Update(func(b *kernel.Base, now time.Time) error {
+			after = nil // a retried update starts over
+			// An import or undo left pending by an interrupted save is settled first, against the records exactly as
+			// they are before this change (records lock, then the import store's).
+			if err := s.imp.SettleRecords(b); err != nil {
+				return err
+			}
+			return do(env{b: b, now: now, loc: s.loc, imp: s.imp, after: &after})
+		})
+	}
+	for _, f := range after {
+		f(err == nil)
 	}
 	return out, err
 }

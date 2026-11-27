@@ -835,7 +835,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "podcasts", name: "Podcasts \u64AD\u5BA2", version: "0.1.5", icon: "assets/icon.png", description: "\u641C\u7D22\u516C\u5F00\u64AD\u5BA2\uFF0C\u67E5\u770B\u8282\u76EE\u548C\u8FD1\u671F\u5355\u96C6\uFF0C\u628A\u60F3\u542C\u7684\u8282\u76EE\u4FDD\u5B58\u5230\u672C\u5730\u6536\u542C\u6E05\u5355\u3002\u901A\u8FC7 Apple \u516C\u5F00\u76EE\u5F55\u83B7\u53D6\u5143\u6570\u636E\uFF0C\u65E0\u9700\u8D26\u53F7\uFF1B\u4E0D\u4E0B\u8F7D\u5A92\u4F53\uFF0C\u4E0D\u63A7\u5236\u64AD\u653E\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/podcasts/README.md", tags: ["\u64AD\u5BA2", "\u5355\u96C6", "\u6536\u542C\u6E05\u5355", "Apple Podcasts"], engines: { persona: ">=202611101800", extension_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/podcasts.mjs", sha256: "" } }, contributes: { connectors: [{ id: "podcasts", name: "Podcasts", capabilities: ["status", "tools"], hosts: ["itunes.apple.com"], agent_tools: ["podcasts_*"] }], ui: [{ id: "podcasts", title: "\u53D1\u73B0\u64AD\u5BA2", placement: "nav_page", icon: "music" }] }, permissions: { network: ["itunes.apple.com"], storage: { keys: ["subscriptions"] } } };
+var persona_extension_default = { manifest_version: 1, id: "podcasts", name: "Podcasts \u64AD\u5BA2", version: "0.1.6", icon: "assets/icon.png", description: "\u641C\u7D22\u516C\u5F00\u64AD\u5BA2\uFF0C\u67E5\u770B\u8282\u76EE\u548C\u8FD1\u671F\u5355\u96C6\uFF0C\u628A\u60F3\u542C\u7684\u8282\u76EE\u4FDD\u5B58\u5230\u672C\u5730\u6536\u542C\u6E05\u5355\u3002\u901A\u8FC7 Apple \u516C\u5F00\u76EE\u5F55\u83B7\u53D6\u5143\u6570\u636E\uFF0C\u65E0\u9700\u8D26\u53F7\uFF1B\u4E0D\u4E0B\u8F7D\u5A92\u4F53\uFF0C\u4E0D\u63A7\u5236\u64AD\u653E\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/podcasts/README.md", tags: ["\u64AD\u5BA2", "\u5355\u96C6", "\u6536\u542C\u6E05\u5355", "Apple Podcasts"], engines: { persona: ">=202611101800", extension_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/podcasts.mjs", sha256: "" } }, contributes: { connectors: [{ id: "podcasts", name: "Podcasts", capabilities: ["status", "tools"], hosts: ["itunes.apple.com"], agent_tools: ["podcasts_*"] }], ui: [{ id: "podcasts", title: "\u53D1\u73B0\u64AD\u5BA2", placement: "nav_page", icon: "music" }] }, permissions: { network: ["itunes.apple.com"], storage: { keys: ["subscriptions"] } } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 18e3, tool: 18e3, response: 2 << 20, fresh: 15 * 6e4, cache: 48, cacheBytes: 2 << 20, gap: 350 });
@@ -846,8 +846,30 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text2, most) => Array.from(text2).length <= most ? text2 : Array.from(text2).slice(0, most).join("").trimEnd() + "\u2026";
+var clip = (text2, most) => {
+  const limit2 = Math.floor(most);
+  if (!(limit2 > 0)) return "";
+  const chars = Array.from(text2);
+  if (chars.length <= limit2) return text2;
+  if (limit2 === 1) return chars[0];
+  return chars.slice(0, limit2 - 1).join("").trimEnd() + "\u2026";
+};
 var plain = (text2) => text2.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text2) {
+  let hash = 2166136261;
+  for (let i = 0; i < text2.length; i++) {
+    hash ^= text2.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, raw, most = 128) {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 function object(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
   return value;
@@ -889,7 +911,7 @@ function publicURL(value, allowed) {
   return url.toString();
 }
 function text(value, most) {
-  return clip(plain(string(value)), most);
+  return clip(plain(string(value).replace(/[\ud800-\udfff]/gu, "")), most);
 }
 function date(value) {
   if (value == null) return void 0;
@@ -902,7 +924,7 @@ function date(value) {
 function queryText(value) {
   if (typeof value !== "string") throw new ReadError("invalid");
   const text2 = plain(value);
-  if (!text2 || Array.from(text2).length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (!text2 || Array.from(text2).length > 200 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   return text2;
 }
 function searchPath(query, limit2 = 20) {
@@ -1145,7 +1167,18 @@ function errorText(error, locale = "") {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 function readTime(at, timeZone = "Local", locale = "en") {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: timeZone === "Local" ? void 0 : timeZone }).format(new Date(at));
+  const time = typeof at === "number" ? at : Date.parse(at);
+  if (!Number.isFinite(time)) return "";
+  const opts = { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  try {
+    return new Intl.DateTimeFormat(locale, { ...opts, timeZone: timeZone === "Local" ? void 0 : timeZone }).format(time);
+  } catch {
+    try {
+      return new Intl.DateTimeFormat("en", { ...opts, timeZone: "UTC" }).format(time);
+    } catch {
+      return new Date(time).toISOString().slice(0, 16);
+    }
+  }
 }
 
 // src/service.ts
@@ -1184,22 +1217,33 @@ var Podcasts = class {
   queue = Promise.resolve();
   lastOK;
   lastError;
+  touch(path, item) {
+    this.cache.delete(path);
+    this.cache.set(path, item);
+  }
   cached(path, fresh) {
     const item = this.cache.get(path);
-    if (item && this.monotonic() - item.at < fresh) {
-      this.cache.delete(path);
-      item.used = this.monotonic();
-      this.cache.set(path, item);
+    if (item && this.monotonic() - item.saved < fresh) {
+      this.touch(path, item);
       return { raw: item.raw, at: item.at };
     }
     return void 0;
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    if (bytes > this.limits.cacheBytes) {
+      if (old) {
+        this.bytes -= old.bytes;
+        this.cache.delete(path);
+      }
+      return;
+    }
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    this.cache.set(path, { raw, at, saved: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       const oldest = this.cache.keys().next().value;
@@ -1221,6 +1265,21 @@ var Podcasts = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1237,7 +1296,8 @@ var Podcasts = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1258,9 +1318,6 @@ var Podcasts = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text2);
     } catch {
@@ -1272,6 +1329,7 @@ var Podcasts = class {
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1299,10 +1357,15 @@ var Podcasts = class {
         return { raw, at };
       } catch (error) {
         if (request.signal.aborted) {
-          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+          const aborted = cancellation(request.signal);
+          if (aborted instanceof ReadError) {
+            this.lastError = { code: aborted.code, status: aborted.status, at: this.monotonic() };
+            throw aborted;
+          }
+          throw error instanceof Error && error.name === "AbortError" ? error : aborted;
         }
         const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1316,8 +1379,11 @@ var Podcasts = class {
       return await run;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
-      const old = this.cached(path, Infinity);
-      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+      const old = this.cache.get(path);
+      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
+        this.touch(path, old);
+        return { raw: old.raw, at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
+      }
       throw error;
     }
   }
@@ -1327,7 +1393,7 @@ var Podcasts = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit2 = 20, refresh = false, signal) {
@@ -1343,17 +1409,20 @@ var Podcasts = class {
     return { ...parseEpisodes(rd.raw, show, rd.at), stale: rd.stale };
   }
   async show(show, signal) {
-    const path = showPath(show), rd = await this.read(path, this.limits.fresh, signal, (raw) => {
-      const results2 = raw.results;
-      const item2 = results2?.find((raw2) => !!raw2 && typeof raw2 === "object" && raw2.wrapperType === "track");
-      if (!item2) throw new ReadError("not_found");
-      if (id(item2.collectionId) !== podcastID(show)) throw new ReadError("not_found");
-      parseShow(item2);
+    const showID = podcastID(show);
+    const findTrack = (raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ReadError("bad_answer");
+      const results = raw.results;
+      if (!Array.isArray(results)) throw new ReadError("bad_answer");
+      const item = results.find((entry) => !!entry && typeof entry === "object" && entry.wrapperType === "track");
+      if (!item) throw new ReadError("not_found");
+      if (id(item.collectionId) !== showID) throw new ReadError("not_found");
+      return parseShow(item);
+    };
+    const path = showPath(showID), rd = await this.read(path, this.limits.fresh, signal, (raw) => {
+      findTrack(raw);
     });
-    const results = rd.raw.results;
-    const item = results?.find((raw) => !!raw && typeof raw === "object" && raw.wrapperType === "track");
-    if (!item) throw new ReadError("not_found");
-    return parseShow(item);
+    return findTrack(rd.raw);
   }
   cacheStats() {
     return { entries: this.cache.size, bytes: this.bytes };
@@ -1385,20 +1454,37 @@ function episodeLine(episode, index) {
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const token of exact.fieldValues("query")) {
+      if (token.raw === "null") {
+        delete args.query;
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args.query = value2;
     }
-    const parsed = exact.int64Fields(["limit", "show"]);
-    if (parsed.limit !== 0n) {
-      if (parsed.limit < 1n || parsed.limit > 30n) throw new ReadError("invalid");
-      args.limit = Number(parsed.limit);
-    }
-    if (parsed.show !== 0n) {
-      if (parsed.show < 1n || parsed.show > 2000000000000n) throw new ReadError("invalid");
-      args.show = Number(parsed.show);
+    for (const field of ["limit", "show"]) {
+      let has = false;
+      let parsed = 0n;
+      for (const token of exact.fieldValues(field)) {
+        if (token.raw === "null") {
+          has = false;
+          parsed = 0n;
+          continue;
+        }
+        try {
+          parsed = token.int64(parsed);
+        } catch {
+          throw new ReadError("invalid");
+        }
+        has = true;
+      }
+      if (has) args[field] = parsed;
     }
     return args;
   }
@@ -1410,31 +1496,38 @@ function argsFrom(raw, exact) {
   return value;
 }
 function limit(value) {
-  const result = value == null ? 10 : Number(value);
-  if (!Number.isSafeInteger(result) || result < 1 || result > 30) throw new ReadError("invalid");
-  return result;
+  if (value == null) return 10;
+  if (typeof value === "bigint") {
+    if (value < 1n || value > 30n) throw new ReadError("invalid");
+    return Number(value);
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 30) throw new ReadError("invalid");
+  return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "podcasts_search" && name !== "podcasts_episodes") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "podcasts_search") {
-      if (typeof args.query !== "string") throw new ReadError("invalid");
-      const result = await service.search(args.query, limit(args.limit), false, request.signal);
-      const stale = result.stale ? `
-${errorText(result.stale, service.locale)} \xB7 ${fmt(t.readAt, { at: readTime(result.at, "Local", service.locale) })}` : "";
-      return clip((result.shows.length ? result.shows.map(showLine).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty) + stale, 29999);
+      const query = queryText(args.query);
+      const result2 = await service.search(query, limit(args.limit), false, request.signal);
+      const stale = result2.stale ? `
+${errorText(result2.stale, service.locale)} \xB7 ${fmt(t.readAt, { at: readTime(result2.at, "Local", service.locale) })}` : "";
+      return clip((result2.shows.length ? result2.shows.map(showLine).join("\n").trim() : fmt(t.results, { query }) + "\n" + t.empty) + stale, 29999);
     }
-    if (name === "podcasts_episodes") {
-      const show = podcastID(args.show), result = await service.episodes(show, limit(args.limit), false, request.signal);
-      const prefix = `${result.show.title}
+    const rawShow = typeof args.show === "bigint" ? args.show >= 1n && args.show <= 2000000000000n ? Number(args.show) : 0 : args.show;
+    const show = podcastID(rawShow), result = await service.episodes(show, limit(args.limit), false, request.signal);
+    const prefix = `${result.show.title}
 ${result.show.publisher}
 ${result.show.url}
 
 `;
-      return clip(prefix + (result.episodes.length ? result.episodes.map(episodeLine).join("\n") : t.noEpisodes) + (result.stale ? `
+    return clip(prefix + (result.episodes.length ? result.episodes.map(episodeLine).join("\n") : t.noEpisodes) + (result.stale ? `
 ${errorText(result.stale, service.locale)} \xB7 ${fmt(t.readAt, { at: readTime(result.at, "Local", service.locale) })}` : ""), 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1466,28 +1559,72 @@ var jsx = createElement;
 var jsxs = createElement;
 
 // src/page.tsx
+var TEXT_MAX = 2e3;
+var KEY_MAX = 128;
+var ITEMS_MAX = 300;
+var STATE_MAX = 16384;
+var FRAME_MAX = 512 * 1024;
+var URL_MAX = 4096;
+var utf8 = new TextEncoder();
+var byteLength = (text2) => utf8.encode(text2).byteLength;
+function safeLinkURL(value) {
+  if (typeof value !== "string" || !value) return void 0;
+  let link;
+  try {
+    link = new URL(value);
+  } catch {
+    return void 0;
+  }
+  if (link.protocol !== "https:" || link.username || link.password || link.port || link.href.length > URL_MAX) return void 0;
+  return link.href;
+}
+function uniqueKey(used, prefix, raw) {
+  let key = boundedID(prefix, raw, KEY_MAX);
+  let attempt = 2;
+  while (used.has(key)) {
+    key = boundedID(prefix, `${raw}#${attempt}`, KEY_MAX);
+    attempt++;
+  }
+  used.add(key);
+  return key;
+}
 var initialState = { v: "discover", q: "", k: 0 };
 function readState(raw) {
-  if (typeof raw !== "string" || raw.length > 8e3) return initialState;
+  if (typeof raw !== "string" || byteLength(raw) > STATE_MAX) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value)) return initialState;
     const k = value.k === 0 ? 0 : podcastID(value.k);
-    const state = {
-      v: ["search", "show", "library"].includes(String(value.v)) ? value.v : "discover",
-      q: typeof value.q === "string" ? clip(value.q.trim(), 200) : "",
+    const v = ["search", "show", "library"].includes(String(value.v)) ? value.v : "discover";
+    const q = typeof value.q === "string" && value.q !== "" ? queryText(value.q) : "";
+    const b = value.b === void 0 ? void 0 : parseStoredShow(value.b);
+    if (value.b !== void 0 && !b) return initialState;
+    if (v === "show" && (!k || !b || k !== b.id) || v === "search" && !q) return initialState;
+    return {
+      v,
+      q,
       k,
       ...value.from === "library" ? { from: "library" } : {},
-      ...value.b === void 0 ? {} : { b: parseStoredShow(value.b) },
+      ...b === void 0 ? {} : { b },
       ...typeof value.message === "string" && ["saved", "removed"].includes(value.message) ? { message: value.message } : {}
     };
-    if (state.v === "show" && (!state.k || !state.b) || state.v === "search" && !state.q) return initialState;
-    return state;
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+var encodeState = (state) => {
+  const encoded = JSON.stringify(state);
+  if (byteLength(encoded) <= STATE_MAX) return encoded;
+  const slim = JSON.stringify(state.q ? { v: "search", q: state.q, k: 0 } : initialState);
+  return byteLength(slim) <= STATE_MAX ? slim : JSON.stringify(initialState);
+};
+function safeState(state) {
+  try {
+    return readState(JSON.stringify(state));
+  } catch {
+    return initialState;
+  }
+}
 function transition(state, id2, values = {}) {
   const [kind, argument] = id2.split(":", 2);
   if (kind === "show" && argument && state.b?.id === Number(argument)) return { ...state, v: "show", k: state.b.id, message: void 0 };
@@ -1504,9 +1641,14 @@ function transition(state, id2, values = {}) {
   if (!values || typeof values !== "object" || Array.isArray(values)) return state;
   fields2 = values;
   if (kind === "search") {
-    const raw = typeof fields2.query === "string" ? fields2.query : "";
-    const query = clip(raw.trim(), 200);
-    return query ? { v: "search", q: query, k: 0 } : state;
+    const raw = typeof fields2.query === "string" ? fields2.query : void 0;
+    if (raw === void 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\ud800-\udfff]/u.test(raw)) return state;
+    try {
+      const query = queryText(clip(plain(raw), 200));
+      return { v: "search", q: query, k: 0 };
+    } catch {
+      return state;
+    }
   }
   if (kind === "library") return { ...state, v: "library", k: 0, from: void 0, b: void 0 };
   if (kind === "back") return state.from === "library" ? { v: "library", q: "", k: 0 } : state.q ? { v: "search", q: state.q, k: 0 } : initialState;
@@ -1528,74 +1670,126 @@ async function loadPage(service, store, state, refresh, signal) {
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
-  const act = (id2, next, title) => props.action?.(id2, next, title) ?? (next && uiVersion >= 3 ? { id: id2, push: { ui: "podcasts", state: encodeState(next), ...title ? { title } : {} } } : { id: id2 });
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), stateJSON = encodeState(state), t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
+  const act = (id2, next, title) => {
+    const cleanTitle = title ? clip(title, TEXT_MAX) : void 0;
+    return props.action?.(id2, next, cleanTitle) ?? (next && uiVersion >= 3 ? { id: id2, push: { ui: "podcasts", state: encodeState(next), ...cleanTitle ? { title: cleanTitle } : {} } } : { id: id2 });
+  };
   const text2 = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 1800), style }, key);
-  const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "podcast-query"),
-    /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "podcast-search-submit")
+  const search = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, TEXT_MAX), children: [
+    /* @__PURE__ */ jsx(Field, { name: "query", label: clip(t.search, TEXT_MAX), kind: "text", placeholder: clip(t.searchHint, TEXT_MAX), value: state.q }, "podcast-query"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.searchAction, TEXT_MAX), action: act("search") }, "podcast-search-submit")
   ] }, "podcast-search");
   const navigation = /* @__PURE__ */ jsxs(Section, { children: [
-    /* @__PURE__ */ jsx(Button, { title: t.discover, action: act("home") }, "podcast-home"),
-    /* @__PURE__ */ jsx(Button, { title: t.library, action: act("library") }, "podcast-library")
+    /* @__PURE__ */ jsx(Button, { title: clip(t.discover, TEXT_MAX), action: act("home") }, "podcast-home"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.library, TEXT_MAX), action: act("library") }, "podcast-library")
   ] }, "podcast-navigation");
   const message = state.message ? /* @__PURE__ */ jsx(Section, { children: text2("podcast-message-text", state.message === "saved" ? t.savedMessage : t.removedMessage, "body") }, "podcast-message") : null;
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.discover, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.discover, TEXT_MAX), state: stateJSON, children: [
     search,
     navigation,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "podcast-loading-indicator") }, "podcast-loading")
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, TEXT_MAX) }, "podcast-loading-indicator") }, "podcast-loading")
   ] }, "podcasts");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.discover, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.discover, TEXT_MAX), state: stateJSON, children: [
     search,
     navigation,
     /* @__PURE__ */ jsxs(Section, { children: [
       text2("podcast-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "podcast-retry")
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "podcast-retry")
     ] }, "podcast-error")
   ] }, "podcasts");
   if (state.v === "show") {
     if (loaded.kind !== "show") throw new ReadError("invalid");
     const result = loaded.result, show = result.show, saved = props.store.has(show.id);
-    return /* @__PURE__ */ jsxs(View, { title: show.title, state: encodeState(state), children: [
-      /* @__PURE__ */ jsx(Section, { title: show.title, footer: [show.publisher, show.genre, show.episodes === void 0 ? "" : fmt(t.episodeCount, { count: show.episodes })].filter(Boolean).join(" \xB7 "), children: text2("show-publisher", show.publisher || t.account, "body") }, "show-details"),
+    const showURL = safeLinkURL(show.url), feedURL = safeLinkURL(show.feedURL);
+    const usedShowKeys = /* @__PURE__ */ new Set(["show-details", "show-publisher", "show-actions", "show-save", "show-remove", "show-open", "show-feed", "show-back", "podcast-message", "podcast-message-text", "show-episodes", "show-no-episodes", "show-no-episodes-text", "show-episode-notes", "show-footer", "show-refresh", "show-feed-note", "show-feed-note-text", "show-attribution", "show-license"]);
+    const reservedItems = 1 + 4 + (message ? 1 : 0) + 3;
+    let remainingItems2 = Math.max(0, ITEMS_MAX - reservedItems);
+    let remainingBytes2 = FRAME_MAX - byteLength(stateJSON) - 8192;
+    const episodeLinks = [];
+    const episodeNotes = [];
+    for (const episode of result.episodes) {
+      const epURL = safeLinkURL(episode.url);
+      const needed = epURL ? 2 : 1;
+      if (needed > remainingItems2) break;
+      const noteText = clip(`${episode.title}
+${[episode.at ? readTime(episode.at, tz, props.locale ?? service.locale) || t.unknownDate : t.unknownDate, episode.minutes === void 0 ? "" : fmt(t.minutes, { count: episode.minutes })].filter(Boolean).join(" \xB7 ")}
+${episode.description}`, 1800);
+      const epTitle = clip(episode.title, TEXT_MAX);
+      const estimatedBytes = byteLength(epTitle) + byteLength(noteText) + (epURL ? byteLength(epURL) : 0) + 256;
+      if (estimatedBytes > remainingBytes2) break;
+      remainingItems2 -= needed;
+      remainingBytes2 -= estimatedBytes;
+      if (epURL) episodeLinks.push(/* @__PURE__ */ jsx(Link, { title: epTitle, url: epURL }, uniqueKey(usedShowKeys, "episode-", String(episode.id))));
+      episodeNotes.push(text2(uniqueKey(usedShowKeys, "episode-note-", String(episode.id)), noteText, "body"));
+    }
+    const readAt = readTime(result.at, tz, props.locale ?? service.locale);
+    const footerText = clip(`${readAt ? fmt(t.readAt, { at: readAt }) : ""}${result.stale ? `${readAt ? " \xB7 " : ""}${errorText(result.stale, props.locale ?? service.locale)}` : ""}`, TEXT_MAX);
+    return /* @__PURE__ */ jsxs(View, { title: clip(show.title, TEXT_MAX), state: stateJSON, children: [
+      /* @__PURE__ */ jsx(Section, { title: clip(show.title, TEXT_MAX), footer: clip([show.publisher, show.genre, show.episodes === void 0 ? "" : fmt(t.episodeCount, { count: show.episodes })].filter(Boolean).join(" \xB7 "), TEXT_MAX), children: text2("show-publisher", show.publisher || t.account, "body") }, "show-details"),
       /* @__PURE__ */ jsxs(Section, { children: [
-        /* @__PURE__ */ jsx(Button, { title: saved ? t.saved : t.save, action: act(`save:${show.id}`) }, "show-save"),
-        saved ? /* @__PURE__ */ jsx(Button, { title: t.remove, action: act(`remove:${show.id}`) }, "show-remove") : null,
-        /* @__PURE__ */ jsx(Link, { title: t.openShow, url: show.url }, "show-open"),
-        show.feedURL ? /* @__PURE__ */ jsx(Link, { title: t.openFeed, url: show.feedURL }, "show-feed") : null,
-        /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "show-back")
+        /* @__PURE__ */ jsx(Button, { title: clip(saved ? t.saved : t.save, TEXT_MAX), action: act(`save:${show.id}`) }, "show-save"),
+        saved ? /* @__PURE__ */ jsx(Button, { title: clip(t.remove, TEXT_MAX), action: act(`remove:${show.id}`) }, "show-remove") : null,
+        showURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openShow, TEXT_MAX), url: showURL }, "show-open") : null,
+        feedURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openFeed, TEXT_MAX), url: feedURL }, "show-feed") : null,
+        /* @__PURE__ */ jsx(Button, { title: clip(t.back, TEXT_MAX), action: act("back") }, "show-back")
       ] }, "show-actions"),
       message,
-      result.episodes.length ? /* @__PURE__ */ jsx(Section, { title: t.episodes, children: result.episodes.map((episode) => /* @__PURE__ */ jsx(Link, { title: episode.title, url: episode.url }, `episode-${episode.id}`)) }, "show-episodes") : /* @__PURE__ */ jsx(Section, { children: text2("show-no-episodes-text", t.noEpisodes) }, "show-no-episodes"),
-      /* @__PURE__ */ jsx(Section, { title: t.episodes, children: result.episodes.map((episode) => text2(`episode-note-${episode.id}`, `${episode.title}
-${[episode.at ? readTime(episode.at, tz, props.locale ?? service.locale) : t.unknownDate, episode.minutes === void 0 ? "" : fmt(t.minutes, { count: episode.minutes })].filter(Boolean).join(" \xB7 ")}
-${episode.description}`, "body")) }, "show-episode-notes"),
-      /* @__PURE__ */ jsx(Section, { footer: `${fmt(t.readAt, { at: readTime(result.at, tz, props.locale ?? service.locale) })}${result.stale ? ` \xB7 ${errorText(result.stale, props.locale ?? service.locale)}` : ""}`, children: /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "show-refresh") }, "show-footer"),
+      episodeLinks.length ? /* @__PURE__ */ jsx(Section, { title: clip(t.episodes, TEXT_MAX), children: episodeLinks }, "show-episodes") : /* @__PURE__ */ jsx(Section, { children: text2("show-no-episodes-text", t.noEpisodes) }, "show-no-episodes"),
+      episodeNotes.length ? /* @__PURE__ */ jsx(Section, { title: clip(t.episodes, TEXT_MAX), children: episodeNotes }, "show-episode-notes") : null,
+      /* @__PURE__ */ jsx(Section, { footer: footerText, children: /* @__PURE__ */ jsx(Button, { title: clip(t.refresh, TEXT_MAX), action: act("refresh") }, "show-refresh") }, "show-footer"),
       /* @__PURE__ */ jsx(Section, { children: text2("show-feed-note-text", t.feedHint, "caption") }, "show-feed-note"),
       /* @__PURE__ */ jsx(Section, { children: text2("show-license", t.attribution, "caption") }, "show-attribution")
     ] }, "podcasts");
   }
   if (state.v === "library") {
     if (loaded.kind !== "library") throw new ReadError("invalid");
-    return /* @__PURE__ */ jsxs(View, { title: t.library, state: encodeState(state), children: [
+    const usedKeys2 = /* @__PURE__ */ new Set(["podcast-navigation", "podcast-home", "podcast-library", "library-shows", "library-empty", "library-note", "library-note-text"]);
+    let remainingItems2 = Math.max(0, ITEMS_MAX - 3);
+    let remainingBytes2 = FRAME_MAX - byteLength(stateJSON) - 8192;
+    const rows2 = [];
+    for (const show of loaded.shows) {
+      if (remainingItems2 < 1) break;
+      const rowKey = uniqueKey(usedKeys2, "library-", String(show.id));
+      const title = clip(show.title, TEXT_MAX);
+      const subtitle = clip([show.publisher, show.genre].filter(Boolean).join(" \xB7 "), TEXT_MAX);
+      const nextState = { v: "show", q: "", k: show.id, from: "library", b: show };
+      const nextStateJSON = uiVersion >= 3 ? encodeState(nextState) : "";
+      const estimatedBytes = byteLength(rowKey) + byteLength(title) + byteLength(subtitle) + byteLength(nextStateJSON) + 384;
+      if (estimatedBytes > remainingBytes2) break;
+      remainingItems2 -= 1;
+      remainingBytes2 -= estimatedBytes;
+      rows2.push(/* @__PURE__ */ jsx(Row, { title, subtitle, action: act(`show:${show.id}`, nextState, title) }, rowKey));
+    }
+    return /* @__PURE__ */ jsxs(View, { title: clip(t.library, TEXT_MAX), state: stateJSON, children: [
       navigation,
-      /* @__PURE__ */ jsx(Section, { title: t.library, children: loaded.shows.length ? loaded.shows.map((show) => /* @__PURE__ */ jsx(Row, { title: show.title, subtitle: [show.publisher, show.genre].filter(Boolean).join(" \xB7 "), action: act(`show:${show.id}`, { v: "show", q: "", k: show.id, from: "library", b: show }, show.title) }, `library-${show.id}`)) : text2("library-empty", t.libraryEmpty) }, "library-shows"),
+      /* @__PURE__ */ jsx(Section, { title: clip(t.library, TEXT_MAX), children: rows2.length ? rows2 : text2("library-empty", t.libraryEmpty) }, "library-shows"),
       /* @__PURE__ */ jsx(Section, { children: text2("library-note-text", t.libraryHint, "caption") }, "library-note")
     ] }, "podcasts");
   }
-  const row = (show) => /* @__PURE__ */ jsx(
-    Row,
-    {
-      title: show.title,
-      subtitle: [show.publisher, show.genre, show.episodes === void 0 ? "" : fmt(t.episodeCount, { count: show.episodes })].filter(Boolean).join(" \xB7 "),
-      action: act(`show:${show.id}`, { v: "show", q: state.q, k: show.id, b: show }, show.title)
-    },
-    `show-${show.id}`
-  );
-  return /* @__PURE__ */ jsxs(View, { title: state.v === "search" ? fmt(t.results, { query: clip(state.q, 100) }) : t.discover, state: encodeState(state), children: [
+  const usedKeys = /* @__PURE__ */ new Set(["podcast-search", "podcast-query", "podcast-search-submit", "podcast-navigation", "podcast-home", "podcast-library", "podcast-results", "podcast-empty", "podcast-welcome", "podcast-welcome-text", "podcast-attribution", "podcast-license"]);
+  let remainingItems = Math.max(0, ITEMS_MAX - 5);
+  let remainingBytes = FRAME_MAX - byteLength(stateJSON) - 8192;
+  const rows = [];
+  if (state.v === "search" && loaded.kind === "search") {
+    for (const show of loaded.result.shows) {
+      if (remainingItems < 1) break;
+      const rowKey = uniqueKey(usedKeys, "show-", String(show.id));
+      const title = clip(show.title, TEXT_MAX);
+      const subtitle = clip([show.publisher, show.genre, show.episodes === void 0 ? "" : fmt(t.episodeCount, { count: show.episodes })].filter(Boolean).join(" \xB7 "), TEXT_MAX);
+      const nextState = { v: "show", q: state.q, k: show.id, b: show };
+      const nextStateJSON = uiVersion >= 3 ? encodeState(nextState) : "";
+      const estimatedBytes = byteLength(rowKey) + byteLength(title) + byteLength(subtitle) + byteLength(nextStateJSON) + 384;
+      if (estimatedBytes > remainingBytes) break;
+      remainingItems -= 1;
+      remainingBytes -= estimatedBytes;
+      rows.push(/* @__PURE__ */ jsx(Row, { title, subtitle, action: act(`show:${show.id}`, nextState, title) }, rowKey));
+    }
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(state.v === "search" ? fmt(t.results, { query: clip(state.q, 100) }) : t.discover, TEXT_MAX), state: stateJSON, children: [
     search,
     navigation,
-    state.v === "search" ? /* @__PURE__ */ jsx(Section, { title: fmt(t.results, { query: clip(state.q, 100) }), children: loaded.kind === "search" && loaded.result.shows.length ? loaded.result.shows.map(row) : text2("podcast-empty", t.empty) }, "podcast-results") : /* @__PURE__ */ jsx(Section, { children: text2("podcast-welcome-text", t.searchHint, "body") }, "podcast-welcome"),
+    state.v === "search" ? /* @__PURE__ */ jsx(Section, { title: clip(fmt(t.results, { query: clip(state.q, 100) }), TEXT_MAX), children: rows.length ? rows : text2("podcast-empty", t.empty) }, "podcast-results") : /* @__PURE__ */ jsx(Section, { children: text2("podcast-welcome-text", t.searchHint, "body") }, "podcast-welcome"),
     /* @__PURE__ */ jsx(Section, { children: text2("podcast-license", t.attribution, "caption") }, "podcast-attribution")
   ] }, "podcasts");
 }
@@ -1607,13 +1801,14 @@ function Root(options) {
   const [result, setResult] = useState(void 0);
   const identity = `${state.v}:${state.q}:${state.k}:${refresh}`;
   useLoadEffect(async (signal) => {
-    const loaded = await loadPage(options.service, options.store, state, refresh > 0, signal);
-    if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded) ? previous : { service: options.service, identity, loaded });
+    const loaded2 = await loadPage(options.service, options.store, state, refresh > 0, signal);
+    if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded2) ? previous : { service: options.service, identity, loaded: loaded2 });
   }, [options.service, identity]);
+  const loaded = result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" };
   return page({
     ...options,
     state,
-    loaded: result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" },
+    loaded,
     action: (id2, next, title) => {
       if (next && (options.uiVersion ?? 0) >= 3) {
         const push = { ui: "podcasts", state: encodeState(next), ...title ? { title } : {} };
@@ -1626,18 +1821,22 @@ function Root(options) {
         }
         if (id2 === "back" && state.v === "show" && (options.uiVersion ?? 0) >= 3) return { pop: true };
         if (id2.startsWith("show:")) {
-          const show = result?.loaded.kind === "search" ? result.loaded.result.shows.find((show2) => show2.id === Number(id2.slice(5))) : result?.loaded.kind === "library" ? result.loaded.shows.find((show2) => show2.id === Number(id2.slice(5))) : void 0;
-          if (show) setState({ v: "show", q: state.q, k: show.id, from: state.v === "library" ? "library" : void 0, b: show });
+          const show = loaded.kind === "search" ? loaded.result.shows.find((show2) => show2.id === Number(id2.slice(5))) : loaded.kind === "library" ? loaded.shows.find((show2) => show2.id === Number(id2.slice(5))) : void 0;
+          if (show) {
+            setRefresh(0);
+            setState({ v: "show", q: state.q, k: show.id, from: state.v === "library" ? "library" : void 0, b: show });
+          }
           return;
         }
         if (id2.startsWith("save:") || id2.startsWith("remove:")) {
-          const show = result?.loaded.kind === "show" ? result.loaded.result.show : state.b;
+          const show = loaded.kind === "show" ? loaded.result.show : state.b;
           if (!show || show.id !== Number(id2.slice(id2.indexOf(":") + 1))) return;
           if (id2.startsWith("save:")) await options.store.save(show);
           else await options.store.remove(show.id);
           setState((previous) => ({ ...previous, message: id2.startsWith("save:") ? "saved" : "removed" }));
           return;
         }
+        setRefresh(0);
         setState((previous) => transition(previous, id2, values));
       }, { submit: true });
     }

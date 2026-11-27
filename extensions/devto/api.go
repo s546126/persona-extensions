@@ -38,44 +38,59 @@ func newClient(base string) *client {
 }
 
 func (c *client) get(ctx context.Context, path string, fresh time.Duration) ([]byte, error) {
+	data, freshHit, err := c.fetch(ctx, path, fresh)
+	if err != nil {
+		return data, err
+	}
+	if !freshHit {
+		c.storeCache(path, data)
+	}
+	return data, nil
+}
+
+func (c *client) fetch(ctx context.Context, path string, fresh time.Duration) ([]byte, bool, error) {
 	c.mu.Lock()
 	old, ok := c.cache[path]
 	c.mu.Unlock()
 	if ok && time.Since(old.at) < fresh {
-		return old.data, nil
+		return old.data, true, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Accept", "application/json")
 	res, err := c.http.Do(req)
 	if err != nil {
 		if ok {
-			return old.data, fmt.Errorf("cached DEV data is stale: %w", errUnavailable)
+			return old.data, false, fmt.Errorf("cached DEV data is stale: %w", errUnavailable)
 		}
-		return nil, fmt.Errorf("%w: %v", errUnavailable, err)
+		return nil, false, fmt.Errorf("%w: %v", errUnavailable, err)
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 4<<20+1))
 	if err != nil {
-		return nil, errUnavailable
+		return nil, false, errUnavailable
 	}
 	if len(data) > 4<<20 {
-		return nil, errors.New("DEV returned an oversized response")
+		return nil, false, errors.New("DEV returned an oversized response")
 	}
 	if res.StatusCode == http.StatusNotFound {
-		return nil, errNotFound
+		return nil, false, errNotFound
 	}
 	if res.StatusCode != http.StatusOK {
 		if ok {
-			return old.data, fmt.Errorf("cached DEV data is stale: HTTP %d", res.StatusCode)
+			return old.data, false, fmt.Errorf("cached DEV data is stale: HTTP %d", res.StatusCode)
 		}
-		return nil, fmt.Errorf("DEV returned HTTP %d", res.StatusCode)
+		return nil, false, fmt.Errorf("DEV returned HTTP %d", res.StatusCode)
 	}
 	if !json.Valid(data) {
-		return nil, errors.New("DEV returned invalid JSON")
+		return nil, false, errors.New("DEV returned invalid JSON")
 	}
+	return data, false, nil
+}
+
+func (c *client) storeCache(path string, data []byte) {
 	c.mu.Lock()
 	c.cache[path] = cached{data: data, at: time.Now()}
 	if len(c.cache) > 64 {
@@ -89,7 +104,20 @@ func (c *client) get(ctx context.Context, path string, fresh time.Duration) ([]b
 		delete(c.cache, oldest)
 	}
 	c.mu.Unlock()
-	return data, nil
+}
+
+func (c *client) getJSON(ctx context.Context, path string, fresh time.Duration, out any, badShape string) error {
+	data, freshHit, err := c.fetch(ctx, path, fresh)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return errors.New(badShape)
+	}
+	if !freshHit {
+		c.storeCache(path, data)
+	}
+	return nil
 }
 
 func (c *client) articles(ctx context.Context, tag string, page int) ([]article, error) {
@@ -100,13 +128,9 @@ func (c *client) articles(ctx context.Context, tag string, page int) ([]article,
 	if tag != "" {
 		q.Set("tag", tag)
 	}
-	data, err := c.get(ctx, "/articles?"+q.Encode(), 2*time.Minute)
-	if err != nil {
-		return nil, err
-	}
 	var out []article
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, errors.New("DEV returned an unexpected article list")
+	if err := c.getJSON(ctx, "/articles?"+q.Encode(), 2*time.Minute, &out, "DEV returned an unexpected article list"); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -115,25 +139,17 @@ func (c *client) article(ctx context.Context, id int64) (article, error) {
 	if id <= 0 {
 		return article{}, errors.New("invalid article ID")
 	}
-	data, err := c.get(ctx, "/articles/"+strconv.FormatInt(id, 10), 5*time.Minute)
-	if err != nil {
-		return article{}, err
-	}
 	var out article
-	if err := json.Unmarshal(data, &out); err != nil {
-		return article{}, errors.New("DEV returned an unexpected article")
+	if err := c.getJSON(ctx, "/articles/"+strconv.FormatInt(id, 10), 5*time.Minute, &out, "DEV returned an unexpected article"); err != nil {
+		return article{}, err
 	}
 	return out, nil
 }
 
 func (c *client) comments(ctx context.Context, id int64) ([]comment, error) {
-	data, err := c.get(ctx, "/comments?a_id="+strconv.FormatInt(id, 10), 5*time.Minute)
-	if err != nil {
-		return nil, err
-	}
 	var out []comment
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, errors.New("DEV returned an unexpected comment thread")
+	if err := c.getJSON(ctx, "/comments?a_id="+strconv.FormatInt(id, 10), 5*time.Minute, &out, "DEV returned an unexpected comment thread"); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

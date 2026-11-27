@@ -137,7 +137,7 @@ func (a *app) callTool(ctx context.Context, r *ext.UIRequest, name string, raw j
 		var b strings.Builder
 		fmt.Fprintf(&b, "Todoist %s: %d tasks shown (API may have more).\n", in.View, len(filtered))
 		for _, item := range filtered {
-			b.WriteString(formatTask(item, data, false))
+			b.WriteString(formatTask(item, data, now.Location(), false))
 		}
 		return b.String(), nil
 	case "todoist_task":
@@ -146,6 +146,10 @@ func (a *app) callTool(ctx context.Context, r *ext.UIRequest, name string, raw j
 			return "", err
 		}
 		if err := validID(in.ID); err != nil {
+			return "", err
+		}
+		now, err := timeInZone(r.TZ)
+		if err != nil {
 			return "", err
 		}
 		item, err := a.client.task(ctx, in.ID)
@@ -157,7 +161,7 @@ func (a *app) callTool(ctx context.Context, r *ext.UIRequest, name string, raw j
 		if err != nil {
 			return "", err
 		}
-		return formatTask(item, data, true), nil
+		return formatTask(item, data, now.Location(), true), nil
 	case "todoist_projects":
 		data, err := a.contextRead(ctx)
 		if err != nil {
@@ -178,15 +182,13 @@ func (a *app) callTool(ctx context.Context, r *ext.UIRequest, name string, raw j
 	return "", fmt.Errorf("no tool %s", name)
 }
 
+// filterTasks compares due days in now's location, so timed and fixed-zone dues land on the user's local day.
 func filterTasks(items []task, view, query string, now time.Time) []task {
-	today := now.Format("2006-01-02")
-	week := now.AddDate(0, 0, 7).Format("2006-01-02")
+	today := now.Format(time.DateOnly)
+	week := now.AddDate(0, 0, 7).Format(time.DateOnly)
 	var out []task
 	for _, item := range items {
-		date := ""
-		if item.Due != nil {
-			date = item.Due.Date
-		}
+		date, _ := item.Due.localDay(now.Location())
 		switch view {
 		case "today":
 			if date != today {
@@ -210,7 +212,7 @@ func filterTasks(items []task, view, query string, now time.Time) []task {
 	return out
 }
 
-func formatTask(item task, data contextData, full bool) string {
+func formatTask(item task, data contextData, loc *time.Location, full bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n- %s\n  ID: %s", item.Content, item.ID)
 	if p, ok := data.Projects[item.ProjectID]; ok {
@@ -226,11 +228,8 @@ func formatTask(item task, data contextData, full bool) string {
 		fmt.Fprintf(&b, " | priority: %d", item.Priority)
 	}
 	if item.Due != nil {
-		fmt.Fprintf(&b, " | due: %s", item.Due.Date)
-		if item.Due.Datetime != "" {
-			fmt.Fprintf(&b, " %s", item.Due.Datetime)
-		}
-		if item.Due.Recurring {
+		fmt.Fprintf(&b, " | due: %s", item.Due.label(loc))
+		if item.Due.IsRecurring {
 			b.WriteString(" (recurring)")
 		}
 	}

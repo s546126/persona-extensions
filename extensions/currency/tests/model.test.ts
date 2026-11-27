@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { amount, availableUnits, currency, currencyConversion, multiply, parseRate, ratesPath, ReadError, unit, unitConversion } from "../src/model.ts";
-import { encodeState, initialState, readState, transition } from "../src/page.tsx";
+import { amount, availableUnits, clip, currency, currencyConversion, formatForDisplay, multiply, parseRate, ratesPath, ReadError, roundedNumber, unit, unitConversion } from "../src/model.ts";
+import { CurrencyService } from "../src/service.ts";
+import { encodeState, initialState, page, readState, transition } from "../src/page.tsx";
+import { Renderer } from "@persona/extension/ui";
 
 test("ECB rate parsing requires the requested pair, a real date and a bounded positive rate", () => {
   const rate = parseRate([{ date: "2026-11-10", base: "USD", quote: "CNY", rate: 6.6703 }], "USD", "CNY", 1000);
@@ -59,4 +61,47 @@ test("state only permits validated conversion targets and local unit selections"
   }
   assert.equal(readState('{"mode":"units","amount":"1","from":"kg","to":"m","dimension":"length","converted":true}').converted, false);
   assert.equal(transition(initialState, "unknown", { from: "BTC" }).converted, false);
+});
+
+test("zero fractional rates are rejected, terminating decimals round half-up, and display/clip/page handle edge cases", () => {
+  // Zero exchange rates with fractional zeros must be rejected.
+  for (const zero of ["0.0", "0.00", "00.000000"]) {
+    assert.throws(
+      () => parseRate([{ date: "2026-11-10", base: "USD", quote: "CNY", rate: zero }], "USD", "CNY", 0),
+      (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+      zero,
+    );
+  }
+
+  // Non-recurring terminating decimals must round half-up instead of truncating.
+  assert.equal(roundedNumber("1.1234567", 6), "1.123457");
+  assert.equal(roundedNumber("1.1234565", 6), "1.123457");
+  assert.equal(roundedNumber("0.9999999", 6), "1");
+  assert.equal(roundedNumber("-0.0000004", 6), "0");
+
+  // formatForDisplay must not throw on invalid locale.
+  assert.doesNotThrow(() => formatForDisplay("1234.5678909", "bad_locale_!!!"));
+  assert.equal(formatForDisplay("1234.5678909", "en"), "1,234.567891");
+
+  // clip must count Unicode code points and stay <= most.
+  assert.equal(clip("abcdef", 0), "");
+  assert.equal(clip("abcdef", 1), "a");
+  assert.equal(clip("abcdef", 4), "abc…");
+  assert.equal(Array.from(clip("😀😀😀😀😀", 4)).length, 4);
+
+  // Lone surrogates must be rejected.
+  assert.throws(() => currency("U\ud800D"), ReadError);
+
+  // Direct page() call with invalid state must sanitize safely.
+  const service = new CurrencyService(async () => new Response("[]", { status: 200 }));
+  const renderer = new Renderer({ authorize: () => false });
+  try {
+    const view = renderer.render(page({
+      service,
+      state: { mode: "currency", amount: "-5", from: "INVALID", to: "CNY", dimension: "length", converted: true },
+      loaded: { kind: "loading" },
+      locale: "en",
+    })).view;
+    assert.equal(JSON.parse(view.state ?? "{}").converted, false);
+  } finally { renderer.dispose(); }
 });

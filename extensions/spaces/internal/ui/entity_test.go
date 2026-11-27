@@ -338,13 +338,13 @@ func TestEntityPageShowsEveryPart(t *testing.T) {
 	if bars := componentsOf(v, wire.ComponentProgress); len(bars) != 1 || bars[0].Detail != "0%" {
 		t.Fatalf("progress = %+v", bars)
 	}
-	life := sectionTitled(t, v, "生命周期")
+	life := sectionTitled(t, v, "状态")
 	seg := life.Items[0]
 	if seg.Type != wire.ComponentSegmented || seg.Name != "stage" || seg.Value != "收集" || len(seg.Choices) != 3 ||
 		seg.Choices[1].Title != "探索" || seg.Choices[2].Title != "搁置" {
 		t.Fatalf("lifecycle = %+v", seg)
 	}
-	for _, title := range []string{"关联 →", "← 被关联"} {
+	for _, title := range []string{"它连到的", "连到它的"} {
 		if s := sectionTitled(t, v, title); len(s.Items) != 1 || s.Items[0].Type != wire.ComponentText {
 			t.Fatalf("section %q with nothing linked = %+v", title, s.Items)
 		}
@@ -361,15 +361,15 @@ func TestEntityPageShowsEveryPart(t *testing.T) {
 	// the share of its tasks done.
 	goal := entityID(t, st, "连续写满 12 篇周复盘")
 	v = drawPage(t, a, state{S: sid, E: goal}, 5)
-	out := sectionTitled(t, v, "关联 →")
-	if len(out.Items) != 1 || out.Items[0].Subtitle != "源自" || out.Items[0].Title != "每周写一篇复盘" {
+	out := sectionTitled(t, v, "它连到的")
+	if len(out.Items) != 1 || out.Items[0].Subtitle != "来自" || out.Items[0].Title != "每周写一篇复盘" {
 		t.Fatalf("outgoing = %+v", out.Items)
 	}
 	back, _ := stored(t, st, goal)
 	if back.Origin == "" || out.Items[0].Action.Push == nil {
 		t.Fatalf("origin row = %+v", out.Items[0])
 	}
-	in := sectionTitled(t, v, "← 被关联")
+	in := sectionTitled(t, v, "连到它的")
 	tasks, notes := 0, 0
 	for _, it := range in.Items {
 		switch it.Subtitle {
@@ -392,14 +392,14 @@ func TestEntityPageShowsEveryPart(t *testing.T) {
 	// The idea it came from: the goal reads as a derivation.
 	idea := entityID(t, st, "每周写一篇复盘")
 	v = drawPage(t, a, state{S: sid, E: idea}, 5)
-	if in := sectionTitled(t, v, "← 被关联"); len(in.Items) != 1 || in.Items[0].Subtitle != "衍生" {
+	if in := sectionTitled(t, v, "连到它的"); len(in.Items) != 1 || in.Items[0].Subtitle != "由它新建" {
 		t.Fatalf("derivation backlink = %+v", in.Items)
 	}
 
 	// A task with a goal and a many relation: both outgoing rows, and the task it is blocked by names its back label.
 	friend := entityID(t, st, "约一位朋友互相督促")
 	v = drawPage(t, a, state{S: sid, E: friend}, 5)
-	out = sectionTitled(t, v, "关联 →")
+	out = sectionTitled(t, v, "它连到的")
 	if got := rowTitled(t, out, "连续写满 12 篇周复盘").Subtitle; got != "目标" {
 		t.Fatalf("goal row subtitle = %q", got)
 	}
@@ -408,10 +408,10 @@ func TestEntityPageShowsEveryPart(t *testing.T) {
 	}
 	second := entityID(t, st, "写第 2 篇")
 	v = drawPage(t, a, state{S: sid, E: second}, 5)
-	if got := rowTitled(t, sectionTitled(t, v, "← 被关联"), "约一位朋友互相督促").Subtitle; got != "阻塞了" {
+	if got := rowTitled(t, sectionTitled(t, v, "连到它的"), "约一位朋友互相督促").Subtitle; got != "阻塞了" {
 		t.Fatalf("back label = %q", got)
 	}
-	if got := rowTitled(t, sectionTitled(t, v, "关联 →"), "连续写满 12 篇周复盘").Subtitle; got != "目标" {
+	if got := rowTitled(t, sectionTitled(t, v, "它连到的"), "连续写满 12 篇周复盘").Subtitle; got != "目标" {
 		t.Fatalf("single relation row = %q", got)
 	}
 }
@@ -446,7 +446,7 @@ func TestLifecycleIsASegmentOrButtons(t *testing.T) {
 	// control is a segmented one.
 	first := entityID(t, st, "第一步")
 	v := drawPage(t, a, state{S: sid, E: first}, 5)
-	seg := sectionTitled(t, v, "生命周期").Items[0]
+	seg := sectionTitled(t, v, "状态").Items[0]
 	if seg.Type != wire.ComponentSegmented || len(seg.Choices) != 5 || seg.Choices[1].Title != "乙" {
 		t.Fatalf("segmented lifecycle = %+v", seg)
 	}
@@ -454,7 +454,7 @@ func TestLifecycleIsASegmentOrButtons(t *testing.T) {
 	// From the third stage: five moves and the current stage are too many for a control. The advance comes first.
 	third := entityID(t, st, "第三步")
 	v = drawPage(t, a, state{S: sid, E: third}, 5)
-	buttons := sectionTitled(t, v, "生命周期").Items
+	buttons := sectionTitled(t, v, "状态").Items
 	if len(buttons) != 5 || buttons[0].Title != "→ 丁" || buttons[0].Action.ID != "status:丁" || buttons[1].Title != "乙" {
 		t.Fatalf("button lifecycle = %+v", buttons)
 	}
@@ -465,7 +465,7 @@ func TestLifecycleIsASegmentOrButtons(t *testing.T) {
 		t.Fatal("no page after a move")
 	}
 	v = drawPage(t, a, state{S: sid, E: third}, 5)
-	buttons = sectionTitled(t, v, "生命周期").Items
+	buttons = sectionTitled(t, v, "状态").Items
 	if len(buttons) != 5 || buttons[0].Title != "甲" || buttons[4].Title != "戊" {
 		t.Fatalf("dropped lifecycle = %+v", buttons)
 	}
@@ -492,7 +492,7 @@ func TestAdvanceAndRefusedMoves(t *testing.T) {
 		{"back to the first stage is allowed", "收集", "", "收集"},
 		{"a dropped stage is allowed", "搁置", "", "搁置"},
 		{"a dropped stage goes to any main-line stage", "已孵化", "", "已孵化"},
-		{"an unknown stage is refused", "不存在", "不是「点子」的阶段", "已孵化"},
+		{"an unknown stage is refused", "不存在", "不是「点子」的状态", "已孵化"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -515,12 +515,12 @@ func TestAdvanceAndRefusedMoves(t *testing.T) {
 	fa := newApp(fresh)
 	idea := entityID(t, fresh, "学会自由泳")
 	res := act(t, fa, state{S: fsid, E: idea}, "status", map[string]string{"stage": "已孵化"})
-	if !strings.Contains(res.Toast, "可以变为：探索、搁置") || res.View == nil {
+	if !strings.Contains(res.Toast, "现在可以改成：探索、搁置") || res.View == nil {
 		t.Fatalf("refusal = %q", res.Toast)
 	}
 
 	// Without a stage there is nothing to move to.
-	if res := act(t, fa, state{S: fsid, E: idea}, "status", nil); res.Toast != "没有选择阶段" {
+	if res := act(t, fa, state{S: fsid, E: idea}, "status", nil); res.Toast != "还没选状态。请点一个状态" {
 		t.Fatalf("no stage = %q", res.Toast)
 	}
 }
@@ -544,13 +544,13 @@ func TestEditEveryKindOfValue(t *testing.T) {
 	if f := fieldNamed(t, v, "p_flag"); f.Kind != wire.FieldKindToggle || f.Value != "false" {
 		t.Fatalf("toggle field = %+v", f)
 	}
-	if f := fieldNamed(t, v, "p_day"); f.Kind != wire.FieldKindText || f.Placeholder != "YYYY-MM-DD" {
+	if f := fieldNamed(t, v, "p_day"); f.Kind != wire.FieldKindText || f.Placeholder != "例如 2026-12-01" {
 		t.Fatalf("date field = %+v", f)
 	}
 	if f := fieldNamed(t, v, "p_pick"); f.Kind != wire.FieldKindChoice || f.Value != "=" || len(f.Choices) != 3 || f.Choices[0].Title != "未设置" {
 		t.Fatalf("enum field = %+v", f)
 	}
-	if f := fieldNamed(t, v, "p_site"); f.Kind != wire.FieldKindText || f.Placeholder != "https://" {
+	if f := fieldNamed(t, v, "p_site"); f.Kind != wire.FieldKindText || f.Placeholder != "例如 https://example.com" {
 		t.Fatalf("url field = %+v", f)
 	}
 	if f := fieldNamed(t, v, "p_one"); f.Kind != wire.FieldKindChoice || f.Value != "=" || len(f.Choices) != 3 {
@@ -710,12 +710,12 @@ func TestRelationTargetsCanBeRemovedOneByOne(t *testing.T) {
 
 	// With the fold open, each target of a many relation reads 移除 and unlinks by its id.
 	v = drawPage(t, a, edit, 5)
-	row := rowTitled(t, sectionTitled(t, v, "关联 →"), "写第 2 篇")
+	row := rowTitled(t, sectionTitled(t, v, "它连到的"), "写第 2 篇")
 	if row.Value != "移除" || row.Action.ID != "unlink:blocked_by:"+second {
 		t.Fatalf("removable row = %+v", row)
 	}
 	// The single relation of the same page is not removed from here.
-	if goal := rowTitled(t, sectionTitled(t, v, "关联 →"), "连续写满 12 篇周复盘"); goal.Value != "" || goal.Action.Push == nil {
+	if goal := rowTitled(t, sectionTitled(t, v, "它连到的"), "连续写满 12 篇周复盘"); goal.Value != "" || goal.Action.Push == nil {
 		t.Fatalf("single relation row = %+v", goal)
 	}
 	res := act(t, a, edit, row.Action.ID, nil)
@@ -735,7 +735,7 @@ func TestRelationTargetsCanBeRemovedOneByOne(t *testing.T) {
 
 	// A target that is not held, a key that is not a relation, and a key that is not a property are refused.
 	for _, action := range []string{"unlink:blocked_by:" + first, "unlink:title:" + second, "unlink:nope:" + second, "unlink:blocked_by"} {
-		if res := act(t, a, edit, action, nil); res.Toast != "没有这个关联" {
+		if res := act(t, a, edit, action, nil); res.Toast != "这条连接已经不在了。请返回再打开这一条看看" {
 			t.Fatalf("%s: toast %q", action, res.Toast)
 		}
 	}
@@ -756,7 +756,7 @@ func TestDeriveIntoAnotherTypeLandsOnIt(t *testing.T) {
 
 	// The copy is a goal with the title given, the values of the same names and the first stage; the source does not change.
 	res := act(t, a, state{S: sid, E: swim, F: "derive"}, "derive", map[string]string{"type": "=goal", "title": "  游泳计划 "})
-	if res.Toast != "已衍生「游泳计划」" {
+	if res.Toast != "已新建「游泳计划」" {
 		t.Fatalf("derive toast = %q", res.Toast)
 	}
 	landed := pushedState(t, res)
@@ -776,19 +776,19 @@ func TestDeriveIntoAnotherTypeLandsOnIt(t *testing.T) {
 	if head := v.Sections[0].Items[0]; head.Title != "游泳计划" {
 		t.Fatalf("landed on %q", head.Title)
 	}
-	if got := rowTitled(t, sectionTitled(t, v, "关联 →"), "学会自由泳").Subtitle; got != "源自" {
+	if got := rowTitled(t, sectionTitled(t, v, "它连到的"), "学会自由泳").Subtitle; got != "来自" {
 		t.Fatalf("origin row = %q", got)
 	}
 	v = drawPage(t, a, state{S: sid, E: swim}, 5)
-	if got := rowTitled(t, sectionTitled(t, v, "← 被关联"), "游泳计划").Subtitle; got != "衍生" {
+	if got := rowTitled(t, sectionTitled(t, v, "连到它的"), "游泳计划").Subtitle; got != "由它新建" {
 		t.Fatalf("derivation row = %q", got)
 	}
 
 	// Without a type, or into a type that is not there, nothing is made.
-	if res := act(t, a, state{S: sid, E: swim, F: "derive"}, "derive", map[string]string{"title": "x"}); res.Toast != "先选择一个类型" {
+	if res := act(t, a, state{S: sid, E: swim, F: "derive"}, "derive", map[string]string{"title": "x"}); res.Toast != "还没选分类。请选一个分类再点新建" {
 		t.Fatalf("no type = %q", res.Toast)
 	}
-	if res := act(t, a, state{S: sid, E: swim}, "derive", map[string]string{"type": "=nope"}); !strings.Contains(res.Toast, "没有类型「nope」") {
+	if res := act(t, a, state{S: sid, E: swim}, "derive", map[string]string{"type": "=nope"}); !strings.Contains(res.Toast, "没有分类「nope」") {
 		t.Fatalf("unknown type = %q", res.Toast)
 	}
 }
@@ -814,7 +814,7 @@ func TestDeleteRemovesTheEntityAndUnlinksIt(t *testing.T) {
 
 	v := drawPage(t, a, state{S: sid, E: second}, 5)
 	confirm := v.Sections[len(v.Sections)-1].Items[2].Action.Confirm
-	if confirm != "删除「写第 2 篇」？有 1 条关联会被解除。" {
+	if confirm != "删除「写第 2 篇」？有 1 条别的条目连着它，删除后这些连接会断开。" {
 		t.Fatalf("confirm = %q", confirm)
 	}
 
@@ -846,7 +846,7 @@ func TestDeleteKeepsDerivedEntities(t *testing.T) {
 	}
 	// The goal keeps its origin, which now names nothing: its page still draws, without the link.
 	v = drawPage(t, a, state{S: sid, E: goal}, 5)
-	if out := sectionTitled(t, v, "关联 →"); len(out.Items) != 1 || out.Items[0].Type != wire.ComponentText {
+	if out := sectionTitled(t, v, "它连到的"); len(out.Items) != 1 || out.Items[0].Type != wire.ComponentText {
 		t.Fatalf("outgoing with a dangling origin = %+v", out.Items)
 	}
 	if e, _ := stored(t, st, goal); e.Origin != idea {
@@ -886,7 +886,7 @@ func TestEntityActionsRefuseWithoutAnEntity(t *testing.T) {
 	if res := act(t, a, stale, "more", nil); res.View == nil {
 		t.Fatal("no page for a stale entity")
 	}
-	if got := act(t, a, state{S: sid, E: swim, F: "edit"}, "update", map[string]string{"title": ""}); got.Toast != "记录需要一个标题" {
+	if got := act(t, a, state{S: sid, E: swim, F: "edit"}, "update", map[string]string{"title": ""}); got.Toast != "标题不能是空的。请写上标题再保存" {
 		t.Fatalf("empty title = %q", got.Toast)
 	}
 }
@@ -933,18 +933,18 @@ func TestHostileEntityPageStaysValid(t *testing.T) {
 	if links := componentsOf(v, wire.ComponentLink); len(links) != 1 {
 		t.Fatalf("links = %d", len(links))
 	}
-	out := sectionTitled(t, v, "关联 →")
+	out := sectionTitled(t, v, "它连到的")
 	if len(out.Items) != 100 {
 		t.Fatalf("outgoing rows = %d", len(out.Items))
 	}
-	in := sectionTitled(t, v, "← 被关联")
-	if len(in.Items) != linksMost+1 || in.Items[linksMost].Text != "还有 5 条关联没有显示" {
+	in := sectionTitled(t, v, "连到它的")
+	if len(in.Items) != linksMost+1 || in.Items[linksMost].Text != "还有 5 条没有显示" {
 		t.Fatalf("incoming = %d rows, last %+v", len(in.Items), in.Items[len(in.Items)-1])
 	}
 
 	// With the edit fold open, every link out of the hub is removable.
 	v = drawPage(t, a, state{S: sid, E: hub, F: "edit"}, 5)
-	for _, it := range sectionTitled(t, v, "关联 →").Items {
+	for _, it := range sectionTitled(t, v, "它连到的").Items {
 		if it.Value != "移除" {
 			t.Fatalf("link without a removal: %+v", it)
 		}
@@ -953,10 +953,10 @@ func TestHostileEntityPageStaysValid(t *testing.T) {
 	// An item the hub links to, which points back at the hub: one link each way, both to the hub.
 	v = drawPage(t, a, state{S: sid, E: eid(2)}, 5)
 	hubTitle := strings.Repeat("题", maxTitle)
-	if got := rowTitled(t, sectionTitled(t, v, "关联 →"), hubTitle).Subtitle; got != "所属" {
+	if got := rowTitled(t, sectionTitled(t, v, "它连到的"), hubTitle).Subtitle; got != "所属" {
 		t.Fatalf("item's link out reads %q", got)
 	}
-	if got := rowTitled(t, sectionTitled(t, v, "← 被关联"), hubTitle).Subtitle; got != "中心" {
+	if got := rowTitled(t, sectionTitled(t, v, "连到它的"), hubTitle).Subtitle; got != "中心" {
 		t.Fatalf("item's link in reads %q", got)
 	}
 }
@@ -997,7 +997,7 @@ func TestEntityHelpers(t *testing.T) {
 	}
 	many := make([]wire.Component, linksMost+5)
 	got := capped(many)
-	if len(got) != linksMost+1 || got[linksMost].Text != "还有 5 条关联没有显示" {
+	if len(got) != linksMost+1 || got[linksMost].Text != "还有 5 条没有显示" {
 		t.Fatalf("capped many = %d, last %+v", len(got), got[len(got)-1])
 	}
 	if got := orEmpty(nil, "无"); len(got) != 1 || got[0].Type != wire.ComponentText || got[0].Text != "无" {
@@ -1036,7 +1036,7 @@ func TestEntityHelpers(t *testing.T) {
 	if got := c.backLabel(&kernel.Entity{Type: "missing"}, "by"); got != "by" {
 		t.Fatalf("back label of a missing type = %q", got)
 	}
-	if got := c.backLabel(&kernel.Entity{Type: "g"}, "origin"); got != "衍生" {
+	if got := c.backLabel(&kernel.Entity{Type: "g"}, "origin"); got != "由它新建" {
 		t.Fatalf("back label of a derivation = %q", got)
 	}
 	if got := c.backLabel(&kernel.Entity{Type: "g"}, "by"); got != "反向" {

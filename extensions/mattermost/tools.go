@@ -40,24 +40,27 @@ func decode(raw json.RawMessage, out any) error {
 }
 
 func (a *app) unreadChannels(ctx context.Context) ([]unreadChannel, error) {
-	teams, err := a.client.teams(ctx)
+	c := a.currentClient()
+	teams, err := c.teams(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []unreadChannel
+	seen := map[string]bool{}
 	for _, team := range teams {
 		if !validID(team.ID) {
 			continue
 		}
-		channels, err := a.client.channels(ctx, team.ID)
+		channels, err := c.channels(ctx, team.ID)
 		if err != nil {
 			return nil, err
 		}
 		for _, channel := range channels {
-			if !validID(channel.ID) || channel.DeleteAt != 0 {
+			if !validID(channel.ID) || channel.DeleteAt != 0 || seen[channel.ID] {
 				continue
 			}
-			unread, err := a.client.unread(ctx, channel.ID)
+			seen[channel.ID] = true
+			unread, err := c.unread(ctx, channel.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -79,6 +82,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 	if err := decode(raw, &in); err != nil {
 		return "", err
 	}
+	c := a.currentClient()
 	switch name {
 	case "mattermost_unread":
 		items, err := a.unreadChannels(ctx)
@@ -95,7 +99,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return clipText(b.String(), 90000), nil
 	case "mattermost_channels":
-		items, err := a.client.channels(ctx, in.TeamID)
+		items, err := c.channels(ctx, in.TeamID)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -108,7 +112,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return clipText(b.String(), 90000), nil
 	case "mattermost_posts":
-		page, err := a.client.posts(ctx, in.ChannelID, in.Before, in.Page)
+		page, err := c.posts(ctx, in.ChannelID, in.Before, in.Page)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -120,7 +124,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 			if !ok || post.DeleteAt != 0 {
 				continue
 			}
-			author, err := a.postAuthor(ctx, users, post.UserID)
+			author, err := a.postAuthor(ctx, c, users, post.UserID)
 			if err != nil {
 				return "", err
 			}
@@ -137,14 +141,14 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 	return "", fmt.Errorf("no tool %s", name)
 }
 
-func (a *app) postAuthor(ctx context.Context, cache map[string]user, id string) (string, error) {
+func (a *app) postAuthor(ctx context.Context, c *client, cache map[string]user, id string) (string, error) {
 	if !validID(id) {
 		return "Mattermost user", nil
 	}
 	if cached, ok := cache[id]; ok {
 		return displayName(cached), nil
 	}
-	item, err := a.client.user(ctx, id)
+	item, err := c.user(ctx, id)
 	if err != nil {
 		return "", err
 	}
@@ -163,8 +167,14 @@ func displayName(item user) string {
 }
 
 func channelName(item channel) string {
-	if item.DisplayName != "" {
-		return item.DisplayName
+	if s := strings.TrimSpace(item.DisplayName); s != "" {
+		return s
 	}
-	return item.Name
+	if s := strings.TrimSpace(item.Name); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(item.ID); s != "" {
+		return s
+	}
+	return "Mattermost channel"
 }

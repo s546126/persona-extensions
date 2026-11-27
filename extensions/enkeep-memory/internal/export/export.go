@@ -63,14 +63,22 @@ type FileReport struct {
 	Written bool   `json:"written"` // written by this compile (not unchanged, not deferred)
 }
 
+type kbEntry struct {
+	slug    string
+	name    string
+	aliases []string
+	keys    []string // normalized id, name, display-base, aliases, repo suffixes
+}
+
 type compiler struct {
-	o     Options
-	st    *store.State
-	rep   *Report
-	never []string
-	fw    words
-	held  error                       // the hub held the model (model.ErrPaused): nothing is written this time
-	kb    map[string]*entry.KBProject // norm.Q of a project's id, name and aliases → the project; nil when ambiguous
+	o      Options
+	st     *store.State
+	rep    *Report
+	never  []string
+	fw     words
+	held   error               // the hub held the model (model.ErrPaused): nothing is written this time
+	kb     map[string]*kbEntry // norm.Q of a project's id, name, slug and aliases → the project; nil when ambiguous
+	kbList []*kbEntry          // all indexed projects, for unique-substring fallback
 }
 
 func (c *compiler) now() time.Time {
@@ -221,8 +229,10 @@ func underExported(es []*entry.Entry) []*entry.Entry {
 func openCommitment(e *entry.Entry) bool { return e.Commitment != nil && e.Commitment.Done == "" }
 
 type project struct {
-	name  string
-	parts map[string][]*entry.Entry
+	name     string
+	aliases  []string
+	parts    map[string][]*entry.Entry
+	skeleton []string // 1-hop structural skeleton lines (owners, assignees, upstream/downstream dependencies)
 }
 
 type plan struct {
@@ -277,15 +287,15 @@ func (c *compiler) plan() *plan {
 			add(e, ModePlain, "B")
 		}
 	}
-	// Exit D (K6): per knowledge-base project, its ①, ②, ③, ④ and ⑤ (① since 0.2.0-beta.37). Nothing of people
-	// cards or ⑥.
+	// Exit D (K6): per knowledge-base project, its goals, project-specific rules (①②③④), facts (⑤) and 1-hop
+	// structural skeleton (owners and upstream/downstream dependencies). Nothing of people cards or ⑥.
 	if c.on(entry.K6WorkflowSkill) {
 		for _, f := range []entry.Facet{entry.Interaction, entry.Tools, entry.Judgement, entry.Workflow, entry.World} {
 			for _, e := range c.entries(f, nil) {
 				for _, r := range c.projectsFor(e) {
 					pr := p.projects[r.slug]
 					if pr == nil {
-						pr = &project{name: r.name, parts: map[string][]*entry.Entry{}}
+						pr = &project{name: r.name, aliases: r.aliases, parts: map[string][]*entry.Entry{}}
 						p.projects[r.slug] = pr
 					}
 					pr.parts[string(f)] = append(pr.parts[string(f)], e)
@@ -294,6 +304,9 @@ func (c *compiler) plan() *plan {
 					}
 				}
 			}
+		}
+		for slug, pr := range p.projects {
+			pr.skeleton = c.projectSkeleton(slug, pr)
 		}
 	}
 	// Exit E: who matters and open commitments (⑤, ⑤′ commitments), how to communicate with them (⑤′ tips, K14; inferred
@@ -336,58 +349,243 @@ func forkReady(e *entry.Entry) bool {
 		(strings.TrimSpace(e.Rejected) != "" || strings.TrimSpace(e.Why) != "")
 }
 
-// indexProjects indexes the knowledge base's projects by id, name and aliases (norm.Q); a key two projects share
-// leads to neither.
+// indexProjects indexes the knowledge base's projects by id, normalized slug, name, display-base, aliases and repo
+// suffix (norm.Q); a key two projects share leads to neither. Projects whose raw ID is not a valid hub slug fall back
+// to KBSlug(id) or KBSlug(name) so Chinese/Unicode project names are never silently dropped.
 func (c *compiler) indexProjects() {
 	if c.o.Projects == nil {
 		return
 	}
-	c.kb = map[string]*entry.KBProject{}
+	c.kb = map[string]*kbEntry{}
+	c.kbList = nil
 	for i := range c.o.Projects {
 		pr := &c.o.Projects[i]
-		if !projectSlug(pr.ID) {
-			continue
-		}
-		seen := map[string]bool{}
-		for _, n := range append([]string{pr.ID, pr.Name}, pr.Aliases...) {
-			k := norm.Q(n)
-			if k == "" || seen[k] {
+		slug := strings.TrimSpace(pr.ID)
+		if !projectSlug(slug) {
+			if s := KBSlug(slug); projectSlug(s) {
+				slug = s
+			} else if s := KBSlug(pr.Name); projectSlug(s) {
+				slug = s
+			} else {
 				continue
+			}
+		}
+		ke := &kbEntry{slug: slug, name: firstNonEmpty(pr.Name, slug), aliases: pr.Aliases}
+		c.kbList = append(c.kbList, ke)
+		seen := map[string]bool{}
+		addKey := func(raw string) {
+			k := norm.Q(raw)
+			if k == "" || seen[k] {
+				return
 			}
 			seen[k] = true
-			if old, ok := c.kb[k]; ok && old != pr {
+			ke.keys = append(ke.keys, k)
+			if old, ok := c.kb[k]; ok && old != ke {
 				c.kb[k] = nil
-				continue
+				return
 			}
-			c.kb[k] = pr
+			c.kb[k] = ke
+		}
+		raws := append([]string{pr.ID, slug, pr.Name, KBSlug(pr.Name)}, pr.Aliases...)
+		for _, n := range raws {
+			addKey(n)
+			if base := stripProjectDisplay(n); base != "" && base != n {
+				addKey(base)
+			}
+			if _, tail, ok := strings.Cut(strings.TrimSpace(n), "/"); ok && tail != "" {
+				addKey(tail)
+			}
 		}
 	}
 }
 
-type projRef struct{ slug, name string }
+type projRef struct {
+	slug, name string
+	aliases    []string
+}
+
+func (c *compiler) matchKBProject(name string) *kbEntry {
+	name = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(name), "project:"))
+	if name == "" {
+		return nil
+	}
+	candidates := []string{name}
+	if base := stripProjectDisplay(name); base != "" && base != name {
+		candidates = append(candidates, base)
+	}
+	if sl := KBSlug(name); sl != "" {
+		candidates = append(candidates, sl)
+	}
+	if _, tail, ok := strings.Cut(name, "/"); ok && tail != "" {
+		candidates = append(candidates, tail)
+	}
+	for _, cand := range candidates {
+		k := norm.Q(cand)
+		if k == "" {
+			continue
+		}
+		if ke, ok := c.kb[k]; ok {
+			return ke // nil if ambiguous across two KB projects
+		}
+	}
+	// Unique substring match for Chinese/Unicode or descriptive project names (>= 2 runes):
+	// only accepted when exactly one KB project matches, never when ambiguous.
+	q := norm.Q(stripProjectDisplay(name))
+	if len([]rune(q)) < 2 {
+		return nil
+	}
+	var hit *kbEntry
+	for _, ke := range c.kbList {
+		matched := false
+		for _, k := range ke.keys {
+			if len([]rune(k)) >= 2 && (strings.Contains(q, k) || strings.Contains(k, q)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if hit != nil && hit != ke {
+			return nil // ambiguous
+		}
+		hit = ke
+	}
+	return hit
+}
 
 // projectsFor are the project files an entry goes into: its project names matched to knowledge-base projects, or,
 // without the project list, named by kb.Slug's rule.
 func (c *compiler) projectsFor(e *entry.Entry) []projRef {
 	var out []projRef
-	for _, name := range projectsOf(e) {
+	names := projectsOf(e)
+	if c.o.Projects != nil {
+		if o := strings.TrimSpace(e.Impact.Object); o != "" && len([]rune(o)) <= 24 && !slices.Contains(names, o) {
+			names = append(names, o)
+		}
+		if o := strings.TrimSpace(e.Object); o != "" && !slices.Contains(names, o) {
+			names = append(names, o)
+		}
+	}
+	for _, name := range names {
 		var r projRef
 		if c.o.Projects != nil {
-			pr := c.kb[norm.Q(name)]
-			if pr == nil {
+			ke := c.matchKBProject(name)
+			if ke == nil {
 				continue
 			}
-			r = projRef{slug: pr.ID, name: firstNonEmpty(pr.Name, pr.ID)}
+			r = projRef{slug: ke.slug, name: ke.name, aliases: ke.aliases}
 		} else if s := KBSlug(name); projectSlug(s) {
 			r = projRef{slug: s, name: name}
 		} else {
 			continue
 		}
-		if !slices.Contains(out, r) {
+		if !slices.ContainsFunc(out, func(x projRef) bool { return x.slug == r.slug }) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// projectSkeleton collects 1-hop structural skeleton lines (owners, assignees, upstream/downstream dependencies)
+// for a project from st.Graph and usable World skeleton entries.
+func (c *compiler) projectSkeleton(slug string, pr *project) []string {
+	norms := map[string]bool{}
+	for _, n := range append([]string{slug, pr.name}, pr.aliases...) {
+		if q := norm.Q(n); q != "" {
+			norms[q] = true
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = oneLine(s)
+		if s == "" || seen[s] || len(out) >= 8 {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	zh := norm.Base(c.o.Lang) == "zh"
+	formatEdge := func(from, pred, to string) string {
+		if from == "" || to == "" || from == to {
+			return ""
+		}
+		if zh {
+			switch pred {
+			case "owns":
+				return fmt.Sprintf("负责人：%s 负责 %s", from, to)
+			case "assigned":
+				return fmt.Sprintf("分配：%s 承接 %s", from, to)
+			case "depends_on":
+				return fmt.Sprintf("依赖：%s 依赖 %s", from, to)
+			case "member_of":
+				return fmt.Sprintf("归属：%s 属于 %s", from, to)
+			case "collaborates_with":
+				return fmt.Sprintf("协作：%s 与 %s 协作", from, to)
+			case "role":
+				return fmt.Sprintf("角色：%s（%s）", from, to)
+			case "reports_to":
+				return fmt.Sprintf("汇报：%s 汇报给 %s", from, to)
+			}
+		}
+		return fmt.Sprintf("%s %s %s", from, pred, to)
+	}
+	if c.st.Graph != nil {
+		g := c.st.Graph
+		var nodeIDs []string
+		for id, n := range g.Nodes {
+			if n == nil || n.MergedInto != "" || n.Status == "not_entity" {
+				continue
+			}
+			matched := norms[norm.Q(n.Name)]
+			if !matched {
+				for _, a := range n.Aliases {
+					if norms[norm.Q(a.Name)] {
+						matched = true
+						break
+					}
+				}
+			}
+			if matched {
+				nodeIDs = append(nodeIDs, id)
+			}
+		}
+		sort.Strings(nodeIDs)
+		for _, id := range nodeIDs {
+			for _, a := range g.About(id, func(a *store.Assertion) bool {
+				return (a.Status == "active" || a.Status == "candidate") && entry.IsSkeletonPredicate(a.P)
+			}) {
+				sn, on := g.Nodes[g.Resolve(a.S)], g.Nodes[g.Resolve(a.O)]
+				if sn == nil || on == nil || sn.ID == "me" || on.ID == "me" {
+					continue
+				}
+				add(formatEdge(strings.TrimSpace(sn.Name), strings.ToLower(strings.TrimSpace(a.P)), strings.TrimSpace(on.Name)))
+			}
+		}
+	}
+	for _, e := range pr.parts["world"] {
+		if !entry.IsSkeletonPredicate(e.Predicate) {
+			continue
+		}
+		from := c.cleanRef(e.Subject)
+		to := c.cleanRef(e.Target)
+		add(formatEdge(from, strings.ToLower(strings.TrimSpace(e.Predicate)), to))
+	}
+	return out
+}
+
+func (c *compiler) cleanRef(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "person:") {
+		if n := c.name(raw); n != "" {
+			return n
+		}
+	}
+	for _, p := range []string{"project:", "person:", "system:", "object:"} {
+		raw = strings.TrimPrefix(raw, p)
+	}
+	return strings.TrimSpace(raw)
 }
 
 // inProject: the entry holds in a project the knowledge base knows, so its project block carries it.

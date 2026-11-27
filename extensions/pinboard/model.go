@@ -61,7 +61,11 @@ func (t *tagList) UnmarshalJSON(data []byte) error {
 	var wrapped struct {
 		Tags []tag `json:"tags"`
 	}
-	return json.Unmarshal(data, &wrapped)
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return err
+	}
+	*t = wrapped.Tags
+	return nil
 }
 
 func (b bookmark) TagNames() []string {

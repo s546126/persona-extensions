@@ -23,8 +23,12 @@ export function Root(options: RootOptions): Node {
         if (id === "refresh") setRefresh(previous => previous + 1);
         else if (id.startsWith("gem:")) {
           if (loaded.kind !== "results") return;
+          setRefresh(0);
           setState(previous => gemTransition(previous, loaded.result, id));
-        } else setState(previous => transition(previous, id, values));
+        } else {
+          setRefresh(0);
+          setState(previous => transition(previous, id, values));
+        }
       }, { submit: true });
     } });
 }

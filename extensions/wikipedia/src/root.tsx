@@ -6,7 +6,7 @@ export function Root(options: RootOptions): Node {
   const [state, setState] = useState(() => readState(options.state));
   const [refresh, setRefresh] = useState(0);
   const [result, setResult] = useState<{ service: Wikipedia; identity: string; loaded: Loaded } | undefined>(undefined);
-  const identity = `${state.v}:${state.t}:${state.a}:${state.q}:${state.d}:${refresh}`;
+  const identity = JSON.stringify([state.v, state.t, state.a, state.q, state.d, refresh]);
   useLoadEffect(async signal => {
     const loaded = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult(previous => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded)
@@ -18,6 +18,7 @@ export function Root(options: RootOptions): Node {
         const push = { ui: "today", state: encodeState(next), ...(title ? { title } : {}) };
         return callback(() => ({ push }), { push });
       }
+      if (next) return callback(() => setState(next));
       return callback(values => {
         if (id === "refresh") setRefresh(previous => previous + 1);
         else setState(previous => transition(previous, id, values));

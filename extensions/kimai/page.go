@@ -28,9 +28,27 @@ type pageState struct {
 	Description string `json:"t,omitempty"`
 }
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "active", "projects", "activities", "create", "review-create":
+		return true
+	default:
+		return false
+	}
+}
+
+func validView(view string) bool {
+	switch view {
+	case "", "recent", "active", "timesheets":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Page < 0 || st.TimesheetID < 0 || st.ProjectID < 0 || st.ActivityID < 0 || len(st.DraftID) > 128 || len(st.Begin) > 64 || len(st.End) > 64 || len([]rune(st.Description)) > 5000 || len(st.Mode) > 30 || len(st.View) > 30 {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || !validView(st.View) || st.Page < 0 || st.TimesheetID < 0 || st.ProjectID < 0 || st.ActivityID < 0 || len(st.DraftID) > 128 || len(st.Begin) > 64 || len(st.End) > 64 || len([]rune(st.Description)) > 5000 {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -133,7 +151,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "create" || st.Mode == "review-create" {
-		return createView(r, st), nil
+		return createView(r, st)
 	}
 	if st.Mode == "projects" {
 		items, err := a.client.projects(ctx)
@@ -142,10 +160,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.projects}
+		seen := map[int64]bool{}
 		for _, item := range items {
-			if item.Visible {
-				section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("project-%d", item.ID), Title: clipText(item.Name, 1800), Action: &wire.Action{ID: "activities", Values: map[string]string{"project_id": fmt.Sprint(item.ID)}}})
+			if !item.Visible || item.ID <= 0 || strings.TrimSpace(item.Name) == "" || seen[item.ID] {
+				continue
 			}
+			seen[item.ID] = true
+			if len(section.Items) >= maxCatalogItems {
+				break
+			}
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("project-%d", item.ID), Title: clipText(item.Name, 1800), Action: &wire.Action{ID: "activities", Values: map[string]string{"project_id": fmt.Sprint(item.ID)}}})
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noProjects})
@@ -159,10 +183,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.activities}
+		seen := map[int64]bool{}
 		for _, item := range items {
-			if item.Visible {
-				section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("activity-%d", item.ID), Title: clipText(item.Name, 1800), Action: &wire.Action{ID: "create", Values: map[string]string{"activity_id": fmt.Sprint(item.ID)}}})
+			if !item.Visible || item.ID <= 0 || strings.TrimSpace(item.Name) == "" || seen[item.ID] {
+				continue
 			}
+			seen[item.ID] = true
+			if len(section.Items) >= maxCatalogItems {
+				break
+			}
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("activity-%d", item.ID), Title: clipText(item.Name, 1800), Action: &wire.Action{ID: "create", Values: map[string]string{"activity_id": fmt.Sprint(item.ID)}}})
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noActivities})
@@ -193,10 +223,17 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	v := &wire.View{Title: t.time, State: ext.EncodeState(st), Filter: &wire.Filter{Name: "view", Title: t.time, Value: view, Action: wire.Action{ID: "view"}, Choices: []wire.Choice{{Value: "recent", Title: t.recent}, {Value: "active", Title: t.active}, {Value: "timesheets", Title: t.history}}}}
 	section := wire.Section{Title: t.entries}
+	seen := map[int64]bool{}
+	rendered := 0
 	for _, item := range items {
-		if item.ID <= 0 {
+		if item.ID <= 0 || seen[item.ID] {
 			continue
 		}
+		seen[item.ID] = true
+		if rendered >= maxViewRecords {
+			break
+		}
+		rendered++
 		section.Items = append(section.Items, timesheetComponents(item, t)...)
 	}
 	if len(section.Items) == 0 {
@@ -214,6 +251,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 const (
 	maxViewRecords   = 125
 	maxActiveRecords = 80
+	maxCatalogItems  = 250
 )
 
 // collectTimesheets reads the history from page 1 through the current page so that Load more answers the whole list,
@@ -255,17 +293,19 @@ func activeView(r *ext.UIRequest, st pageState, items []timesheet) *wire.View {
 	st.DraftID = randomID()
 	v := &wire.View{Title: t.active, State: ext.EncodeState(st), Filter: &wire.Filter{Name: "view", Title: t.time, Value: "active", Action: wire.Action{ID: "view"}, Choices: []wire.Choice{{Value: "recent", Title: t.recent}, {Value: "active", Title: t.active}, {Value: "timesheets", Title: t.history}}}}
 	section := wire.Section{Title: t.active}
+	seen := map[int64]bool{}
 	rendered := 0
 	for _, item := range items {
-		if item.ID <= 0 {
+		if item.ID <= 0 || seen[item.ID] {
 			continue
 		}
+		seen[item.ID] = true
 		if rendered >= maxActiveRecords {
 			break
 		}
 		rendered++
 		section.Items = append(section.Items, timesheetComponents(item, t)...)
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentButton, Title: t.stop, Action: &wire.Action{ID: "stop", Confirm: t.stop + "\n" + item.Begin, Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentButton, Title: t.stop, Action: &wire.Action{ID: "stop", Confirm: clipText(t.stop+"\n"+item.Begin, wire.StringMost), Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noActive})
@@ -285,23 +325,27 @@ func timesheetComponents(item timesheet, t *texts) []wire.Component {
 	return []wire.Component{{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %s · %s", project, activity, item.Begin), 1800)}, {Type: wire.ComponentText, Text: clipText(item.Description+" · "+endText(item.End), 1800), Style: wire.TextStyleSecondary}}
 }
 
-func createView(r *ext.UIRequest, st pageState) *wire.View {
+func createView(r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
 	if st.Mode == "review-create" {
-		items := []wire.Component{{Type: wire.ComponentText, Text: st.Begin + " → " + endText(&st.End)}}
+		in := createArgs{ProjectID: st.ProjectID, ActivityID: st.ActivityID, Begin: st.Begin, End: st.End, Description: st.Description}
+		if err := in.validate(); err != nil {
+			return nil, err
+		}
+		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(st.Begin+" → "+endText(&st.End), 1800)}}
 		if st.Description != "" {
 			items = append(items, textComponents(st.Description)...)
 		}
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Begin}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
-		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: clipText(t.create+"\n"+st.Begin, wire.StringMost)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
+		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}, nil
 	}
 	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.timerNotice, Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "begin", Label: t.begin, Value: st.Begin},
-		{Type: wire.ComponentField, Kind: "text", Name: "end", Label: t.end, Value: st.End},
-		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: st.Description},
+		{Type: wire.ComponentField, Kind: "text", Name: "begin", Label: t.begin, Value: clipText(st.Begin, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "end", Label: t.end, Value: clipText(st.End, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: clipText(st.Description, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
-	}}}}
+	}}}}, nil
 }
 
 func timeNowRFC3339() string { return time.Now().Format(time.RFC3339) }

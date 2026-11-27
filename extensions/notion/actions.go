@@ -85,11 +85,11 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		keyData, _ := json.Marshal(map[string]any{"action": name, "page_id": in.PageID, "kind": in.Kind, "text": in.Text})
 		key = string(keyData)
 		fn = func() (string, error) {
-			child := paragraphBlock(in.Text)
+			child := paragraphRequest(in.Text)
 			if in.Kind == "todo" {
-				child = todoBlockFor(in.Text)
+				child = todoRequest(in.Text)
 			}
-			if err := a.client.append(ctx, in.PageID, []block{child}); err != nil {
+			if err := a.client.append(ctx, in.PageID, []map[string]any{child}); err != nil {
 				return "", err
 			}
 			return "Appended " + in.Kind + " to Notion page " + in.PageID, nil

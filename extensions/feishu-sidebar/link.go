@@ -7,10 +7,9 @@ import (
 	"strings"
 )
 
-// The Feishu applink (docs/extensions/feishu-sidebar.md): a general link that needs no Feishu app id. mode=sidebar-semi
-// opens a half-width sidebar (Feishu 3.41+); window and appCenter are Feishu 7.5+ but this extension uses only
-// sidebar-semi. The target URL goes in url as one percent-encoded value, the way JavaScript's encodeURIComponent does.
-const applink = "https://applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url="
+// The Feishu AppLink opens a tab in the desktop client's left navigation (Feishu 7.5+).
+// The url parameter is percent-encoded the same way as JavaScript's encodeURIComponent.
+const applink = "https://applink.feishu.cn/client/web_url/open?mode=appCenter&url="
 
 var (
 	errNoHubURL = errors.New("还没有 hub 的对外地址：在这个扩展的设置里填「hub 对外地址」")

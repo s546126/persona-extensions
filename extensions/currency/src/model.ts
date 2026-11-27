@@ -4,10 +4,17 @@ export type ReadCode = "invalid" | "unsupported" | "bad_answer" | "not_found" | 
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  if (most <= 0) return "";
+  const chars = Array.from(text);
+  if (chars.length <= most) return text;
+  if (most === 1) return chars[0];
+  return chars.slice(0, most - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
+const hasLoneSurrogate = (value: string) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
 function text(value: unknown, most: number): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value) || hasLoneSurrogate(value)) throw new ReadError("invalid");
   const result = oneLine(value);
   if (!result || Array.from(result).length > most) throw new ReadError("invalid");
   return result;
@@ -35,7 +42,7 @@ function decimal(value: unknown, name: "rate" | "amount"): string {
   if (!/^[0-9]{1,18}(?:\.[0-9]{1,18})?$/.test(raw)) throw new ReadError(name === "amount" ? "invalid" : "bad_answer");
   const [whole, fraction = ""] = raw.split(".");
   const normalized = `${whole.replace(/^0+(?=\d)/, "")}${fraction ? `.${fraction}` : ""}`;
-  if (name === "rate" && normalized === "0") throw new ReadError("bad_answer");
+  if (name === "rate" && BigInt(whole + fraction) === 0n) throw new ReadError("bad_answer");
   return normalized;
 }
 export function amount(value: unknown): string { return decimal(value, "amount"); }
@@ -67,7 +74,10 @@ export function formatForDisplay(value: string, locale = "en"): string {
   const rounded = roundedNumber(value, 6);
   const [whole, fraction = ""] = rounded.split(".");
   if (whole.replace("-", "").length > 15) return rounded;
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: Math.min(6, fraction.length) }).format(Number(rounded));
+  const options = { maximumFractionDigits: Math.min(6, fraction.length) };
+  try { return new Intl.NumberFormat(locale, options).format(Number(rounded)); } catch {}
+  try { return new Intl.NumberFormat("en", options).format(Number(rounded)); } catch {}
+  return rounded;
 }
 export interface Conversion { amount: string; from: string; to: string; result: string; inverse?: string }
 export function currencyConversion(value: unknown, rate: Rate): Conversion {
@@ -182,11 +192,14 @@ function rationalText(value: Rational, maximumDigits = 18): string {
   const negative = value.n < 0n, numerator = negative ? -value.n : value.n;
   const whole = numerator / value.d;
   let remainder = numerator % value.d, digits = "";
-  const recurring = value.d / (2n ** countFactor(value.d, 2n)) / (5n ** countFactor(value.d, 5n)) !== 1n;
+  if (maximumDigits <= 0) {
+    const roundedWhole = remainder * 2n >= value.d ? whole + 1n : whole;
+    return (negative && roundedWhole ? "-" : "") + roundedWhole.toString();
+  }
   for (let i = 0; i < maximumDigits && remainder; i++) {
     remainder *= 10n; const digit = remainder / value.d;
     digits += digit.toString(); remainder %= value.d;
-    if (recurring && i === maximumDigits - 1 && remainder * 2n >= value.d) {
+    if (i === maximumDigits - 1 && remainder * 2n >= value.d) {
       const rounded = (BigInt(digits) + 1n).toString().padStart(maximumDigits, "0");
       return (negative ? "-" : "") + formatRounded(whole, rounded, maximumDigits);
     }
@@ -198,9 +211,4 @@ function formatRounded(whole: bigint, digits: string, maximumDigits: number): st
   if (digits.length > maximumDigits) return (whole + 1n).toString();
   const trimmed = digits.replace(/0+$/, "");
   return whole.toString() + (trimmed ? `.${trimmed}` : "");
-}
-function countFactor(value: bigint, factor: bigint): bigint {
-  let count = 0n, rest = value;
-  while (rest % factor === 0n) { rest /= factor; count++; }
-  return count;
 }

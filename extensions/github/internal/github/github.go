@@ -118,6 +118,7 @@ type Connector struct {
 	dev       deviceLogin
 	devLoaded bool
 	pending   *devicePending
+	saving    sync.Mutex
 
 	lists listCache // pagedata.go: the page's lists
 

@@ -461,7 +461,7 @@ func TestTodosAboutMemory(t *testing.T) {
 		t.Errorf("about meta: %+v", m)
 	}
 	d, _ = s.Get(ctx, KindMemory, "port.md")
-	if m := kbsrc.DecodeMeta(d); m.Code != entry.SrcMemory || m.Origin != string(entry.Handwritten) {
+	if m := kbsrc.DecodeMeta(d); m.Code != entry.SrcMemory || m.Origin != string(entry.OriginAssistantNote) {
 		t.Errorf("memory meta: %+v", m)
 	}
 	d, _ = s.Get(ctx, KindAgents, "m1/s1")

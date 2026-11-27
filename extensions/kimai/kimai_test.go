@@ -223,7 +223,8 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 	if len(f.creates) != 1 {
 		t.Fatal("restart repeated time entry")
 	}
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(args), Status: "pending", StartedAt: time.Now()}})
+	key, _ := json.Marshal(createArgs{ProjectID: 7, ActivityID: 3, Begin: "2026-11-10T10:00:00Z"})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "kimai_create_timesheet:" + string(key), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

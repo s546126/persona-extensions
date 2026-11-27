@@ -1,0 +1,28 @@
+{
+  "manifest_version": 1,
+  "id": "dingtalk",
+  "name": "钉钉",
+  "version": "0.1.0",
+  "description": "钉钉机器人：用你自己组织的企业内部应用机器人（Stream 模式，hub 无需公网地址），在钉钉单聊里和 Persona 对话；填入应用凭证后发配对码绑定，只转发配对人的消息，支持图片、文件和语音转写。凭证加密保存在 hub。",
+  "icon": "assets/icon.png",
+  "publisher": "nwverse",
+  "tags": ["聊天", "钉钉"],
+  "engines": {"persona": ">=202611041602", "plugin_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/dingtalk-linux-amd64",
+      "linux-arm64": "bin/dingtalk-linux-arm64",
+      "darwin-arm64": "bin/dingtalk-darwin-arm64",
+      "darwin-amd64": "bin/dingtalk-darwin-amd64"
+    }
+  },
+  "contributes": {
+    "connectors": [{"id": "dingtalk", "name": "钉钉", "capabilities": ["status", "login"]}],
+    "channel": [{
+      "id": "dingtalk", "name": "钉钉", "kind": "im", "connector": "dingtalk", "bind": "fields",
+      "description": "在钉钉里私聊企业内部应用的机器人：填入应用凭证并配对，消息进主对话，回答以 Markdown 发回",
+      "capabilities": {"images_in": true, "files_in": true, "voice_in": true, "format": "markdown", "max_text": 4000, "asks": "text", "push": true}
+    }]
+  },
+  "permissions": {"network": ["*.dingtalk.com", "*.aliyuncs.com"]}
+}

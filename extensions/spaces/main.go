@@ -46,7 +46,7 @@ then the default one under the user's configuration directory.
 `
 
 // errNotInitialized answers a UI request that arrives before the hub initialized the program.
-var errNotInitialized = errors.New("空间：扩展还没有初始化")
+var errNotInitialized = errors.New("空间还在启动，请过几秒再打开这个页面")
 
 func main() {
 	log.SetFlags(0)

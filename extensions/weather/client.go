@@ -31,6 +31,9 @@ var userAgent = "persona-weather/" + about.Version
 // answerMost is how many bytes of an answer are read at most.
 const answerMost = int64(2 << 20)
 
+// maxCacheEntries caps the in-memory HTTP cache so ad-hoc city searches cannot grow without bound.
+const maxCacheEntries = 128
+
 // cacheFor is how long an answer is reused before it is read again (the hub's 10-minute cache).
 const cacheFor = 10 * time.Minute
 
@@ -128,9 +131,12 @@ func (c *client) fetch(ctx context.Context, full string) ([]byte, error) {
 		return nil, requestError(err)
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, answerMost))
+	body, err := io.ReadAll(io.LimitReader(res.Body, answerMost+1))
 	if err != nil {
 		return nil, requestError(err)
+	}
+	if int64(len(body)) > answerMost {
+		return nil, errBadAnswer
 	}
 	switch {
 	case res.StatusCode == http.StatusNotFound:
@@ -153,10 +159,10 @@ func isErrorBody(body []byte) bool {
 	return json.Unmarshal(body, &p) == nil && p.Error
 }
 
-// validJSONObject says whether body is a JSON object, so a firewall's page never replaces a good copy in the cache.
+// validJSONObject says whether body is a complete JSON object, so a firewall page or truncated body never replaces a good copy in the cache.
 func validJSONObject(body []byte) bool {
 	body = trimSpaceBytes(body)
-	return len(body) > 0 && body[0] == '{'
+	return len(body) > 0 && body[0] == '{' && body[len(body)-1] == '}' && json.Valid(body)
 }
 
 func trimSpaceBytes(b []byte) []byte {
@@ -185,6 +191,23 @@ func requestError(err error) error {
 func (c *client) store(full string, body []byte, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, exists := c.cache[full]; !exists && len(c.cache) >= maxCacheEntries {
+		for k, v := range c.cache {
+			if at.Sub(v.at) >= cacheFor {
+				delete(c.cache, k)
+			}
+		}
+		for len(c.cache) >= maxCacheEntries {
+			var oldestKey string
+			var oldestAt time.Time
+			for k, v := range c.cache {
+				if oldestKey == "" || v.at.Before(oldestAt) {
+					oldestKey, oldestAt = k, v.at
+				}
+			}
+			delete(c.cache, oldestKey)
+		}
+	}
 	c.cache[full] = cached{body, at}
 }
 

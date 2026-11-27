@@ -14,24 +14,39 @@ export const tools = toolsFor();
 function line(article: Article, index: number): string {
   return `${index + 1}. ${clip(article.heading, 300)}\n   ${[clip(article.description, 300), article.views === undefined ? "" : `${article.views} views`].filter(Boolean).join(" · ")}\n   ${article.url}\n${article.extract ? "   " + clip(article.extract, 600) + "\n" : ""}`;
 }
-function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
+function argsFrom(raw: unknown, exact: ExactJSON | undefined, stringFields: readonly string[], allowLimit: boolean): Record<string, unknown> {
   if (exact) {
+    if (exact.raw === "null") return {};
+    if (!exact.raw.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
-    for (const key of ["query", "title"] as const) for (const token of exact.fieldValues(key)) {
+    for (const key of stringFields) for (const token of exact.fieldValues(key)) {
+      if (token.raw === "null") continue;
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args[key] = value;
     }
-    args.limit = exact.int64Fields(["limit"]).limit;
+    if (allowLimit) {
+      let hasLimit = false;
+      let limit = 0n;
+      for (const token of exact.fieldValues("limit")) {
+        if (token.raw === "null") continue;
+        try { limit = token.int64(limit); } catch { throw new ReadError("invalid"); }
+        hasLimit = true;
+      }
+      if (hasLimit) args.limit = limit;
+    }
     return args;
   }
   if (raw == null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) throw new ReadError("invalid");
   const value = raw as Record<string, unknown>;
-  if (value.query != null && typeof value.query !== "string" || value.title != null && typeof value.title !== "string") throw new ReadError("invalid");
-  if (value.limit != null && (typeof value.limit !== "number" || !Number.isSafeInteger(value.limit))) throw new ReadError("invalid");
+  for (const key of stringFields) if (value[key] != null && typeof value[key] !== "string") throw new ReadError("invalid");
+  if (allowLimit && value.limit != null && (typeof value.limit !== "number" || !Number.isSafeInteger(value.limit))) throw new ReadError("invalid");
   return value;
 }
 export async function callTool(service: Wikipedia, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
-  const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
+  if (name !== "wikipedia_today" && name !== "wikipedia_search" && name !== "wikipedia_article") throw unknownMethod(`connector.tools.${name}`);
+  const stringFields = name === "wikipedia_search" ? ["query"] : name === "wikipedia_article" ? ["title"] : [];
+  const args = argsFrom(raw, exact, stringFields, name === "wikipedia_search"), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "wikipedia_today") {
       const feed = await service.today(dateAt(service.now()), false, request.signal);
@@ -42,17 +57,25 @@ export async function callTool(service: Wikipedia, name: string, raw: unknown = 
     }
     if (name === "wikipedia_search") {
       if (typeof args.query !== "string" || !args.query.trim() || Array.from(args.query).length > 200) throw new ReadError("invalid");
-      const limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 30) throw new ReadError("invalid");
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 30n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 30) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
       const articles = await service.search(args.query, limit, request.signal);
       return clip(articles.length ? articles.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29_999);
     }
-    if (name === "wikipedia_article") {
-      if (typeof args.title !== "string") throw new ReadError("invalid");
-      const article = await service.article(args.title, false, request.signal);
-      return clip(`${article.heading}\n${article.description}\n${article.url}\n\n${article.extract}`.trim(), 29_999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    if (typeof args.title !== "string") throw new ReadError("invalid");
+    const article = await service.article(args.title, false, request.signal);
+    return clip(`${article.heading}\n${article.description}\n${article.url}\n\n${article.extract}`.trim(), 29_999);
+  } catch (error) {
+    if (!(error instanceof ReadError) && !signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally { request.dispose(); }
 }
 export function connector(getService: () => Wikipedia): Handler { return withExactParams(async (method, params: unknown, call) => {

@@ -59,7 +59,7 @@ func newFakeTodoist(t *testing.T) *fakeTodoist {
 			}
 			cursor := r.URL.Query().Get("cursor")
 			if cursor == "" {
-				fmt.Fprint(w, `{"results":[{"id":"opaque-long-task-1","content":"Prepare weekly review","description":"Full task context","project_id":"project-work","section_id":"section-planning","labels":["deep-work"],"priority":1,"due":{"date":"`+time.Now().In(loc).Format("2006-01-02")+`","recurring":true}},{"id":"task-overdue","content":"Finish earlier draft","due":{"date":"2000-01-01","recurring":false}}],"next_cursor":"next-page"}`)
+				fmt.Fprint(w, `{"results":[{"id":"opaque-long-task-1","content":"Prepare weekly review","description":"Full task context","project_id":"project-work","section_id":"section-planning","labels":["deep-work"],"priority":1,"due":{"date":"`+time.Now().In(loc).Format("2006-01-02")+`T10:00:00","timezone":null,"is_recurring":true}},{"id":"task-overdue","content":"Finish earlier draft","due":{"date":"2000-01-01","timezone":null,"is_recurring":false}}],"next_cursor":"next-page"}`)
 			} else {
 				fmt.Fprint(w, `{"results":[],"next_cursor":""}`)
 			}
@@ -79,7 +79,7 @@ func newFakeTodoist(t *testing.T) *fakeTodoist {
 				fmt.Fprint(w, `{"id":"opaque-long-task-1","content":"Updated task"}`)
 				return
 			}
-			fmt.Fprint(w, `{"id":"opaque-long-task-1","content":"Prepare weekly review","description":"Full task context","project_id":"project-work","section_id":"section-planning","labels":["deep-work"],"priority":1,"due":{"date":"2026-11-10","recurring":true}}`)
+			fmt.Fprint(w, `{"id":"opaque-long-task-1","content":"Prepare weekly review","description":"Full task context","project_id":"project-work","section_id":"section-planning","labels":["deep-work"],"priority":1,"due":{"date":"2026-11-10T23:30:00.000000Z","timezone":"Europe/Madrid","is_recurring":true}}`)
 		case "/tasks/opaque-long-task-1/close":
 			f.mu.Lock()
 			f.closeIDs = append(f.closeIDs, "opaque-long-task-1")
@@ -91,6 +91,12 @@ func newFakeTodoist(t *testing.T) *fakeTodoist {
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// shanghaiToday is the fixture's local day, matching the time zone the tests request.
+func shanghaiToday() string {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	return time.Now().In(loc).Format(time.DateOnly)
 }
 
 func (f *fakeTodoist) app() *app {
@@ -141,7 +147,7 @@ func TestTasksAndTimeZoneFiltering(t *testing.T) {
 	if err != nil || !strings.Contains(text, "Prepare weekly review") || strings.Contains(text, "Finish earlier draft") {
 		t.Fatalf("%v %s", err, text)
 	}
-	if !strings.Contains(text, "opaque-long-task-1") || !strings.Contains(text, "Work") || !strings.Contains(text, "Planning") || !strings.Contains(text, "recurring") {
+	if !strings.Contains(text, "opaque-long-task-1") || !strings.Contains(text, "Work") || !strings.Contains(text, "Planning") || !strings.Contains(text, "due: "+shanghaiToday()+" 10:00 (recurring)") {
 		t.Fatal(text)
 	}
 	now := time.Date(2026, 11, 10, 0, 30, 0, 0, time.FixedZone("UTC+8", 8*3600))
@@ -153,9 +159,49 @@ func TestTasksAndTimeZoneFiltering(t *testing.T) {
 
 func TestTaskDetailPreservesOpaqueID(t *testing.T) {
 	f := newFakeTodoist(t)
-	text, err := f.app().callTool(t.Context(), &ext.UIRequest{}, "todoist_task", json.RawMessage(`{"id":"opaque-long-task-1"}`))
-	if err != nil || !strings.Contains(text, "Full task context") {
+	r := &ext.UIRequest{UIParams: wire.UIParams{TZ: "Asia/Shanghai"}}
+	text, err := f.app().callTool(t.Context(), r, "todoist_task", json.RawMessage(`{"id":"opaque-long-task-1"}`))
+	if err != nil || !strings.Contains(text, "Full task context") || !strings.Contains(text, "due: 2026-11-11 07:30 (recurring)") {
 		t.Fatalf("%v %s", err, text)
+	}
+}
+
+// Todoist API v1 sends a full day, a floating wall time, or a UTC time with Z in due.date.
+func TestDueViewsUseTheUsersLocalDay(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 11, 9, 0, 0, 0, loc)
+	items := []task{{ID: "no-due"}}
+	for id, date := range map[string]string{
+		"all-day-today": "2026-11-11", "floating-today": "2026-11-11T10:00:00", "floating-fraction": "2026-11-11T10:00:00.000000",
+		"fixed-today-local": "2026-11-10T23:30:00Z", "fixed-tomorrow-local": "2026-11-11T18:00:00.000000Z",
+		"fixed-yesterday-local": "2026-11-10T15:00:00Z", "all-day-overdue": "2026-11-09", "day7-timed": "2026-11-18T10:00:00",
+	} {
+		items = append(items, task{ID: id, Due: &dueDate{Date: date}})
+	}
+	for view, want := range map[string][]string{
+		"today":    {"all-day-today", "fixed-today-local", "floating-fraction", "floating-today"},
+		"overdue":  {"all-day-overdue", "fixed-yesterday-local"},
+		"upcoming": {"all-day-today", "day7-timed", "fixed-today-local", "fixed-tomorrow-local", "floating-fraction", "floating-today"},
+	} {
+		var got []string
+		for _, item := range filterTasks(items, view, "", now) {
+			got = append(got, item.ID)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: got %v, want %v", view, got, want)
+		}
+	}
+	recurring := task{ID: "fixed", Content: "Call", Due: &dueDate{Date: "2026-11-10T23:30:00Z", Timezone: "Europe/Madrid", IsRecurring: true}}
+	if row := taskRow(recurring, contextData{}, loc); row.Subtitle != "2026-11-11 07:30 · ↻" {
+		t.Fatal(row.Subtitle)
+	}
+	v := detailView(&ext.UIRequest{UIParams: wire.UIParams{Locale: "en"}}, pageState{}, recurring, contextData{}, loc)
+	if due := v.Sections[0].Items[1].Text; due != "Due: 2026-11-11 07:30 · Recurring" {
+		t.Fatal(due)
 	}
 }
 
@@ -334,7 +380,7 @@ func TestLocalizedViewsAndCreateReview(t *testing.T) {
 
 func TestDetailBoundsAndNoToken(t *testing.T) {
 	a := newFakeTodoist(t).app()
-	v := detailView(&ext.UIRequest{UIParams: wire.UIParams{Locale: "en", UIVersion: 6}}, pageState{TaskID: "opaque-long-task-1", Mode: "detail"}, task{ID: "opaque-long-task-1", Content: "Task", Description: strings.Repeat("note ", 1500)}, contextData{})
+	v := detailView(&ext.UIRequest{UIParams: wire.UIParams{Locale: "en", UIVersion: 6}}, pageState{TaskID: "opaque-long-task-1", Mode: "detail"}, task{ID: "opaque-long-task-1", Content: "Task", Description: strings.Repeat("note ", 1500)}, contextData{}, time.UTC)
 	if err := wire.CheckView(v); err != nil {
 		t.Fatal(err)
 	}

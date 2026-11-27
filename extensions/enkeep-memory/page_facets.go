@@ -211,7 +211,7 @@ func (a *app) facetPage(t tr, st *store.State, s page) ([]wire.Section, *wire.Fi
 		switch {
 		case selfReported(e):
 			self = append(self, e)
-		case e.Origin == entry.Handwritten:
+		case entry.IsAssistantNote(e.Origin):
 			hand = append(hand, e)
 		case e.Grain == entry.Abstract:
 			abs = append(abs, e)
@@ -433,8 +433,8 @@ func (a *app) entryPage(t tr, st *store.State, id string) *wire.View {
 		facts = append(facts, t.s("你在首次引导里说的", "from your first-run answers"))
 	case entry.SelfReport:
 		facts = append(facts, t.s("你在「关于我」里写的", "from your \"About me\""))
-	case entry.Handwritten:
-		facts = append(facts, t.s("助手的手写记忆", "the assistant's hand-written memory"))
+	case entry.Handwritten, entry.OriginAssistantNote:
+		facts = append(facts, t.s("助手笔记线索", "assistant note clue"))
 	}
 	info = append(info, secondary(strings.Join(facts, " · ")))
 	var flags []string

@@ -74,13 +74,28 @@ type fakeHub struct {
 	created         []sessionRequest
 	requests        []sessionRequest
 	interrupts      []string
+	messages        []sentMessage
 	attached        []string
+	detached        []string
 	createErr       error
+	sendErr         error
+	detachErr       error
 	onCreateSession func(sessionRequest)
 	// interactions are the pending cards; interactionsErr makes the list fail; interactionCalls counts the asks.
 	interactions     []hubInteraction
 	interactionsErr  error
 	interactionCalls int
+	resolved         []resolvedInteraction
+	resolveErr       error
+}
+
+type resolvedInteraction struct {
+	ID  string
+	Res interactionResolution
+}
+
+type sentMessage struct {
+	MachineID, SessionID, Text string
 }
 
 func newFakeHub() *fakeHub {
@@ -138,11 +153,28 @@ func (f *fakeHub) Interrupt(_ context.Context, _ string, sessionID string) error
 	return nil
 }
 
+func (f *fakeHub) SendMessage(_ context.Context, machineID, sessionID, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages = append(f.messages, sentMessage{machineID, sessionID, text})
+	return f.sendErr
+}
+
 func (f *fakeHub) AttachTodo(_ context.Context, todoID, _ string, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attached = append(f.attached, todoID+"/"+sessionID)
 	return nil
+}
+
+func (f *fakeHub) DetachTodo(ctx context.Context, todoID, _ string, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.detached = append(f.detached, todoID+"/"+sessionID)
+	return f.detachErr
 }
 
 func (f *fakeHub) Interactions(context.Context) ([]hubInteraction, error) {
@@ -152,11 +184,44 @@ func (f *fakeHub) Interactions(context.Context) ([]hubInteraction, error) {
 	return append([]hubInteraction(nil), f.interactions...), f.interactionsErr
 }
 
+func (f *fakeHub) ResolveInteraction(_ context.Context, id string, res interactionResolution) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.resolveErr != nil {
+		return f.resolveErr
+	}
+	f.resolved = append(f.resolved, resolvedInteraction{ID: id, Res: res})
+	var kept []hubInteraction
+	var sid string
+	for _, ix := range f.interactions {
+		if ix.ID == id {
+			sid = ix.SessionID
+			continue
+		}
+		kept = append(kept, ix)
+	}
+	f.interactions = kept
+	if sid != "" {
+		if s := f.sessions[sid]; s != nil {
+			s.PendingInteractions = 0
+			s.State = "working"
+		}
+	}
+	return nil
+}
+
 // set changes a session the way the hub would report it.
 func (f *fakeHub) set(id string, change func(s *hubSession)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	change(f.sessions[id])
+}
+
+func (f *fakeHub) turnFails(id, updatedAt, text string) {
+	f.set(id, func(s *hubSession) {
+		s.State, s.UpdatedAt, s.TurnError, s.TurnErrorKind = "idle", updatedAt, text, "transient"
+		s.BackgroundWorking = false
+	})
 }
 
 // turnEnds makes the session's turn end with reply.

@@ -895,7 +895,7 @@ func TestPage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if raw := checkView(t, v); !strings.Contains(raw, "还没有条目") {
+		if raw := checkView(t, v); !strings.Contains(raw, "还没有订阅任何网站") || !strings.Contains(raw, "preview:"+exampleRoute) {
 			t.Fatalf("empty page v%d: %s", version, raw)
 		}
 	}
@@ -906,7 +906,7 @@ func TestPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := checkView(t, res.View)
-	if !strings.Contains(raw, "预览 · /github/issue/example/repo") || !strings.Contains(raw, "Second issue \\u0026 more") {
+	if !strings.Contains(raw, "先看看 · /github/issue/example/repo") || !strings.Contains(raw, "Second issue \\u0026 more") {
 		t.Fatalf("preview page %s", raw)
 	}
 	res, _ = a.action(ctx, uiRequest(4, "subscribe", res.View.State, map[string]string{"route": "/github/issue/example/repo", "tag": "开发"}))
@@ -919,7 +919,7 @@ func TestPage(t *testing.T) {
 	// the overview groups by tag and counts unread
 	res, _ = a.action(ctx, uiRequest(4, "back", res.View.State, nil))
 	raw = checkView(t, res.View)
-	if !strings.Contains(raw, "订阅 · 开发") || !strings.Contains(raw, `"label":"未读","value":"2"`) {
+	if !strings.Contains(raw, "我订阅的 · 开发") || !strings.Contains(raw, `"label":"未读文章","value":"2"`) {
 		t.Fatalf("overview %s", raw)
 	}
 
@@ -948,11 +948,11 @@ func TestPage(t *testing.T) {
 	// refresh, ping and unsubscribe from the page; an old app gets no newer components
 	res, _ = a.action(ctx, uiRequest(1, "refresh", "", nil))
 	raw = checkView(t, res.View)
-	if !strings.Contains(res.Toast, "刷新好了") || strings.Contains(raw, "stat_grid") || strings.Contains(raw, "segmented") || strings.Contains(raw, `"empty"`) {
+	if !strings.Contains(res.Toast, "检查完了") || strings.Contains(raw, "stat_grid") || strings.Contains(raw, "segmented") || strings.Contains(raw, `"empty"`) {
 		t.Fatalf("v1 page %s %s", res.Toast, raw)
 	}
 	res, _ = a.action(ctx, uiRequest(4, "ping", "", nil))
-	if res.Toast != "实例连通" {
+	if res.Toast != "能连上 RSSHub" {
 		t.Fatalf("ping %s", res.Toast)
 	}
 	res, _ = a.action(ctx, uiRequest(4, "unsubscribe:"+fd.ID, "", nil))

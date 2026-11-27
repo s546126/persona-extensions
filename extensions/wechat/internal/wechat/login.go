@@ -3,6 +3,7 @@ package wechat
 import (
 	"context"
 	"errors"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -63,6 +64,7 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 		if ilink.Retryable(err) {
 			return p.prompt(b.lang()), nil // asked again in a moment
 		}
+		log.Printf("wechat: login poll failed: %v", err)
 		b.forgetQR(p) // this code cannot succeed any more: the next step starts over with a new one
 		return wire.ConnectorPrompt{}, err
 	}

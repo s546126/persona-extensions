@@ -240,9 +240,19 @@ func (c *Curator) unit(ctx context.Context, kind string, e wire.KBEntry, day str
 		return Unit{}, false, err
 	}
 	for _, m := range r.Messages {
+		// A sent-as-user message that the user later recalled is no longer evidence of anything.
+		if !m.RecalledAt.IsZero() {
+			continue
+		}
 		// A line under the user's name that an agent wrote is not the user's: it is relabelled here, once, so the
 		// triage, the checks and the prompts all see it as someone else's.
-		u.Lines = append(u.Lines, voice.Relabel(norm.Parse(m.N, m.Text)))
+		l := voice.Relabel(norm.Parse(m.N, m.Text))
+		// With sent.read, the hub marks archived messages Persona sent in the user's name: keep them as context
+		// under Ghost so AI-drafted sends are never taken for the user's own words.
+		if m.SentBy != "" && l.Speaker == norm.Me {
+			l.Speaker = voice.Ghost
+		}
+		u.Lines = append(u.Lines, l)
 	}
 	if isCode(u.Meta) {
 		u.Lines = voice.AgentThread(u.Lines)

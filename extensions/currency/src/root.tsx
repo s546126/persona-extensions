@@ -20,7 +20,11 @@ export function Root(options: RootOptions): Node {
       }
       return callback(values => {
         if (id === "refresh") setRefresh(previous => previous + 1);
-        else setState(previous => transition(previous, id, values));
+        else setState(previous => {
+          const nextState = transition(previous, id, values);
+          if (nextState !== previous) setRefresh(0);
+          return nextState;
+        });
       }, { submit: true });
     } });
 }

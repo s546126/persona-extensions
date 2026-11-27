@@ -23,6 +23,7 @@ import (
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/model"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/overview"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/profile"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/signals"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 )
 
@@ -328,8 +329,14 @@ func addDay(day string, n int) string {
 	return t.AddDate(0, 0, n).Format("2006-01-02")
 }
 
-// overviewStatus is enkeep_overview_status's text.
+// overviewStatus is enkeep_overview_status's text without a violation window.
 func (a *app) overviewStatus() string {
+	return a.overviewStatusRange("", "", "")
+}
+
+// overviewStatusRange is enkeep_overview_status's text; when from, to, or query is set, it appends per-contract
+// violation recurrences and rates per 100 ask/decision cards for [from, to].
+func (a *app) overviewStatusRange(from, to, query string) string {
 	if a.ov == nil {
 		return "The overview is off: its state could not be read (see the hub's log)."
 	}
@@ -389,5 +396,32 @@ func (a *app) overviewStatus() string {
 		}
 	}
 	fmt.Fprintf(&b, "\nmemory.entries: %d overview entr(ies), %d standing.", len(ex), standing)
+	if from != "" || to != "" || query != "" {
+		cards, asks, days, _ := signals.AsksInRange(a.c.St.Dir, from, to)
+		st, _ := a.snapshotState()
+		stats := overview.ContractViolations(st, s, from, to, cards)
+		q := strings.ToLower(query)
+		fmt.Fprintf(&b, "\nContract violations (%s..%s, %d day(s) in signals, %d ask/decision card(s), %d total ask(s)):", from, to, days, cards, asks)
+		shown := 0
+		for _, v := range stats {
+			if q != "" && !strings.Contains(strings.ToLower(v.ID+" "+v.Text), q) {
+				continue
+			}
+			if q == "" && v.Recurrences == 0 {
+				continue
+			}
+			shown++
+			if cards > 0 {
+				fmt.Fprintf(&b, "\n- [%s] (%s, pol=%s, hard=%t) recurrences=%d (%.2f/100 cards, days=%v, all_time=%d): %s",
+					v.ID, v.Kind, v.Polarity, v.Hard, v.Recurrences, v.Per100Cards, v.Days, v.TotalAllTime, v.Text)
+			} else {
+				fmt.Fprintf(&b, "\n- [%s] (%s, pol=%s, hard=%t) recurrences=%d (cards=0, days=%v, all_time=%d): %s",
+					v.ID, v.Kind, v.Polarity, v.Hard, v.Recurrences, v.Days, v.TotalAllTime, v.Text)
+			}
+		}
+		if shown == 0 {
+			fmt.Fprintf(&b, "\n- (no matching contract recurrences in window; %d active non-sensitive contract(s) checked)", len(stats))
+		}
+	}
 	return b.String()
 }

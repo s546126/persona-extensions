@@ -54,8 +54,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), func() (string, error) {
+	keyData, _ := json.Marshal(in)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 		item, err := a.client.create(ctx, in.CollectionID, in.Title, in.Text)
 		if err != nil {
 			return "", err

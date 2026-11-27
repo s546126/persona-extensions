@@ -134,3 +134,27 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     assert.ok(JSON.stringify(view).includes("rails@8.1.4.1"));
   } finally { h.p.close(); }
 });
+
+test("ExactJSON rejects limit: 0, unknown tool checks before args, and refresh resets on navigation", async () => {
+  const h = await setup();
+  try {
+    const zeroLimit = await h.call("connector.tools.call", { name: "rubygems_search", args: { query: "rails", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
+    const unknownTool = await h.call("connector.tools.call", { name: "rubygems_unknown", args: { limit: "bad" } });
+    assert.equal(unknownTool.error?.code, "unknown_method");
+
+    const searchPath = "/api/v1/search.json?query=rails";
+    await h.call("ui.page.mount", { session: "refresh-reset", params: { contribution: "rubygems", locale: "en", ui_version: 1 } });
+    let snap = await settled(h, "refresh-reset", "rubygems-welcome-text");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "rubygems-submit", { query: "rails" }) });
+    snap = await settled(h, "refresh-reset", "rails@8.1.4.1");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "open-rails") });
+    snap = await settled(h, "refresh-reset", "gem install rails -v 8.1.4.1");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "rubygems-refresh") });
+    snap = await settled(h, "refresh-reset", "gem install rails -v 8.1.4.1");
+    const hitsBeforeBack = h.fixture.hits.get(searchPath) ?? 0;
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "rubygems-back") });
+    await settled(h, "refresh-reset", "rails@8.1.4.1");
+    assert.equal(h.fixture.hits.get(searchPath), hitsBeforeBack, "refresh must reset after navigating back");
+  } finally { h.p.close(); }
+});

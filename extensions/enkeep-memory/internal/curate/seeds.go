@@ -17,7 +17,6 @@ import (
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/verify"
-	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/voice"
 )
 
 // Seeds (unified memory design v2 §11.2; seed-import design): the user's own profile and rules confirmed elsewhere
@@ -113,41 +112,38 @@ const (
 	sameSeedText  = 0.85
 )
 
-// seedCatRules are the first two filters per category: a source category (label) in it, and words in a text that
-// put it there, kept to words about the person's own life (voice.Finance adds the money notices, legalWords the
-// identity papers and legal matters).
-var seedCatRules = []struct {
-	cat          string
-	label, words *regexp.Regexp
+// seedLabelRules maps a seed's explicit source category label for non-work facets (persona/world).
+// Payload sensitivity is handled uniformly by entry.PayloadCategories (0.4.0 §1.6).
+var seedLabelRules = []struct {
+	cat   string
+	label *regexp.Regexp
 }{
-	{entry.CatEmotion, regexp.MustCompile(`(?i)情感|感情|心理|emotion|mental`),
-		regexp.MustCompile(`(?i)抑郁|焦虑|失眠|\b(therapy|depress\w*|anxiety)\b`)},
-	{entry.CatRelationships, regexp.MustCompile(`(?i)恋爱|婚姻|伴侣|家庭|家人|亲属|亲子|relationship|romance|dating|family|parent`),
-		regexp.MustCompile(`(?i)离婚|分手|结婚|恋爱|对象|女友|男友|老婆|老公|妻子|丈夫|父母|爸爸|妈妈|父亲|母亲|孩子|儿子|女儿|亲戚|` +
-			`\b(divorce|girlfriend|boyfriend|wife|husband)\b`)},
-	{entry.CatFinance, regexp.MustCompile(`(?i)财务|财产|理财|收入|薪|finance|money|salary|income`),
-		regexp.MustCompile(`(?i)买房|购房|房贷|房价|首付|贷款|存款|理财|股票|基金|工资|薪资|薪酬|年薪|年终奖|期权|收入|\b(salary|mortgage|savings)\b`)},
-	{entry.CatHealth, regexp.MustCompile(`(?i)健康|医疗|疾病|身体|health|medical`),
-		regexp.MustCompile(`(?i)怀孕|备孕|生病|住院|手术|吃药|药物|体检|\b(pregnan\w*|illness|diagnos\w*)\b`)},
-	{entry.CatLegalID, regexp.MustCompile(`(?i)证件|法律|legal|identity`), legalWords},
+	{entry.CatEmotion, regexp.MustCompile(`(?i)情感|感情|心理|emotion|mental`)},
+	{entry.CatRelationships, regexp.MustCompile(`(?i)恋爱|婚姻|伴侣|家庭|家人|亲属|亲子|relationship|romance|dating|family|parent`)},
+	{entry.CatFinance, regexp.MustCompile(`(?i)财务|财产|理财|收入|薪|finance|money|salary|income`)},
+	{entry.CatHealth, regexp.MustCompile(`(?i)健康|医疗|疾病|身体|health|medical`)},
+	{entry.CatLegalID, regexp.MustCompile(`(?i)证件|法律|legal|identity`)},
 }
 
-// seedCats are an item's categories by the first two filters: its source label, its category, its words.
-func seedCats(it SeedItem) []string {
+// seedCats computes an imported seed's categories under Payload-First (0.4.0 §1.6): always applies
+// entry.PayloadCategories(facet, it.Text); source sensitive/category labels are added only for non-work facets.
+func seedCats(facet entry.Facet, it SeedItem) []string {
 	var out []string
 	add := func(n string) {
 		if n != "" && !slices.Contains(out, n) {
 			out = append(out, n)
 		}
 	}
-	add(entry.CategoryOf(it.Sensitive))
-	for _, r := range seedCatRules {
-		if r.label.MatchString(it.Category) || r.words.MatchString(it.Text) {
-			add(r.cat)
-		}
+	for _, n := range entry.PayloadCategories(facet, it.Text) {
+		add(n)
 	}
-	if voice.Finance(it.Text) {
-		add(entry.CatFinance)
+	if !entry.IsWorkMethodFacet(facet) {
+		add(entry.CategoryOf(it.Sensitive))
+		for _, r := range seedLabelRules {
+			if r.label.MatchString(it.Category) {
+				add(r.cat)
+			}
+		}
 	}
 	return out
 }
@@ -243,11 +239,12 @@ func (c *Curator) ImportSeeds(ctx context.Context, f SeedFormat, apply bool, wai
 		case verify.Secret(it.Text):
 			skip(it, SeedSecret)
 		default:
-			cands = append(cands, cand{i, it, facet, sc, seedCats(it)})
+			cands = append(cands, cand{i, it, facet, sc, seedCats(facet, it)})
 		}
 		seen[it.ID] = true
 	}
-	// The third filter: the model reads what is left, and its category tags the item too.
+	// The third filter: the model reads what is left, and its category tags non-work facets (work-methodology facets
+	// stay Payload-First to avoid topic/tone mislabeling).
 	if len(cands) > 0 {
 		if c.Model == nil {
 			return r, errors.New("the sensitive check needs the model, which is not available: nothing imported")
@@ -261,6 +258,9 @@ func (c *Curator) ImportSeeds(ctx context.Context, f SeedFormat, apply bool, wai
 			return r, fmt.Errorf("the sensitive check: %w: nothing imported", err)
 		}
 		for i := range cands {
+			if entry.IsWorkMethodFacet(cands[i].facet) {
+				continue
+			}
 			if n := entry.CategoryOf(cats[i]); n != "" && !slices.Contains(cands[i].cats, n) {
 				cands[i].cats = append(cands[i].cats, n)
 			}

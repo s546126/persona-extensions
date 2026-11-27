@@ -92,6 +92,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
 	var fn func() (string, error)
+	var keyArgs any
 	switch name {
 	case "shortcut_create_story":
 		var in createArgs
@@ -101,6 +102,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := in.validate(); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		me, err := a.client.member(ctx)
 		if err != nil {
 			return nil, err
@@ -130,6 +132,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := in.validate(); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		item, err := a.client.story(ctx, in.StoryID)
 		if err != nil {
 			return nil, err
@@ -150,8 +153,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(keyArgs)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

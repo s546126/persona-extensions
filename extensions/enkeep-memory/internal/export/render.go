@@ -180,9 +180,40 @@ func (c *compiler) render(p *plan, texts map[string]string) []file {
 			}
 			parts = append(parts, part{key: "general", heading: c.fw.ProjGen, lines: gen})
 		}
-		for _, f := range []string{"interaction", "tools", "judgement", "workflow", "world"} {
+		// T2 project block assembly (unified design §2.2): goal anchors, project-specific rules,
+		// 1-hop owners/dependencies skeleton, then tools/judgement/workflow/world.
+		var goalEntries, otherWorld []*entry.Entry
+		for _, e := range pr.parts["world"] {
+			if isProjectGoal(e) {
+				goalEntries = append(goalEntries, e)
+			} else {
+				otherWorld = append(otherWorld, e)
+			}
+		}
+		if len(goalEntries) > 0 {
+			parts = append(parts, part{key: "goals", heading: c.fw.ProjParts["goals"], lines: c.lines(goalEntries, texts, true)})
+		}
+		if len(pr.parts["interaction"]) > 0 {
+			heading := c.fw.ProjParts["interaction"]
+			if heading == "" {
+				heading = c.fw.Sections["interaction"]
+			}
+			parts = append(parts, part{key: "interaction", heading: heading, lines: c.lines(pr.parts["interaction"], texts, false)})
+		}
+		if len(pr.skeleton) > 0 {
+			var sl []line
+			for _, s := range pr.skeleton {
+				sl = append(sl, line{text: s})
+			}
+			parts = append(parts, part{key: "skeleton", heading: c.fw.ProjParts["skeleton"], lines: sl})
+		}
+		for _, f := range []string{"tools", "judgement", "workflow", "world"} {
+			src := pr.parts[f]
+			if f == "world" {
+				src = otherWorld
+			}
 			var ls []line
-			for _, e := range pr.parts[f] {
+			for _, e := range src {
 				if openCommitment(e) {
 					ls = append(ls, c.commitmentLines([]*entry.Entry{e})...)
 				} else {
@@ -481,13 +512,52 @@ func capList(xs []string, bytes int) []string {
 	return xs
 }
 
-var notSlugRune = regexp.MustCompile(`[^\p{L}\p{N}]+`)
+var (
+	notSlugRune    = regexp.MustCompile(`[^\p{L}\p{N}]+`)
+	trailingParens = regexp.MustCompile(`\s*[（(][^（()）]*[)）]\s*$`)
+)
+
+// stripProjectDisplay removes display-form decorations ("名称（别名）：一句话" → "名称") before matching or slugging,
+// mirroring the hub's kb.FindProject displayBases rule.
+func stripProjectDisplay(name string) string {
+	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(name), "project:"))
+	if i := strings.Index(s, "："); i > 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	for i := 0; i < 4; i++ {
+		next := strings.TrimSpace(trailingParens.ReplaceAllString(s, ""))
+		if next == "" || next == s {
+			break
+		}
+		s = next
+	}
+	return s
+}
+
+func isProjectGoal(e *entry.Entry) bool {
+	if e == nil || e.Facet != entry.World || openCommitment(e) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(e.Type)) {
+	case "goal", "objective", "target", "milestone", "decision", "decided":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(e.Predicate)) {
+	case "decided", "decides":
+		return true
+	}
+	return false
+}
 
 // KBSlug is a project name as the knowledge base makes its directory name and the hub looks exit D files up by
 // (kb.Slug): lower case, every run of characters that are neither letters nor digits (of any script) one hyphen, no
 // hyphen at either end, at most 40 characters.
 func KBSlug(name string) string {
-	return cutRunes(strings.Trim(notSlugRune.ReplaceAllString(strings.ToLower(name), "-"), "-"), 40)
+	base := stripProjectDisplay(name)
+	if base == "" {
+		base = name
+	}
+	return cutRunes(strings.Trim(notSlugRune.ReplaceAllString(strings.ToLower(base), "-"), "-"), 40)
 }
 
 var projectSlugRe = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N}-]{0,79}$`)

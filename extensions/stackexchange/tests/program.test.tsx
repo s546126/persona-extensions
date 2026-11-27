@@ -48,6 +48,9 @@ test("protocol initialization, localized tools and unknown contributions are SDK
     assert.equal((await h.call("connector.unsupported", {})).error.code, "unknown_method");
     assert.ok((await h.call("connector.tools.list", {})).result.tools[0].description.includes("検索"));
     assert.ok((await h.call("connector.tools.call", { name: "stackexchange_search", args: { query: "bad\n" } })).error);
+    assert.equal((await h.call("connector.tools.call", { name: "stackexchange_search", args: { query: "typescript", limit: 0 } })).error.code, "invalid");
+    assert.equal((await h.call("connector.tools.call", { name: "stackexchange_answer", args: { question_id: 0 } })).error.code, "invalid");
+    assert.equal((await h.call("connector.tools.call", { name: "unknown_tool", args: { site: "__proto__" } })).error.code, "unknown_method");
   } finally { h.p.close(); }
 });
 

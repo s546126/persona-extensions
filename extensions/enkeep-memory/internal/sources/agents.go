@@ -282,17 +282,32 @@ func (s *Source) itemLine(it hubapi.Item, byPersona bool) string {
 	switch it.Kind {
 	case hubapi.KindUser:
 		if byPersona {
-			return at + " " + SpeakerPersona + ": " + oneLine(clip(it.Text, noticeCut))
+			clean := relay.StripBoilerplate(it.Text)
+			if clean == "" {
+				return ""
+			}
+			return at + " " + SpeakerPersona + ": " + oneLine(clip(clean, noticeCut))
 		}
 		switch relay.Classify(it.Text) {
 		case relay.Persona:
-			return at + " " + SpeakerPersona + ": " + oneLine(clip(it.Text, noticeCut))
+			clean := relay.StripBoilerplate(it.Text)
+			if clean == "" {
+				return ""
+			}
+			return at + " " + SpeakerPersona + ": " + oneLine(clip(clean, noticeCut))
 		case relay.Test:
 			return at + " " + SpeakerTest + ": " + oneLine(clip(it.Text, noticeCut))
 		}
 		own, n := relay.SplitPaste(it.Text)
 		if own == "" && n > 0 {
 			return at + " " + SpeakerPaste + ": " + oneLine(clip(it.Text, noticeCut))
+		}
+		own = relay.StripBoilerplate(own)
+		if own == "" {
+			if n > 0 {
+				return at + " " + SpeakerPaste + ": " + oneLine(clip(it.Text, noticeCut))
+			}
+			return ""
 		}
 		if n > 0 {
 			own += " " + relay.PasteMark(n)
@@ -308,7 +323,11 @@ func (s *Source) itemLine(it hubapi.Item, byPersona bool) string {
 	case hubapi.KindNotice:
 		switch {
 		case it.Notice == "persona" || strings.HasPrefix(it.Notice, "injected:") || strings.HasPrefix(it.Notice, "source:"):
-			return at + " " + SpeakerPersona + ": " + oneLine(clip(it.Text, noticeCut))
+			clean := relay.StripBoilerplate(it.Text)
+			if clean == "" {
+				return ""
+			}
+			return at + " " + SpeakerPersona + ": " + oneLine(clip(clean, noticeCut))
 		case it.Notice == "paste":
 			return at + " " + SpeakerPaste + ": " + oneLine(clip(it.Text, noticeCut))
 		case it.Notice == "peer" || strings.HasPrefix(it.Notice, "from:"):

@@ -39,8 +39,8 @@ interaction or judgement.
 
 - day, chat, chat_name, kind (dm | group | mail | assistant | agent | doc | meeting | about | memory | …), source:
   where the unit comes from. Use them as hints; judge by the content.
-- origin: behavior (what people said and did), self_report (the user's own notes about themself) or handwritten (the
-  assistant's memory file about the user).
+- origin: behavior (what people said and did), self_report (the user's own notes about themself) or assistant_note (the
+  assistant's memory file: T2 secondary clue for tools/interaction/workflow only, never the user's own persona or judgement).
 - owner_names: names the user goes by.
 - lines: the lines of the day, each with its number n, speaker and text, and who when it is known:
   - speaker "我" (who "self") is the user. A "我" line whose text starts with "[转达原话]" is the user's words that a
@@ -188,21 +188,35 @@ interests, …). Never write a card line for the user (that is persona), and nev
 who.
 
 **persona** (the user as a person). A way of thinking that is about the user rather than about one choice (what
-they value, how they react, what they pay attention to) may be persona with a dimension. From the user's own lines, the user's "about me" notes, or the assistant's memory
-file: role and responsibilities, abilities and weak spots (as the user puts them), situation and what they are pushing
+they value, how they react, what they pay attention to) may be persona with a dimension. From the user's own lines or
+the user's "about me" notes only (never from agent/supervisor sessions or assistant memory files): role and
+responsibilities, abilities and weak spots (as the user puts them), situation and what they are pushing
 forward now, goals, what they value, how they like to communicate, and in chit-chat their preferences, habits and
 opinions. type: a short key (role, responsibility, ability, situation, current_work, goal, values, communication,
-preference, opinion, habit, …). Only what the user says or does about themself; another person's view of the user is
-not persona. Persona is about the person, not their surroundings: the state of a machine, a service or a project
-they use is a world fact (or a tools observation when it changes how the AI uses it), never persona. A passing
-interest seen once ("looked at X") stays a single observation of what the user did; do not word it as a lasting
-trait.
+preference, opinion, habit, …). Only what the user says or does about themself; another person's view of the user, or an
+AI supervisor/agent describing its own role ("担任某平台主管/统筹"), is never persona. Persona is about the person, not
+their surroundings: the state of a machine, a service or a project they use is a world fact (or a tools observation when
+it changes how the AI uses it), never persona. A passing interest seen once ("looked at X") stays a single observation of
+what the user did; do not word it as a lasting trait.
 
 ### fields every observation has
 
 - domain: work or life, judged by the topic, not the source.
-- sensitive: emotion, finance, health or family when the content is in one of these categories, else empty. Label it
-  honestly; a program decides what is kept.
+- sensitive: Payload-First rule — label emotion, finance, health or family ONLY when this entry's own text directly
+  discloses the user's personal privacy facts, NEVER because of the conversation topic or the user's annoyed tone when
+  correcting the AI:
+  - emotion: personal psychological/emotional vulnerability or private inner feelings (anxiety, depression, insomnia,
+    personal low point, intimate-relationship feelings) ONLY. Never label work-interaction frustration ("反复发问让用户不满",
+    "嫌解释绕要求说人话", impatience with AI) as emotion.
+  - health: personal body metrics, symptoms, diagnoses, medication, medical visits or exams ONLY. Never label general
+    tooling, data-export or reporting methodology discussed in a health chat ("要例行方案不要一次性导出", "只给覆盖天数和结论") as health.
+  - finance: personal salary, assets, mortgage, personal investments, tax or private bank/card bills ONLY. Never label
+    AI model/token cost awareness or project engineering budget as finance.
+  - legal_id (tagged automatically): personal identity papers, visas, private contracts or lawsuits ONLY — never open-source
+    licenses, repo permissions or API token rules.
+  - family / relationships: partner, family, close friends or private personal evaluations ONLY — never public org
+    structure or project collaboration roles.
+  Label honestly; leave empty when the entry's own payload is general work methodology.
 - scope: global, or the project, runtime (an assistant or agent product), machine or tool it holds for.
   A rule or a choice that holds only for one person, project, machine or chat hangs on it: give that project,
   machine or tool in scope, and that person or project by the name known_entities gives in impact.object (a choice
@@ -253,11 +267,19 @@ pleasantry ("thanks, boss", "master", "sir") is not a relation.
 
 - origin self_report (the user's own notes): interaction, tools and persona only. Never judgement or workflow: what
   people say about how they choose is not how they choose.
-- origin handwritten (the assistant's memory file): any facet; quote the file's lines.
+- origin assistant_note (the assistant's memory file): T2 secondary clues for tools, interaction and workflow only;
+  never persona or judgement; quote the file's lines.
+- agent/tool sessions (kind agent or segments): tools experience and repository/system topology facts only; never
+  persona, workflow or people cards; interaction or judgement only when the user themself directly typed a correction.
+- automated/scheduled cron prompts, batch patrols and third-person export scripts ("每日导出…摘要发给用户"): skip
+  completely; never extract workflow or persona from them.
 - tier own or absent: everything. tier engaged (a group the user takes part in, a mention, a document): everything;
   judgement, workflow, persona and the user's asks only from the user's own lines. tier code (a pull request or issue
   thread): tools, judgement, workflow and interaction from the user's own lines; no facts. tier background (a group the
   user keeps quiet in): only people observations, mentions and assertions; the user's own lines may still give persona.
+- ephemeral dynamics (scheduled calls/meetings, TODO sends, PR/issue progress, temporary blockers, passing status):
+  mark clearly as ephemeral (reach one_off, horizon days, fact kind status) or leave out; never word a one-off event as
+  a lasting person/project profile fact or stable workflow.
 
 ## Rules (checked by a program; anything that breaks one is thrown away)
 

@@ -7,12 +7,14 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/nwverse/persona-extensions/extensions/wechat/internal/wechat/ilink"
+	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
 
@@ -597,7 +599,7 @@ func TestSendRunningAcrossAnUnbind(t *testing.T) {
 		return r.bot.client != nil && r.bot.st.Creds != nil && r.bot.st.Creds.UserID == other && r.bot.st.Context != ""
 	})
 	before := r.tally()
-	if _, err := r.bot.Send(context.Background(), p); err != nil { // the hub sends the ref again
+	if _, err := r.bot.Send(context.Background(), p); err != nil { // a later send of the ref, for the WeChat bound now
 		t.Fatal(err)
 	}
 	if got := r.tally().minus(before); got != (tally{sends: 2, uploadURLs: 1, cdn: 1}) {
@@ -718,5 +720,212 @@ func TestProgramQueuedSendSharesTheDeadline(t *testing.T) {
 	}
 	if took > sendDeadline+400*time.Millisecond {
 		t.Fatalf("B took %s: its wait for A and its own send took more than its %s", took, sendDeadline)
+	}
+}
+
+// Through the program: B came in for one WeChat and waits for an earlier send A of its ref (other content) while that
+// WeChat is unbound and another bound. However the two end, neither goes to the WeChat bound now, and both answer
+// cannot_send, which the hub does not try again (a retry would come in for the WeChat bound now):
+//   - A ends first (it ran across the rebind and failed): B's turn comes, and it sends nothing.
+//   - B's call ends first, A still holding the ref (errStillSending: its time ran out, or the hub gave up on it).
+func TestProgramQueuedSendAcrossARebind(t *testing.T) {
+	for _, bFirst := range []bool{false, true} {
+		name := "A ends first"
+		if bFirst {
+			name = "B's call ends first"
+		}
+		t.Run(name, func(t *testing.T) { queuedSendAcrossARebind(t, bFirst) })
+	}
+}
+
+func queuedSendAcrossARebind(t *testing.T, bFirst bool) {
+	r := pictureSendRig(t)
+	p := &program{bot: r.bot}
+	call := func(ctx context.Context, sp wire.ChannelSendParams) error {
+		sp.Contribution = ID
+		params, _ := json.Marshal(sp)
+		_, err := p.channel(ctx, "send", params)
+		return err
+	}
+	// Only B waits for an earlier send of the ref (A does not): the signal says B has read the binding it came in for.
+	bWaits := make(chan struct{}, 1)
+	p.sent.waiting = func(string) {
+		select {
+		case bWaits <- struct{}{}:
+		default:
+		}
+	}
+	r.ilink.answer("/c2c/upload", fakeAnswer{hang: true}) // A's picture holds the ref until A is cancelled
+	a := wire.ChannelSendParams{Ref: "run-25:1", Text: "甲", Kind: wire.ChannelSendKindAnswer, Images: []wire.ChannelBlob{testPicture(1)}}
+	b := wire.ChannelSendParams{Ref: "run-25:1", Text: "乙", Kind: wire.ChannelSendKindAnswer}
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	aDone, bDone := make(chan error, 1), make(chan error, 1)
+	go func() { aDone <- call(ctxA, a) }()
+	eventually(t, "A's upload", func() bool { return len(r.ilink.cdnUploads()) == 1 })
+	go func() { bDone <- call(ctxB, b) }()
+	select {
+	case <-bWaits: // B came in for the owner's WeChat and waits for A
+	case <-time.After(5 * time.Second):
+		t.Fatal("B did not wait for A")
+	}
+	const other = "other@im.wechat"
+	r.rebindTo(other)
+	select {
+	case err := <-bDone:
+		t.Fatalf("B ended while A still held the ref: %v", err)
+	default:
+	}
+	cannotSend := func(who string, err error) {
+		t.Helper()
+		var ee *ext.Error
+		if !errors.As(err, &ee) || ee.Code != wire.ChannelErrorCodeCannotSend {
+			t.Fatalf("%s after the rebind: %v, want cannot_send", who, err)
+		}
+	}
+	if bFirst {
+		cancelB() // B's wait ends the way its deadline ends it: errStillSending
+		cannotSend("B", <-bDone)
+		select {
+		case err := <-aDone:
+			t.Fatalf("A ended before it was cancelled: %v", err)
+		default:
+		}
+		cancelA()
+		cannotSend("A", <-aDone)
+	} else {
+		cancelA()
+		cannotSend("A", <-aDone)
+		cannotSend("B", <-bDone)
+	}
+	for _, s := range r.ilink.texts() {
+		if s.To == other || s.Text == "乙" {
+			t.Fatalf("B went out after the rebind: %+v", s)
+		}
+	}
+	if pics, _ := r.ilink.sentPictures(t); len(pics) != 0 {
+		t.Fatalf("pictures %+v", pics)
+	}
+}
+
+// A send in a sending generation that ended (the binding changed after the call came in) sends nothing and leaves the
+// ref's round alone.
+func TestSendForAnEarlierBindingSendsNothing(t *testing.T) {
+	r := pictureSendRig(t)
+	gen := r.bot.sendGeneration()
+	r.rebindTo("other@im.wechat")
+	before := r.tally()
+	p := wire.ChannelSendParams{Ref: "run-26:1", Text: "换绑前", Kind: wire.ChannelSendKindAnswer, Images: []wire.ChannelBlob{testPicture(1)}}
+	if _, err := r.bot.sendIn(context.Background(), gen, p); !errors.Is(err, errRebound) {
+		t.Fatalf("a send for the earlier binding: %v", err)
+	}
+	if got := r.tally().minus(before); got != (tally{}) {
+		t.Fatalf("calls %+v, want none", got)
+	}
+	r.bot.mu.Lock()
+	_, rounded := r.bot.rounds[p.Ref]
+	r.bot.mu.Unlock()
+	if rounded {
+		t.Fatal("a send that sent nothing took a round")
+	}
+}
+
+// A ref whose round was dropped (roundsMost later refs) while its progress is kept goes on from the progress: round 2
+// of the ref failed at its second picture, and the hub's retry after the drop sends that picture only, under round 2's
+// client_id.
+func TestSendResumesAfterItsRoundWasDropped(t *testing.T) {
+	r := pictureSendRig(t)
+	ctx := context.Background()
+	const ref = "run-27:1"
+	if _, err := r.bot.Send(ctx, wire.ChannelSendParams{Ref: ref, Text: "甲", Kind: wire.ChannelSendKindAnswer}); err != nil {
+		t.Fatal(err)
+	}
+	p := wire.ChannelSendParams{Ref: ref, Text: "乙", Kind: wire.ChannelSendKindAnswer, Images: []wire.ChannelBlob{testPicture(1), testPicture(2)}}
+	r.ilink.mu.Lock()
+	r.ilink.okUploads, r.ilink.failUploads = 1, 3 // picture 1 goes; picture 2 fails on all three tries
+	r.ilink.mu.Unlock()
+	if _, err := r.bot.Send(ctx, p); err == nil {
+		t.Fatal("round 2 should fail at picture 2")
+	}
+	ids := newSendIDs(ref, owner, 2, splitText(p.Text), p.Images)
+	if pr, ok := r.progressOf(ref); !ok || pr.round != 2 || len(pr.done) != 2 || !pr.done[ids.parts[0]] || !pr.done[ids.images[0]] {
+		t.Fatalf("progress %+v %v: want round 2 with the text and picture 1", pr, ok)
+	}
+	r.bot.mu.Lock()
+	for i := range roundsMost {
+		r.bot.roundLocked("later-"+strconv.Itoa(i), "later")
+	}
+	_, rounded := r.bot.rounds[ref]
+	r.bot.mu.Unlock()
+	if rounded {
+		t.Fatal("the ref's round was not dropped")
+	}
+
+	logs := captureLog(t)
+	before := r.tally()
+	r.ilink.mu.Lock()
+	sentBefore := len(r.ilink.clientIDs)
+	r.ilink.mu.Unlock()
+	if _, err := r.bot.Send(ctx, p); err != nil { // the hub sends the ref again
+		t.Fatal(err)
+	}
+	if got := r.tally().minus(before); got != (tally{sends: 1, uploadURLs: 1, cdn: 1}) {
+		t.Fatalf("the retry made %+v calls, want picture 2 only", got)
+	}
+	r.ilink.mu.Lock()
+	retried := slices.Clone(r.ilink.clientIDs[sentBefore:])
+	r.ilink.mu.Unlock()
+	if !slices.Equal(retried, []string{ids.images[1]}) {
+		t.Fatalf("client_ids %q, want round 2's picture 2", retried)
+	}
+	var got []string
+	for _, s := range r.ilink.texts() {
+		got = append(got, s.Text)
+	}
+	if !slices.Equal(got, []string{"甲", "乙"}) {
+		t.Fatalf("the owner got %q", got)
+	}
+	if pics, plain := r.ilink.sentPictures(t); len(pics) != 2 || !samePicture(plain[1], testPicture(2)) {
+		t.Fatalf("iLink holds %d pictures", len(pics))
+	}
+	if !strings.Contains(logs.String(), `ref="run-27:1" resume text=1/1 image=1/2`) {
+		t.Fatalf("no resume log: %q", logs.String())
+	}
+}
+
+// roundLocked after a ref's round was dropped: with progress kept, the same content keeps the progress's round and other
+// content takes the next; without progress the ref starts at round 1.
+func TestRoundComesBackFromProgress(t *testing.T) {
+	b := New(Options{}, &memSecrets{})
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	drop := func() {
+		for i := range roundsMost {
+			b.roundLocked("later-"+strconv.Itoa(i), "later")
+		}
+		if _, ok := b.rounds["ref"]; ok {
+			t.Fatal("the ref's round was not dropped")
+		}
+	}
+	for want, sum := range []string{"A", "B"} {
+		if n := b.roundLocked("ref", sum); n != want+1 {
+			t.Fatalf("%s: round %d", sum, n)
+		}
+	}
+	b.progress = map[string]sendProgress{"ref": {sum: "B", round: 2}}
+	drop()
+	if n := b.roundLocked("ref", "B"); n != 2 {
+		t.Fatalf("B again after the drop: round %d, want the progress's 2", n)
+	}
+	drop()
+	if n := b.roundLocked("ref", "A"); n != 3 {
+		t.Fatalf("A after the drop: round %d, want 3 (after the progress's round)", n)
+	}
+	b.progress = nil
+	drop()
+	if n := b.roundLocked("ref", "A"); n != 1 {
+		t.Fatalf("without progress: round %d, want 1", n)
 	}
 }

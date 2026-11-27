@@ -77,7 +77,7 @@ type CardFiler interface {
 func pending(s *store.State, day string) map[entry.Facet][]*entry.Entry {
 	out := map[entry.Facet][]*entry.Entry{}
 	for _, e := range s.Entries {
-		if e.Grain != entry.Action || !e.Live() || e.Parent != "" || e.First > day || e.Origin == entry.Handwritten {
+		if e.Grain != entry.Action || !e.Live() || e.Parent != "" || e.First > day {
 			continue
 		}
 		if slices.ContainsFunc(e.Flags, func(f string) bool {
@@ -163,7 +163,7 @@ func recall(s *store.State, a *entry.Entry, top int) []*entry.Entry {
 			if a.Object != "" && norm.Q(a.Object) == norm.Q(e.Object) {
 				v += 2
 			}
-			if e.Origin == entry.Handwritten || e.Origin == entry.SelfReport {
+			if e.Origin == entry.SelfReport {
 				v += 1 // few, and often in another language: shown first among equals
 			}
 			return v + 0.5*math.Log1p(float64(e.Count))
@@ -594,8 +594,8 @@ func (c *Curator) fileInto(a, t *entry.Entry, why string, run *store.Run) {
 	default:
 		if err := c.File(a.ID, t.ID, run.ID); err == nil {
 			run.Counts["consolidate_filed"]++
-			if t.Origin == entry.Handwritten {
-				run.Counts["consolidate_handwritten_counted"]++
+			if t.Origin == entry.SelfReport {
+				run.Counts["consolidate_self_report_counted"]++
 			}
 		}
 	}

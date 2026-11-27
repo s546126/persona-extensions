@@ -15,7 +15,7 @@ func TestPageNotConfigured(t *testing.T) {
 
 func TestPageConfigured(t *testing.T) {
 	v := draw(t, testApp(t, `{"hub_url": "https://persona.example.com/", "path": "/j/abc"}`), 3)
-	says(t, v, "## 在飞书打开 Persona", "url=https%3A%2F%2Fpersona.example.com%2Fj%2Fabc", "飞书 3.41+", "登录", "不向飞书发请求")
+	says(t, v, "## 在飞书打开 Persona", "url=https%3A%2F%2Fpersona.example.com%2Fj%2Fabc", "桌面端飞书 7.5+", "登录", "不向飞书发请求")
 	var link *wire.Component
 	for i := range v.Sections {
 		for j := range v.Sections[i].Items {
@@ -24,7 +24,7 @@ func TestPageConfigured(t *testing.T) {
 			}
 		}
 	}
-	if link == nil || !strings.HasPrefix(link.URL, "https://applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url=") {
+	if link == nil || !strings.HasPrefix(link.URL, "https://applink.feishu.cn/client/web_url/open?mode=appCenter&url=") {
 		t.Fatalf("the link: %+v", link)
 	}
 }

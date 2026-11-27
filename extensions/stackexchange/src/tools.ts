@@ -18,13 +18,31 @@ function answerText(answer: Answer): string {
 }
 function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
-    for (const field of ["query", "site", "tag"]) for (const token of exact.fieldValues(field)) {
-      const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args[field] = value;
+    for (const field of ["query", "site", "tag"]) {
+      const tokens = [...exact.fieldValues(field)];
+      if (tokens.length > 1) throw new ReadError("invalid");
+      if (tokens.length === 1) {
+        const value: unknown = JSON.parse(tokens[0].raw);
+        if (value != null && typeof value !== "string") throw new ReadError("invalid");
+        if (typeof value === "string") args[field] = value;
+      }
     }
-    const limit = exact.int64Fields(["limit", "question_id"]);
-    if (limit.limit !== 0n) args.limit = Number(limit.limit);
-    if (limit.question_id !== 0n) args.question_id = Number(limit.question_id);
+    for (const field of ["limit", "question_id"] as const) {
+      const tokens = [...exact.fieldValues(field)];
+      if (tokens.length > 1) throw new ReadError("invalid");
+      if (tokens.length === 1) {
+        if (tokens[0].raw.trim() === "null") continue;
+        let parsed: bigint;
+        try { parsed = exact.int64Fields([field])[field]; } catch { throw new ReadError("invalid"); }
+        const num = Number(parsed);
+        if (!Number.isSafeInteger(num)) throw new ReadError("invalid");
+        args[field] = num;
+      }
+    }
     return args;
   }
   if (raw == null) return {};
@@ -35,6 +53,7 @@ function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   return value;
 }
 export async function callTool(service: StackExchange, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
+  if (name !== "stackexchange_search" && name !== "stackexchange_answer") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     const site = siteID(args.site);
@@ -44,11 +63,8 @@ export async function callTool(service: StackExchange, name: string, raw: unknow
       const result = await service.search(query, site, tag, limit, false, request.signal);
       return clip((result.questions.length ? result.questions.map(questionLine).join("\n") : t.empty) + `\n${t.attribution}${result.stale ? `\n${errorText(result.stale, service.locale)}` : ""}`, 29_999);
     }
-    if (name === "stackexchange_answer") {
-      const id = questionID(args.question_id), result = await service.answers(id, site, false, request.signal);
-      return clip(answerText(selectedAnswer(result.answers)) + `\n\n${t.attribution}${result.stale ? `\n${errorText(result.stale, service.locale)}` : ""}`, 29_999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    const id = questionID(args.question_id), result = await service.answers(id, site, false, request.signal);
+    return clip(answerText(selectedAnswer(result.answers)) + `\n\n${t.attribution}${result.stale ? `\n${errorText(result.stale, service.locale)}` : ""}`, 29_999);
   } catch (error) {
     if (!signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
     throw error;

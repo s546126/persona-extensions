@@ -131,6 +131,10 @@ func (t tr) sourceLabel(code, name string) string {
 		return t.s("知识库", "Knowledge base")
 	case entry.SrcRecording:
 		return t.s("录音和纪要", "Recordings and minutes")
+	case entry.SrcLedger:
+		return t.s("助手台账", "Assistant ledger")
+	case entry.SrcSent:
+		return t.s("已发消息溯源", "Sent messages provenance")
 	}
 	if name != "" {
 		return code + " " + name

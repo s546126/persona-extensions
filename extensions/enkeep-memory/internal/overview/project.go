@@ -3,6 +3,7 @@ package overview
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -39,11 +40,77 @@ const (
 
 // evid is one piece of evidence under an entry.
 type evid struct {
-	entry  string // the curated entry it is under (an action, or the class itself)
-	key    string // ref@day: one unit on one day, the independent unit of evidence
-	day    string
-	group  string // source kind (sourceGroup)
-	quoted bool
+	entry    string // the curated entry it is under (an action, or the class itself)
+	key      string // ref@day: one unit on one day, the independent unit of evidence
+	day      string
+	group    string // source kind (sourceGroup)
+	quoted   bool   // non-empty quote attributed to the user (not reported, not assistant/bot, not another person)
+	self     bool   // explicitly WhoSelf && !Reported
+	quoteKey string // normalised quote text, to reject identical quotes repeated across entries
+}
+
+// isUserQuote reports whether ev carries a usable quote by the user themselves (never reported speech, another person,
+// or an assistant/bot turn). Unresolved Who ("") is accepted for legacy/test fixtures unless Role marks it non-user.
+func isUserQuote(ev entry.Evidence) bool {
+	if strings.TrimSpace(ev.Quote) == "" || ev.Reported {
+		return false
+	}
+	if ev.Who != "" && ev.Who != entry.WhoSelf {
+		return false
+	}
+	switch ev.Role {
+	case "assistant", "agent_draft", "bot":
+		return false
+	}
+	return true
+}
+
+// contractHardCue mirrors entry.hardCue for cross-entry L1 contract hard-rule detection.
+var contractHardCue = regexp.MustCompile(`以后(都|一律|别|不要|不许)|一律|永远不|绝不|再也不|别再|不要再|不许|他妈|我操|傻逼|[？?]{3,}|(?i)\bnever (do|ask)|\bstop (doing|asking)`)
+
+// properNounShellRe catches concrete single-incident hardware/software/external-product proper nouns that should
+// not leak into de-shelled universal principles or universal collaboration contracts (v0.4.0 §1.4).
+var properNounShellRe = regexp.MustCompile(`(?i)\b(owc|thunderbolt|sonoma|sequoia|ventura|whoop|feishu[-_]cli|discord|slack|telegram|whatsapp|notion|linear|jira|github\s+actions|docker\s+hub|homebrew)\b`)
+
+// hasProperNounOrOps reports whether any of texts names a concrete host, tool, CLI command, API, repository,
+// platform-specific workflow mechanism, or single-incident hardware/software shell (v0.4.0 §1.3/§1.4).
+func hasProperNounOrOps(texts ...string) bool {
+	joined := strings.TrimSpace(strings.Join(texts, " "))
+	if joined == "" {
+		return false
+	}
+	if entry.ClassifyOpsRunbook(&entry.Entry{Facet: entry.Interaction, Text: joined}) {
+		return true
+	}
+	return properNounShellRe.MatchString(joined)
+}
+
+// patternIsOpsRunbook reports whether p belongs in KindOpsRunbook rather than KindPrinciple or KindContract.
+func patternIsOpsRunbook(p *Pattern) bool {
+	if p == nil {
+		return false
+	}
+	if p.Kind == KindOpsRunbook || p.Facet == string(entry.Tools) {
+		return true
+	}
+	if p.Kind == KindProfileCore {
+		return false
+	}
+	return hasProperNounOrOps(p.Text, p.Situation, p.Choice, p.Exception)
+}
+
+// isS3S4Only reports whether e has evidence and every piece of evidence comes solely from S3/S4 agent/tool sessions
+// (never T0 self-report/onboarding or T1 direct user chat/card/todo/message sources).
+func isS3S4Only(e *entry.Entry) bool {
+	if e == nil || entry.IsTrueUserOwned(e) || len(e.Evidence) == 0 {
+		return false
+	}
+	for _, ev := range e.Evidence {
+		if ev.Source != entry.SrcAgent && ev.Source != entry.SrcTools {
+			return false
+		}
+	}
+	return true
 }
 
 // sourceGroup is the kind of source a code belongs to: the user's chats with the assistant, cards and to-dos, agent
@@ -52,11 +119,11 @@ func sourceGroup(code string) string {
 	switch code {
 	case entry.SrcAssistant:
 		return "chat"
-	case entry.SrcAsk, entry.SrcTodo:
+	case entry.SrcAsk, entry.SrcTodo, entry.SrcLedger:
 		return "card"
 	case entry.SrcAgent, entry.SrcTools:
 		return "agent"
-	case entry.SrcChat:
+	case entry.SrcChat, entry.SrcSent:
 		return "messages"
 	case entry.SrcMemory, entry.SrcAbout:
 		return "self"
@@ -114,8 +181,21 @@ func evidenceOf(st *store.State, e *entry.Entry, cutoff string) []evid {
 			if ev.Day == "" || cutoff != "" && ev.Day >= cutoff {
 				continue
 			}
-			out = append(out, evid{entry: x.ID, key: ev.Ref + "@" + ev.Day, day: ev.Day, group: sourceGroup(ev.Source),
-				quoted: strings.TrimSpace(ev.Quote) != ""})
+			q := strings.TrimSpace(ev.Quote)
+			uq := isUserQuote(ev)
+			qk := ""
+			if uq {
+				qk = norm.Q(q)
+			}
+			out = append(out, evid{
+				entry:    x.ID,
+				key:      ev.Ref + "@" + ev.Day,
+				day:      ev.Day,
+				group:    sourceGroup(ev.Source),
+				quoted:   uq,
+				self:     uq && ev.Who == entry.WhoSelf,
+				quoteKey: qk,
+			})
 		}
 		if depth >= 2 {
 			return
@@ -132,14 +212,16 @@ func evidenceOf(st *store.State, e *entry.Entry, cutoff string) []evid {
 
 // tally is a set of evidence counted for the gate.
 type tally struct {
-	scenes   []string // "p:<project>" and "s:<source kind>"
-	sources  []string // quoted ref@day
-	weeks    []string
-	groups   []string
-	projects []string
-	people   []string
-	last     string
-	unquoted int // entries among the evidence without a quoted line
+	scenes       []string // "p:<project>" and "s:<source kind>"
+	sources      []string // quoted ref@day
+	uniqueQuotes []string // distinct normalised user quote texts
+	weeks        []string
+	groups       []string
+	projects     []string
+	people       []string
+	last         string
+	unquoted     int  // entries among the evidence without a quoted line
+	hasUserOwned bool // at least one live evidence entry is user-edited, pinned or handwritten
 }
 
 // count tallies the evidence of the entries ids, before cutoff.
@@ -154,6 +236,9 @@ func count(st *store.State, ids []string, cutoff string) tally {
 		e := st.Entries[id]
 		if e == nil || !e.Live() {
 			continue
+		}
+		if isUserOwned(e) {
+			t.hasUserOwned = true
 		}
 		evs := evidenceOf(st, e, cutoff)
 		quoted := false
@@ -175,6 +260,7 @@ func count(st *store.State, ids []string, cutoff string) tally {
 			add(&t.scenes, "s:"+ev.group)
 			add(&t.groups, ev.group)
 			add(&t.sources, ev.key)
+			add(&t.uniqueQuotes, ev.quoteKey)
 			add(&t.weeks, isoWeek(ev.day))
 			if ev.day > t.last {
 				t.last = ev.day
@@ -195,6 +281,124 @@ func count(st *store.State, ids []string, cutoff string) tally {
 	return t
 }
 
+// crossScene is true only when the evidence spans at least MinScenes distinct projects OR at least MinScenes distinct
+// source kinds. One project seen through one source kind is a single scene, never two.
+func (t tally) crossScene() bool {
+	return len(t.projects) >= MinScenes || len(t.groups) >= MinScenes
+}
+
+// sceneCount is the effective scene spread: 0 when empty, 1 when confined to a single project and single source kind,
+// and len(projects)+len(groups) once it truly spans multiple projects or multiple source kinds.
+func (t tally) sceneCount() int {
+	if t.crossScene() {
+		return len(t.projects) + len(t.groups)
+	}
+	if len(t.projects) > 0 || len(t.groups) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// contractHard computes whether a collaboration contract is hard and its violation_count (distinct days the user
+// corrected it across all member entries), respecting cutoff.
+// A contract is hard only when:
+//   - the user corrected it on >=2 distinct days within a 7-day window; OR
+//   - the user corrected it on >=3 distinct days overall; OR
+//   - a ban/anger cue appears AND is backed by repeated sightings (>=2 days or count>=2) or explicit user ownership/confirmation.
+//
+// A single-day casual phrasing cue with violation_count==1 stays a regular (non-hard) contract.
+func contractHard(st *store.State, ids []string, cutoff string) (hard bool, violations int) {
+	seen := map[string]bool{}
+	corrDays := map[string]bool{}
+	cueHits := 0
+	userConfirmed := false
+	totalCount := 0
+	var walk func(e *entry.Entry, depth int)
+	walk = func(e *entry.Entry, depth int) {
+		if e == nil || !e.Live() || seen[e.ID] || entry.IsAssistantNote(e.Origin) {
+			return
+		}
+		seen[e.ID] = true
+		totalCount += max(e.Count, 1)
+		if isUserOwned(e) || lastUserMarkRight(e) {
+			userConfirmed = true
+		}
+		isCorr := (e.Facet == entry.Interaction || e.Facet == entry.Tools) &&
+			(strings.EqualFold(e.Type, "correction") || strings.TrimSpace(e.Rejected) != "")
+		for _, ev := range e.Evidence {
+			if ev.Day == "" || (cutoff != "" && ev.Day >= cutoff) {
+				continue
+			}
+			if ev.Who != entry.WhoSelf || ev.Reported {
+				continue
+			}
+			if isCorr {
+				corrDays[ev.Day] = true
+				if contractHardCue.MatchString(ev.Quote) {
+					cueHits++
+				}
+			}
+		}
+		if depth >= 2 {
+			return
+		}
+		for _, mid := range e.Members {
+			walk(st.Entries[mid], depth+1)
+		}
+	}
+	for _, id := range ids {
+		walk(st.Entries[id], 0)
+	}
+	var days []string
+	for d := range corrDays {
+		days = append(days, d)
+	}
+	sort.Strings(days)
+	if len(days) >= 3 {
+		hard = true
+	}
+	for i := 1; !hard && i < len(days); i++ {
+		if a, err1 := time.Parse("2006-01-02", days[i-1]); err1 == nil {
+			if b, err2 := time.Parse("2006-01-02", days[i]); err2 == nil && b.Sub(a) <= 7*24*time.Hour {
+				hard = true
+			}
+		}
+	}
+	if !hard && cueHits > 0 && (len(days) >= 2 || userConfirmed) {
+		hard = true
+	}
+	_ = totalCount
+	return hard, len(days)
+}
+
+func lastUserMarkRight(e *entry.Entry) bool {
+	for i := len(e.Verdicts) - 1; i >= 0; i-- {
+		if e.Verdicts[i].By == "user" {
+			return e.Verdicts[i].Mark == "right"
+		}
+	}
+	return false
+}
+
+// inferDimension returns the most frequent Leverage.Dimension among the live entries under ids, or "".
+func inferDimension(st *store.State, ids []string) string {
+	counts := map[string]int{}
+	for _, id := range ids {
+		e := st.Entries[id]
+		if e == nil || !e.Live() || e.Leverage == nil || e.Leverage.Dimension == "" {
+			continue
+		}
+		counts[e.Leverage.Dimension]++
+	}
+	best, bestN := "", 0
+	for d, n := range counts {
+		if n > bestN || (n == bestN && d < best) {
+			best, bestN = d, n
+		}
+	}
+	return best
+}
+
 // perspective is where the evidence differs most: sources first (what was said in one place and done in another),
 // then projects, people, and time.
 func (t tally) perspective() string {
@@ -209,8 +413,43 @@ func (t tally) perspective() string {
 	return PerspTemporal
 }
 
-// gate checks a pattern against the code gate (design 2.5, line 1) from its tally; "" when it passes.
+// gate checks a pattern against the code gate from its tally; "" when it passes.
+// Profile core patterns pass once backed by any qualified T0/T1 evidence (enforced at candidate selection).
+// Ops runbooks pass with >=1 live evidence entry for on-demand entity recall (never global 4 KB standing).
+// Principles enforce strict cross-scene, independent unique-quote, multi-week and distinctiveness gates.
+// Collaboration contracts pass immediately when hard or user-owned; otherwise require >=2 independent quotes and
+// either cross-scene spread, >=2 weeks, or >=2 merged rule entries.
 func gate(p *Pattern, t tally) string {
+	if p.IsProfileCore() {
+		if len(t.sources) == 0 && !t.hasUserOwned && len(p.EvidenceIDs) == 0 {
+			return GateEmpty
+		}
+		return ""
+	}
+	if p.IsOpsRunbook() {
+		if len(t.sources) == 0 && !t.hasUserOwned && len(p.EvidenceIDs) == 0 {
+			return GateEmpty
+		}
+		return ""
+	}
+	if p.IsContract() {
+		if len(t.sources) == 0 && !t.hasUserOwned {
+			return GateEmpty
+		}
+		if p.Hard || t.hasUserOwned {
+			return ""
+		}
+		if len(t.sources) < 2 || len(t.uniqueQuotes) < 2 {
+			return GateSources
+		}
+		if !t.crossScene() && len(t.weeks) < MinWeeks && len(p.EvidenceIDs) < 2 {
+			return GateScenes
+		}
+		return ""
+	}
+	if t.hasUserOwned && len(t.sources) >= 2 && !p.HoldsForAnyone {
+		return ""
+	}
 	switch {
 	case len(t.sources) == 0:
 		return GateEmpty
@@ -220,9 +459,9 @@ func gate(p *Pattern, t tally) string {
 		return GateGeneric
 	case t.unquoted > 0:
 		return GateQuotes
-	case len(t.scenes) < MinScenes:
+	case !t.crossScene():
 		return GateScenes
-	case len(t.sources) < MinSources:
+	case len(t.sources) < MinSources || len(t.uniqueQuotes) < MinSources:
 		return GateSources
 	case len(t.weeks) < MinWeeks:
 		return GateWeeks
@@ -230,47 +469,100 @@ func gate(p *Pattern, t tally) string {
 	return ""
 }
 
-// apply writes a tally onto a pattern: the counts, the weeks, the perspective and the gate.
+// apply writes a tally onto a pattern: the counts, the weeks, the perspective, rooted status and the gate.
 func apply(p *Pattern, t tally) {
-	p.ScenesCount, p.SourcesCount, p.ActiveWeeks, p.LastEvidence = len(t.scenes), len(t.sources), t.weeks, t.last
+	p.ScenesCount, p.SourcesCount, p.UniqueQuotes = t.sceneCount(), len(t.sources), len(t.uniqueQuotes)
+	p.ActiveWeeks, p.LastEvidence = t.weeks, t.last
 	p.Perspective = t.perspective()
+	p.Rooted = p.IsProfileCore() || len(t.weeks) >= 4 || (p.IsContract() && p.Hard)
 	p.Gate = gate(p, t)
 }
 
-// tags are the categories and the source space a pattern carries: the union of its evidence's (privacy taint,
-// design 2.8), decided as memory.entries decides them for each entry (memsrc.Tags).
-// A class tagged with no category still taints its pattern with its members' categories: every entry under an id (two
-// levels, as evidenceOf walks) counts.
-func tags(st *store.State, ids []string) (cats []string, space string) {
-	var all []string
-	var walk func(id string, depth int)
-	walk = func(id string, depth int) {
-		e := st.Entries[id]
-		if e == nil || slices.Contains(all, id) {
-			return
+// tags are the categories and the source space a pattern carries (v0.4.0 §1.6 Payload-First):
+//   - A pattern's own payload (Text/Situation/Choice/Exception) is checked via entry.PayloadCategories.
+//   - Work-methodology facets (interaction, tools, workflow, judgement) do NOT inherit OriginSpace confinement or
+//     conversation-topic sensitivity unless the pattern's own payload discloses personal privacy, OR >=50% of its
+//     top-level evidence entries carry explicit ByUser categories or payload-supported sensitivity.
+//   - Non-work facets (persona, world) preserve strict OriginSpace confinement and >=50% member sensitivity.
+func tags(st *store.State, p *Pattern, ids []string) (cats []string, space string) {
+	addCat := func(c string) {
+		if c != "" && !slices.Contains(cats, c) {
+			cats = append(cats, c)
 		}
-		all = append(all, id)
-		if depth < 2 {
-			for _, m := range e.Members {
-				if x := st.Entries[m]; x != nil && x.Live() {
-					walk(m, depth+1)
+	}
+	facet := entry.Facet("")
+	if p != nil {
+		facet = entry.Facet(p.Facet)
+		for _, c := range entry.PayloadCategories(facet, p.Text, p.Situation, p.Choice, p.Exception) {
+			addCat(c)
+		}
+	}
+	workMethod := entry.IsWorkMethodFacet(facet)
+	catCounts := map[string]int{}
+	totalTop := 0
+	for _, rootID := range ids {
+		if st.Entries[rootID] == nil {
+			continue
+		}
+		totalTop++
+		var all []string
+		var walk func(id string, depth int)
+		walk = func(id string, depth int) {
+			e := st.Entries[id]
+			if e == nil || slices.Contains(all, id) {
+				return
+			}
+			all = append(all, id)
+			if depth < 2 {
+				for _, m := range e.Members {
+					if x := st.Entries[m]; x != nil && x.Live() {
+						walk(m, depth+1)
+					}
 				}
 			}
 		}
-	}
-	for _, id := range ids {
-		walk(id, 0)
-	}
-	for _, id := range all {
-		e := st.Entries[id]
-		c, s, _ := memsrc.Tags(st, e)
-		for _, x := range c {
-			if !slices.Contains(cats, x) {
-				cats = append(cats, x)
+		walk(rootID, 0)
+		topCats := map[string]bool{}
+		for _, id := range all {
+			e := st.Entries[id]
+			if !workMethod && space == "" && e.OriginSpace != "" {
+				space = e.OriginSpace
+			}
+			ownPayload := entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
+			for _, c := range ownPayload {
+				if !slices.Contains(e.CatsRemoved, c) {
+					topCats[c] = true
+				}
+			}
+			for _, c := range e.Categories {
+				cn := entry.CategoryOf(c.Name)
+				if cn == "" || slices.Contains(e.CatsRemoved, cn) {
+					continue
+				}
+				if c.By == entry.ByUser || !workMethod {
+					topCats[cn] = true
+				}
+			}
+			if !workMethod {
+				if cn := entry.CategoryOf(e.Sensitive); cn != "" && !slices.Contains(e.CatsRemoved, cn) {
+					topCats[cn] = true
+				}
 			}
 		}
-		if space == "" {
-			space = s
+		for c := range topCats {
+			catCounts[c]++
+		}
+	}
+	if totalTop > 0 {
+		for c, n := range catCounts {
+			if n*2 >= totalTop {
+				addCat(c)
+			}
+		}
+	}
+	if !workMethod {
+		for _, c := range entry.SpaceDefaults(space) {
+			addCat(c)
 		}
 	}
 	sort.Strings(cats)

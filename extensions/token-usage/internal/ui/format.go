@@ -83,10 +83,11 @@ func formatRatio(used, limit int64) (text, tone string) {
 	return fmt.Sprintf("%.0f%%", math.Min(pct, 999)), tone
 }
 
-// launcherName is how a launcher with no name is shown.
+// launcherName is how a launcher with no name is shown: a session opened straight from a terminal (the skill's
+// reading), kept apart from 其他, which is the rest of a ranking past its top entries.
 func launcherName(name string) string {
 	if name == "" {
-		return "其他"
+		return "终端直接打开"
 	}
 	return name
 }

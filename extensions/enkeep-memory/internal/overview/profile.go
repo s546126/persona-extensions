@@ -38,6 +38,11 @@ func (o OverviewBackedProvider) Items(st *store.State) []profile.CandidateItem {
 	covered := map[entry.Facet]bool{}
 	for _, p := range s.Sorted(func(p *Pattern) bool { return p.Used() }) {
 		f := entry.Facet(p.Facet)
+		if p.IsProfileCore() {
+			f = entry.Persona
+		} else if p.IsOpsRunbook() {
+			f = entry.Tools
+		}
 		if !slices.Contains(profile.Facets, f) {
 			continue
 		}
@@ -46,16 +51,17 @@ func (o OverviewBackedProvider) Items(st *store.State) []profile.CandidateItem {
 		if len(p.Categories) == 0 && p.OriginSpace != "" && f != entry.Interaction && f != entry.Persona {
 			continue
 		}
-		text := strings.TrimSpace(p.Text)
-		if x := strings.TrimSpace(p.Exception); x != "" && !strings.Contains(text, x) {
-			text += "（例外：" + x + "）"
+		text := strings.TrimSpace(p.Text) + suffixOf(p)
+		weight := patternWeight + Score(p)*10 + p.ScenesCount*p.SourcesCount
+		if p.IsProfileCore() {
+			weight += 2000
 		}
 		out = append(out, profile.CandidateItem{
 			ID: p.ID, Facet: f, Text: text, Last: p.LastEvidence, Priority: 0, Pattern: true,
-			Weight:     patternWeight + p.ScenesCount*p.SourcesCount,
+			Weight:     weight,
 			Categories: slices.Clone(p.Categories), OriginSpace: p.OriginSpace, Subjects: slices.Clone(p.Subjects),
 		})
-		if len(p.Categories) == 0 {
+		if len(p.Categories) == 0 && !p.IsOpsRunbook() {
 			covered[f] = true
 		}
 	}

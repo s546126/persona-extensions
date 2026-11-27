@@ -478,7 +478,7 @@ func TestApprovalCardSpellsOutTheTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.(map[string]string)["summary"]
-	for _, want := range []string{card, "电脑：desktop（离线，查已同步的索引）", "项目：项目 persona-extensions", "范围：纯对话", "查询：quota cooldown", "时间：7d"} {
+	for _, want := range []string{card, "电脑：desktop（离线，查已同步的索引）", "项目：项目 persona-extensions", "范围：只看对话", "查询：quota cooldown", "时间：7d"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("card lacks %q:\n%s", want, got)
 		}
@@ -506,7 +506,7 @@ func TestPageShowsComputers(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(res.View)
-	if !strings.Contains(string(raw), "Laptop 2") || !strings.Contains(string(raw), "检索电脑") {
+	if !strings.Contains(string(raw), "Laptop 2") || !strings.Contains(string(raw), "搜了几台电脑") {
 		t.Fatalf("results without computers: %s", raw)
 	}
 	for _, p := range []page{{Tab: "sources"}, {Tab: "code", Query: "quota"}, {Mode: modeHit, HitID: "m:m-3c4d/session:sess-desk-1", Query: "quota"}} {
@@ -576,7 +576,7 @@ func TestHubComputerPickedIsSearchedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := tf.f.search(ctx, st, prog, t0, targets)
-	if len(res.Machines) != 3 || res.StepTraces[0].Note != "hub 本机直接检索，1 台经 nodes.call 实时检索，1 台不可用（离线且没有同步过索引）" {
+	if len(res.Machines) != 3 || res.StepTraces[0].Note != "本机直接搜，1 台在线、当场搜，1 台没搜到（不在线，也没同步过）" {
 		t.Fatalf("machines %+v, fan_out %q", res.Machines, res.StepTraces[0].Note)
 	}
 	for _, c := range tf.nodes.calls {

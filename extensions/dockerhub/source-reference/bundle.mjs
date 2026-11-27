@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "dockerhub", name: "Docker Hub", version: "0.1.4", icon: "assets/icon.png", description: "Search public Docker Hub images. Check official status, publisher namespaces, pull activity, selected tag digests and supported platforms. Get an exact docker pull command as text without pulling or running images.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/dockerhub/README.md", tags: ["Development", "Docker", "Containers", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/dockerhub.mjs", sha256: "" } }, contributes: { connectors: [{ id: "dockerhub", name: "Docker Hub", capabilities: ["status", "tools"], hosts: ["hub.docker.com"], agent_tools: ["dockerhub_*"] }], ui: [{ id: "dockerhub", title: "Docker Hub", placement: "nav_page", icon: "code" }] }, permissions: { network: ["hub.docker.com"] } };
+var persona_extension_default = { manifest_version: 1, id: "dockerhub", name: "Docker Hub", version: "0.1.5", icon: "assets/icon.png", description: "Search public Docker Hub images. Check official status, publisher namespaces, pull activity, selected tag digests and supported platforms. Get an exact docker pull command as text without pulling or running images.", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/dockerhub/README.md", tags: ["Development", "Docker", "Containers", "Dependencies"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/dockerhub.mjs", sha256: "" } }, contributes: { connectors: [{ id: "dockerhub", name: "Docker Hub", capabilities: ["status", "tools"], hosts: ["hub.docker.com"], agent_tools: ["dockerhub_*"] }], ui: [{ id: "dockerhub", title: "Docker Hub", placement: "nav_page", icon: "code" }] }, permissions: { network: ["hub.docker.com"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 1 << 20, fresh: 15 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 250 });
@@ -779,7 +779,14 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
 function repositoryName(value) {
   if (typeof value !== "string" || !/^(?:library|[a-z0-9][a-z0-9_-]{0,63})\/[a-z0-9][a-z0-9_.-]{0,99}$/.test(value)) throw new ReadError("invalid");
@@ -790,7 +797,7 @@ function searchName(value) {
   return `library/${value}`;
 }
 function queryText(value) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -835,7 +842,7 @@ function summary(value) {
   const item = object(value);
   if (typeof item.repo_name !== "string") throw new ReadError("bad_answer");
   const name = repositoryName(item.repo_name.includes("/") ? item.repo_name : searchName(item.repo_name));
-  return { name, description: clip(oneLine(string(item.short_description, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: boolean(item.is_official), url: `https://hub.docker.com/r/${name}` };
+  return { name, description: clip(oneLine(string(item.short_description, "").replace(/[\ud800-\udfff]/gu, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: boolean(item.is_official), url: `https://hub.docker.com/r/${name}` };
 }
 function parseSearch(raw, at) {
   const root2 = object(raw), seen = /* @__PURE__ */ new Set();
@@ -849,16 +856,20 @@ function parseSearch(raw, at) {
 }
 function parseRepository(raw, name) {
   const item = object(raw);
-  if (repositoryName(`${item.namespace}/${string(item.name)}`) !== repositoryName(name)) throw new ReadError("bad_answer");
-  return { name: repositoryName(name), namespace: string(item.namespace), description: clip(oneLine(string(item.description, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: item.namespace === "library", url: `https://hub.docker.com/r/${repositoryName(name)}`, updated: date(item.last_updated), pull: `docker pull ${repositoryName(name)}`, tags: [] };
+  const canonical = repositoryName(name);
+  if (repositoryName(`${item.namespace}/${string(item.name)}`) !== canonical) throw new ReadError("bad_answer");
+  return { name: canonical, namespace: string(item.namespace), description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: item.namespace === "library", url: `https://hub.docker.com/r/${canonical}`, updated: date(item.last_updated), pull: `docker pull ${canonical}`, tags: [] };
 }
 function parseTags(raw, repository) {
-  const root2 = object(raw);
+  repositoryName(repository);
+  const root2 = object(raw), seen = /* @__PURE__ */ new Set();
   return array(root2.results).slice(0, 10).map((value) => {
     const item = object(value);
     if (item.content_type !== "image" || item.tag_status !== "active") return void 0;
     const name = string(item.name);
     if (!/^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/.test(name)) throw new ReadError("bad_answer");
+    if (seen.has(name)) throw new ReadError("bad_answer");
+    seen.add(name);
     const digest = string(item.digest);
     if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw new ReadError("bad_answer");
     const platforms = array(item.images).slice(0, 64).map((value2) => {
@@ -872,7 +883,6 @@ function parseTags(raw, repository) {
       if (!/^sha256:[a-f0-9]{64}$/.test(string(image.digest))) throw new ReadError("bad_answer");
       return platform;
     }).filter((value2) => value2 !== void 0);
-    if (repositoryName(repository).length > 130) throw new ReadError("bad_answer");
     return { name, digest, updated: date(item.last_updated), platforms: [...new Set(platforms)] };
   }).filter((tag) => tag !== void 0);
 }
@@ -1007,7 +1017,16 @@ var ja_default = {
 var textsFor = (locale = "") => locale.toLowerCase().startsWith("ja") ? ja_default : locale.toLowerCase().startsWith("zh") ? zh_Hans_default : en_default;
 var fmt = (text, values) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ""));
 var number = (value) => new Intl.NumberFormat("en-US").format(value);
-var dateText = (value) => value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "";
+function dateText(value) {
+  if (!value) return "";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "";
+  try {
+    return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(parsed);
+  } catch {
+    return "";
+  }
+}
 function errorText(error, locale = "") {
   const t = textsFor(locale);
   if (!(error instanceof ReadError)) return t.network;
@@ -1052,7 +1071,7 @@ var DockerHub = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    if (item && this.monotonic() - item.used < fresh) {
+    if (item && this.monotonic() - item.saved < fresh) {
       item.used = this.monotonic();
       return item;
     }
@@ -1060,10 +1079,14 @@ var DockerHub = class {
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
+    const stamp = this.monotonic();
+    this.cache.set(path, { raw, at, saved: stamp, used: stamp, bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       let oldest;
@@ -1081,6 +1104,21 @@ var DockerHub = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1088,7 +1126,8 @@ var DockerHub = class {
       void reader.cancel().catch(() => {
       });
     };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -1097,11 +1136,15 @@ var DockerHub = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally {
       signal.removeEventListener("abort", cancel);
       reader.releaseLock();
@@ -1118,22 +1161,20 @@ var DockerHub = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal, validate) {
+  async read(path, fresh, signal, parse) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
-    if (cached) return cached;
+    if (cached) return { value: parse(cached.raw, cached.at), at: cached.at };
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
-      if (again) return again;
+      if (again) return { value: parse(again.raw, again.at), at: again.at };
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
       if (pause) await new Promise((resolve, reject) => {
         const cancel = () => {
@@ -1152,15 +1193,19 @@ var DockerHub = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
-        validate(raw, at);
+        const value = parse(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
-        return { raw, at };
+        return { value, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) {
+          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        }
+        const failure = error instanceof ReadError ? error : signal?.aborted && signal.reason instanceof ReadError ? signal.reason : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1177,7 +1222,7 @@ var DockerHub = class {
       const old = this.cache.get(path);
       if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
         old.used = this.monotonic();
-        return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+        return { value: parse(old.raw, old.at), at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
       }
       throw error;
     }
@@ -1188,28 +1233,20 @@ var DockerHub = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 12, refresh = false, signal) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
     const path = searchPath(query, limit);
-    const rd = await this.read(path, refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
-      parseSearch(raw, at);
-    });
-    return { ...parseSearch(rd.raw, rd.at), images: parseSearch(rd.raw, rd.at).images.slice(0, limit), stale: rd.stale };
+    const rd = await this.read(path, refresh ? 0 : this.limits.fresh, signal, (raw, at) => parseSearch(raw, at));
+    return { ...rd.value, images: rd.value.images.slice(0, limit), stale: rd.stale };
   }
   async repository(name, refresh = false, signal) {
     name = repositoryName(name);
-    const rd = await this.read(repositoryPath(name), refresh ? 0 : this.limits.fresh, signal, (raw) => {
-      parseRepository(raw, name);
-    });
-    const image = parseRepository(rd.raw, name);
-    const tagRead = await this.read(tagsPath(name), refresh ? 0 : this.limits.fresh, signal, (raw) => {
-      parseTags(raw, name);
-    });
-    image.tags = parseTags(tagRead.raw, name);
-    return { image, at: tagRead.at, ...rd.stale ?? tagRead.stale ? { stale: rd.stale ?? tagRead.stale } : {} };
+    const rd = await this.read(repositoryPath(name), refresh ? 0 : this.limits.fresh, signal, (raw) => parseRepository(raw, name));
+    const tagRead = await this.read(tagsPath(name), refresh ? 0 : this.limits.fresh, signal, (raw) => parseTags(raw, name));
+    return { image: { ...rd.value, tags: tagRead.value }, at: tagRead.at, ...rd.stale ?? tagRead.stale ? { stale: rd.stale ?? tagRead.stale } : {} };
   }
   cacheStats() {
     return { entries: this.cache.size, bytes: this.bytes };
@@ -1246,14 +1283,36 @@ ${image.url}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const field of ["query", "name"]) for (const token of exact.fieldValues(field)) {
+      if (token.raw === "null") {
+        delete args[field];
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[field] = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = Number(limit);
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1264,23 +1323,34 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "dockerhub_search" && name !== "dockerhub_repository") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "dockerhub_search") {
-      const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(query, limit, false, request.signal);
-      return clip((result.images.length ? result.images.map((image, index) => summaryLine(image, index, service.locale)).join("\n") : t.empty) + `
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result2 = await service.search(query, limit, false, request.signal);
+      return clip((result2.images.length ? result2.images.map((image, index) => summaryLine(image, index, service.locale)).join("\n") : t.empty) + `
+${t.attribution}${result2.stale ? `
+${errorText(result2.stale, service.locale)}` : ""}`, 29999);
+    }
+    const result = await service.repository(repositoryName(args.name), false, request.signal);
+    return clip(detailText(result.image, service.locale) + `
 ${t.attribution}${result.stale ? `
 ${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    if (name === "dockerhub_repository") {
-      const result = await service.repository(repositoryName(args.name), false, request.signal);
-      return clip(detailText(result.image, service.locale) + `
-${t.attribution}${result.stale ? `
-${errorText(result.stale, service.locale)}` : ""}`, 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1313,12 +1383,46 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { q: "", found: false };
+var MAX_VIEW_ITEMS = 300;
+var MAX_RESULT_CHROME_ITEMS = 8;
+var MAX_DETAIL_CHROME_ITEMS = 13;
+var MAX_RESULT_ITEMS = MAX_VIEW_ITEMS - MAX_RESULT_CHROME_ITEMS;
+var MAX_DETAIL_TAG_ITEMS = MAX_VIEW_ITEMS - MAX_DETAIL_CHROME_ITEMS;
+var MAX_RESULT_BYTES = 512 * 1024;
+var MAX_STATE_BYTES = 16 * 1024;
+var encoder3 = new TextEncoder();
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "~" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
+var imageActionID = (name) => boundedID("image:", name, 128);
+function validHTTPS(raw, maxLen = 4096) {
+  if (!raw || raw.length > maxLen) return void 0;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password && !url.port ? url.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function summaryState(value) {
   if (value == null) return void 0;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("invalid");
   const raw = value;
-  if (typeof raw.description !== "string" || typeof raw.official !== "boolean" || typeof raw.pulls !== "number" || !Number.isSafeInteger(raw.pulls) || raw.pulls < 0 || raw.pulls > 1e14 || typeof raw.stars !== "number" || !Number.isSafeInteger(raw.stars) || raw.stars < 0 || raw.stars > 1e14) throw new ReadError("invalid");
-  return { name: repositoryName(raw.name), description: clip(raw.description, 500), official: raw.official, pulls: raw.pulls, stars: raw.stars, url: `https://hub.docker.com/r/${repositoryName(raw.name)}` };
+  if (typeof raw.description !== "string" || /[\ud800-\udfff]/u.test(raw.description) || typeof raw.official !== "boolean" || typeof raw.pulls !== "number" || !Number.isSafeInteger(raw.pulls) || raw.pulls < 0 || raw.pulls > 1e14 || typeof raw.stars !== "number" || !Number.isSafeInteger(raw.stars) || raw.stars < 0 || raw.stars > 1e14) throw new ReadError("invalid");
+  const name = repositoryName(raw.name);
+  return { name, description: clip(raw.description, 500), official: raw.official, pulls: raw.pulls, stars: raw.stars, url: `https://hub.docker.com/r/${name}` };
 }
 function readState(raw) {
   if (typeof raw !== "string" || raw.length > 1e4) return initialState;
@@ -1331,9 +1435,15 @@ function readState(raw) {
   }
 }
 var encodeState = (state) => JSON.stringify(state);
+function boundState(state) {
+  const base = { q: clip(state.q, 100), found: Boolean(state.found) };
+  if (!state.image) return base;
+  const candidate = { ...base, image: { ...state.image, description: clip(state.image.description, 500) } };
+  return encoder3.encode(encodeState(candidate)).byteLength <= MAX_STATE_BYTES ? candidate : base;
+}
 function imageTransition(state, result, id) {
   if (!id.startsWith("image:")) return state;
-  const image = result.images.find((candidate) => id === `image:${candidate.name}`);
+  const image = result.images.find((candidate) => id === `image:${candidate.name}` || id === imageActionID(candidate.name));
   return image ? { q: state.q, found: true, image } : state;
 }
 function transition(state, id, values = {}) {
@@ -1367,49 +1477,88 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "results", result: await service.search(state.q, 12, refresh, request.signal) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale);
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "dockerhub", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2800), style }, key);
+  const { service, state, loaded, uiVersion = 0 } = props, locale = props.locale || service.locale, t = textsFor(locale);
+  const safeState = boundState(state);
+  const encodedState = encodeState(safeState);
+  const act = (id, next, title) => {
+    const safeNext = next ? boundState(next) : void 0;
+    const safeTitle = title ? clip(title, 2e3) : void 0;
+    return props.action?.(id, safeNext, safeTitle) ?? (safeNext && uiVersion >= 3 ? { id, push: { ui: "dockerhub", state: encodeState(safeNext), ...safeTitle ? { title: safeTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value || t.unknown, 2e3), style }, key);
   const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "dockerhub-query"),
+    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: safeState.q }, "dockerhub-query"),
     /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "dockerhub-submit")
   ] }, "dockerhub-search");
   const attribution = /* @__PURE__ */ jsx(Section, { children: text("dockerhub-license", t.attribution, "caption") }, "dockerhub-attribution");
   const footer = /* @__PURE__ */ jsxs(Section, { children: [
     /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "dockerhub-refresh"),
-    state.image ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "dockerhub-back") : null,
+    safeState.image ? /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "dockerhub-back") : null,
     /* @__PURE__ */ jsx(Button, { title: t.home, action: act("home") }, "dockerhub-home")
   ] }, "dockerhub-footer");
-  const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("dockerhub-stale-text", errorText(error, props.locale ?? service.locale)) }, "dockerhub-stale") : null;
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  const stale = (error) => error ? /* @__PURE__ */ jsx(Section, { children: text("dockerhub-stale-text", errorText(error, locale)) }, "dockerhub-stale") : null;
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "dockerhub-loading-indicator") }, "dockerhub-loading"),
     attribution
   ] }, "dockerhub");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text("dockerhub-error-message", errorText(loaded.error, props.locale ?? service.locale)),
+      text("dockerhub-error-message", errorText(loaded.error, locale)),
       /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "dockerhub-retry")
     ] }, "dockerhub-error"),
     attribution
   ] }, "dockerhub");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("dockerhub-welcome-text", t.welcome, "body") }, "dockerhub-welcome"),
     attribution
   ] }, "dockerhub");
+  const usedKeys = /* @__PURE__ */ new Set();
+  const uniqueID = (prefix, value) => {
+    let key = boundedID(prefix, value);
+    for (let n = 1; usedKeys.has(key); n++) key = boundedID(prefix, `${value}~${n}`);
+    usedKeys.add(key);
+    return key;
+  };
   if (loaded.kind === "detail") {
     const image = loaded.result.image;
-    return /* @__PURE__ */ jsxs(View, { title: image.name, state: encodeState(state), children: [
+    const imageURL = validHTTPS(image.url) ?? `https://hub.docker.com/r/${image.name}`;
+    const detailFooter = clip([image.official ? t.official : fmt(t.namespace, { namespace: image.namespace }), dateText(image.updated)].filter(Boolean).join(" \xB7 "), 2e3);
+    const tagCards = [];
+    let remainingItems2 = MAX_DETAIL_TAG_ITEMS;
+    let remainingBytes2 = MAX_RESULT_BYTES;
+    for (const tag of image.tags) {
+      if (remainingItems2 < 3) break;
+      const tagTitle = clip(tag.name, 2e3);
+      const tagFooter = clip(dateText(tag.updated), 2e3);
+      const digestText = clip(tag.digest, 2e3);
+      const platformsText = clip(tag.platforms.join(" \xB7 ") || t.noPlatforms, 2e3);
+      const tagURL = `${imageURL}/tags?name=${encodeURIComponent(tag.name)}`;
+      const sectionKey = uniqueID("tag-", tag.name);
+      const digestKey = uniqueID("digest-", tag.name);
+      const platformsKey = uniqueID("platforms-", tag.name);
+      const linkKey = uniqueID("tag-link-", tag.name);
+      const cardBytes = encoder3.encode(JSON.stringify([sectionKey, tagTitle, tagFooter, digestKey, digestText, platformsKey, platformsText, linkKey, tagURL])).byteLength;
+      if (cardBytes > remainingBytes2) break;
+      tagCards.push(/* @__PURE__ */ jsxs(Section, { title: tagTitle, footer: tagFooter, children: [
+        text(digestKey, digestText),
+        text(platformsKey, platformsText),
+        /* @__PURE__ */ jsx(Link, { title: t.openTag, url: tagURL }, linkKey)
+      ] }, sectionKey));
+      remainingItems2 -= 3;
+      remainingBytes2 -= cardBytes;
+    }
+    return /* @__PURE__ */ jsxs(View, { title: clip(image.name, 2e3), state: encodedState, children: [
       search,
-      /* @__PURE__ */ jsxs(Section, { title: image.name, footer: [image.official ? t.official : fmt(t.namespace, { namespace: image.namespace }), dateText(image.updated)].join(" \xB7 "), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(image.name, 2e3), footer: detailFooter, children: [
         text("dockerhub-description", image.description, "body"),
         text("dockerhub-total", fmt(t.total, { count: number(image.pulls) })),
         text("dockerhub-stars", fmt(t.stars, { count: number(image.stars) }))
@@ -1418,26 +1567,43 @@ function page(props) {
         text("dockerhub-install-command", image.pull, "body"),
         text("dockerhub-install-hint", t.installHint, "caption")
       ] }, "dockerhub-install"),
-      /* @__PURE__ */ jsx(Section, { title: fmt(t.tags, { count: number(image.tags.length) }) }, "dockerhub-tags"),
-      image.tags.map((tag) => /* @__PURE__ */ jsxs(Section, { title: tag.name, footer: dateText(tag.updated), children: [
-        text(`digest-${tag.name}`, tag.digest),
-        text(`platforms-${tag.name}`, tag.platforms.join(" \xB7 ") || t.noPlatforms),
-        /* @__PURE__ */ jsx(Link, { title: t.openTag, url: `${image.url}/tags?name=${encodeURIComponent(tag.name)}` }, `tag-link-${tag.name}`)
-      ] }, `tag-${tag.name}`)),
-      /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Link, { title: t.openImage, url: image.url }, "dockerhub-image-link") }, "dockerhub-links"),
+      /* @__PURE__ */ jsx(Section, { title: clip(fmt(t.tags, { count: number(image.tags.length) }), 2e3) }, "dockerhub-tags"),
+      tagCards,
+      /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Link, { title: t.openImage, url: imageURL }, "dockerhub-image-link") }, "dockerhub-links"),
       stale(loaded.result.stale),
       footer,
       attribution
     ] }, "dockerhub");
   }
-  return /* @__PURE__ */ jsxs(View, { title: `${t.title}: ${clip(state.q, 100)}`, state: encodeState(state), children: [
+  const cards = [];
+  let remainingItems = MAX_RESULT_ITEMS;
+  let remainingBytes = MAX_RESULT_BYTES;
+  for (const image of loaded.result.images) {
+    if (remainingItems < 3) break;
+    const title = clip(image.name, 2e3);
+    const cardFooter = clip([image.official ? t.official : t.community, fmt(t.total, { count: number(image.pulls) })].join(" \xB7 "), 2e3);
+    const desc = clip(image.description || t.unknown, 2e3);
+    const imageURL = validHTTPS(image.url) ?? `https://hub.docker.com/r/${image.name}`;
+    const sectionKey = uniqueID("image-", image.name);
+    const descKey = uniqueID("description-", image.name);
+    const openKey = uniqueID("open-", image.name);
+    const linkKey = uniqueID("link-", image.name);
+    const nextState = boundState({ ...safeState, image });
+    const actionID = imageActionID(image.name);
+    const cardBytes = encoder3.encode(JSON.stringify([sectionKey, title, cardFooter, descKey, desc, openKey, actionID, linkKey, imageURL, nextState])).byteLength;
+    if (cardBytes > remainingBytes) break;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, footer: cardFooter, children: [
+      text(descKey, desc, "body"),
+      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(actionID, nextState, image.name) }, openKey),
+      /* @__PURE__ */ jsx(Link, { title: t.openImage, url: imageURL }, linkKey)
+    ] }, sectionKey));
+    remainingItems -= 3;
+    remainingBytes -= cardBytes;
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(`${t.title}: ${clip(safeState.q, 100)}`, 2e3), state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("dockerhub-total-results", fmt(t.results, { total: number(loaded.result.total) }), "caption") }, "dockerhub-result-count"),
-    loaded.result.images.length ? loaded.result.images.map((image) => /* @__PURE__ */ jsxs(Section, { title: image.name, footer: [image.official ? t.official : t.community, fmt(t.total, { count: number(image.pulls) })].join(" \xB7 "), children: [
-      text(`description-${image.name}`, image.description, "body"),
-      /* @__PURE__ */ jsx(Button, { title: t.details, action: act(`image:${image.name}`, { ...state, image }, image.name) }, `open-${image.name}`),
-      /* @__PURE__ */ jsx(Link, { title: t.openImage, url: image.url }, `link-${image.name}`)
-    ] }, `image-${image.name}`)) : /* @__PURE__ */ jsx(Section, { children: text("dockerhub-empty", t.empty) }, "dockerhub-empty-results"),
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("dockerhub-empty", t.empty) }, "dockerhub-empty-results"),
     stale(loaded.result.stale),
     footer,
     attribution
@@ -1445,11 +1611,14 @@ function page(props) {
 }
 
 // src/root.tsx
+function sameState(a, b) {
+  return a.q === b.q && a.found === b.found && a.image?.name === b.image?.name;
+}
 function Root(options) {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState(void 0);
-  const identity = JSON.stringify(state) + ":" + refresh;
+  const identity = JSON.stringify([state, refresh]);
   useLoadEffect(async (signal) => {
     const loaded2 = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded2) ? previous : { service: options.service, identity, loaded: loaded2 });
@@ -1465,11 +1634,17 @@ function Root(options) {
         return callback(() => ({ push }), { push });
       }
       return callback((values) => {
-        if (id === "refresh") setRefresh((previous) => previous + 1);
+        if (id === "refresh") setView((previous) => ({ state: previous.state, refresh: previous.refresh + 1 }));
         else if (id.startsWith("image:")) {
           if (loaded.kind !== "results") return;
-          setState((previous) => imageTransition(previous, loaded.result, id));
-        } else setState((previous) => transition(previous, id, values));
+          setView((previous) => {
+            const nextState = imageTransition(previous.state, loaded.result, id);
+            return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+          });
+        } else setView((previous) => {
+          const nextState = transition(previous.state, id, values);
+          return sameState(nextState, previous.state) ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     }
   });

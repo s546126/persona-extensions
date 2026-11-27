@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sort"
 	"time"
 )
@@ -26,6 +27,7 @@ func (q *Queue) UpdateExec(taskID string, fence int, now time.Time, fn func(e *E
 	}
 	phase := t.Exec.Phase
 	fn(t.Exec)
+	t.Exec.Dirty = cloneBoolPtr(t.Exec.Dirty)
 	if t.Exec.Phase != phase {
 		t.Exec.PhaseSince = now.UTC()
 	}
@@ -34,7 +36,12 @@ func (q *Queue) UpdateExec(taskID string, fence int, now time.Time, fn func(e *E
 		state = StateNeedsInput
 	}
 	t.State = state
-	t.Attempts[len(t.Attempts)-1].State = state
+	att := &t.Attempts[len(t.Attempts)-1]
+	att.State = state
+	att.Launcher, att.Model, att.SessionID, att.Worktree = t.Exec.Launcher, t.Exec.Model, t.Exec.SessionID, t.Exec.Worktree
+	att.BaseSHA, att.HeadSHA, att.FullReply = t.Exec.BaseSHA, t.Exec.HeadSHA, t.Exec.FullReply
+	att.Dirty = cloneBoolPtr(t.Exec.Dirty)
+	att.TodoAttachError = t.Exec.TodoAttachError
 	if err := q.saveLocked(); err != nil {
 		q.tasks[taskID] = prev
 		return nil, err
@@ -76,14 +83,15 @@ func (q *Queue) ActiveTasks() []*Task {
 	return out
 }
 
-// Prune drops finished tasks older than maxAge, and the oldest finished ones beyond keep. A finished task whose
-// outcome still waits to be written to its to-do stays.
+// Prune drops finished tasks older than maxAge, and the oldest finished ones beyond keep. A finished task stays
+// while it has an outcome to write or a session to detach from its to-do.
 func (q *Queue) Prune(now time.Time, maxAge time.Duration, keep int) (int, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var done []*Task
 	for _, t := range q.tasks {
-		if t.IsTerminal() && t.FinishedAt != nil && (t.TodoID() == "" || t.DecisionWrittenRef != "" || t.DecisionSkipReason != "") {
+		if t.IsTerminal() && t.FinishedAt != nil && (t.TodoID() == "" || t.DecisionWrittenRef != "" || t.DecisionSkipReason != "") &&
+			!slices.ContainsFunc(t.Attempts, func(att Attempt) bool { return att.TodoDetachPending }) {
 			done = append(done, t)
 		}
 	}

@@ -6,10 +6,12 @@ import (
 	"crypto/ecdh"
 	"crypto/hpke"
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -51,6 +53,93 @@ func decodeStore(raw []byte, v any) error {
 		return storeFailure()
 	}
 	return nil
+}
+
+func cleanBase32Secret(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == ' ' || c == '\t' || c == '-' || c == '\r' || c == '\n' {
+			continue
+		}
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	s := strings.TrimRight(b.String(), "=")
+	if s == "" {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')) {
+			return ""
+		}
+	}
+	return s
+}
+
+// normalizeOTPValue accepts an otpauth:// URI or a raw base32 secret and returns the otpauth URI
+// expected by 1Password CLI v2 native OTP fields.
+func normalizeOTPValue(raw, itemTitle, fieldName string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", storeFailure()
+	}
+	if strings.HasPrefix(strings.ToLower(s), "otpauth://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return "", storeFailure()
+		}
+		kind := strings.ToLower(u.Host)
+		if kind != "totp" && kind != "hotp" {
+			return "", storeFailure()
+		}
+		secret := cleanBase32Secret(u.Query().Get("secret"))
+		if secret == "" {
+			return "", storeFailure()
+		}
+		decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
+		if err != nil || len(decoded) == 0 {
+			return "", storeFailure()
+		}
+		if u.Scheme != "otpauth" {
+			u.Scheme = "otpauth"
+			return u.String(), nil
+		}
+		return s, nil
+	}
+	secret := cleanBase32Secret(s)
+	if secret == "" {
+		return "", storeFailure()
+	}
+	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
+	if err != nil || len(decoded) == 0 {
+		return "", storeFailure()
+	}
+	label := strings.TrimSpace(itemTitle)
+	if label == "" {
+		label = strings.TrimSpace(fieldName)
+	}
+	if label == "" {
+		label = "OTP"
+	}
+	return "otpauth://totp/" + url.PathEscape(label) + "?secret=" + secret, nil
+}
+
+func builtinFieldSpec(category, fieldName, fieldType string) (id, label, purpose, typ string, ok bool) {
+	if fieldType == "OTP" {
+		return "", "", "", "", false
+	}
+	if strings.EqualFold(category, "LOGIN") && strings.EqualFold(fieldName, "username") {
+		return "username", "username", "USERNAME", "STRING", true
+	}
+	if (strings.EqualFold(category, "LOGIN") || strings.EqualFold(category, "PASSWORD")) && strings.EqualFold(fieldName, "password") {
+		return "password", "password", "PASSWORD", "CONCEALED", true
+	}
+	return "", "", "", "", false
 }
 
 // store relays only public metadata/ciphertext to the selected resident node. SDK/service-account writes
@@ -142,11 +231,17 @@ func (n *nodeApp) storeNode(ctx context.Context, raw json.RawMessage) (any, erro
 				clear(v.Value)
 			}
 		}()
-		if decodeStore(plain, &vals) != nil || len(vals) != len(k.target.Fields) {
+		var valueFields []wire.SecretStoreField
+		for _, f := range k.target.Fields {
+			if !f.Delete && !f.KeepValue {
+				valueFields = append(valueFields, f)
+			}
+		}
+		if decodeStore(plain, &vals) != nil || len(vals) != len(valueFields) {
 			return nil, storeFailure()
 		}
 		for i, v := range vals {
-			if v.Name != k.target.Fields[i].Name || len(v.Value) < 1 || len(v.Value) > wire.SecretStoreValueMost || !utf8.Valid(v.Value) || bytes.IndexByte(v.Value, 0) >= 0 {
+			if v.Name != valueFields[i].Name || len(v.Value) < 1 || len(v.Value) > wire.SecretStoreValueMost || !utf8.Valid(v.Value) || bytes.IndexByte(v.Value, 0) >= 0 {
 				return nil, storeFailure()
 			}
 		}
@@ -178,11 +273,13 @@ func (n *nodeApp) describeStore(ctx context.Context, t wire.SecretStoreTarget) (
 }
 
 // Full templates stay inside the node. Raw JSON preserves unrelated fields, sections, URLs and version.
-// LOGIN edits are refused because CLI JSON templates can silently overwrite passkeys (official item docs).
+// Edits refuse items carrying passkeys or attachments because CLI JSON templates cannot safely preserve them.
 func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals []storeValue) (any, error) {
 	item := map[string]json.RawMessage{}
 	put := func(m map[string]json.RawMessage, k string, v any) { m[k], _ = json.Marshal(v) }
 	var fields []map[string]json.RawMessage
+	category := t.Category
+	title := t.Title
 	args := []string{"item", "create", "-", "--vault", t.Vault, "--format", "json", "--reveal"}
 	if t.Operation == "edit" {
 		raw, err := n.run(ctx, "item", "get", t.Item, "--vault", t.Vault, "--format", "json", "--reveal")
@@ -193,13 +290,15 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 		if json.Unmarshal(raw, &item) != nil {
 			return nil, storeFailure()
 		}
-		var title, category, id string
-		_ = json.Unmarshal(item["title"], &title)
-		_ = json.Unmarshal(item["category"], &category)
+		var gotTitle, gotCategory, id string
+		_ = json.Unmarshal(item["title"], &gotTitle)
+		_ = json.Unmarshal(item["category"], &gotCategory)
 		_ = json.Unmarshal(item["id"], &id)
-		if title != t.Title || id != t.Item || strings.EqualFold(category, "LOGIN") {
-			return nil, &ext.Error{Code: "refused", Message: "The item changed, or is a Login item: CLI JSON edits cannot safely preserve passkeys"}
+		if gotTitle != t.Title || id != t.Item {
+			return nil, &ext.Error{Code: "refused", Message: "The item changed before commit"}
 		}
+		title = gotTitle
+		category = gotCategory
 		for _, key := range []string{"passkeys", "files", "document"} {
 			if b := bytes.TrimSpace(item[key]); len(b) > 0 && string(b) != "null" && string(b) != "[]" {
 				return nil, &ext.Error{Code: "refused", Message: "Template writes cannot preserve this item's passkeys or attachments"}
@@ -207,6 +306,13 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 		}
 		if json.Unmarshal(item["fields"], &fields) != nil {
 			return nil, storeFailure()
+		}
+		for _, f := range fields {
+			var ftype string
+			_ = json.Unmarshal(f["type"], &ftype)
+			if strings.EqualFold(ftype, "PASSKEY") {
+				return nil, &ext.Error{Code: "refused", Message: "Template writes cannot preserve this item's passkeys or attachments"}
+			}
 		}
 		args = []string{"item", "edit", t.Item, "--vault", t.Vault, "--format", "json", "--reveal"}
 	} else {
@@ -240,13 +346,30 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 			unnamed[sec.ID] = true
 		}
 	}
-	for i, v := range vals {
+	checkSection := func(f map[string]json.RawMessage) error {
+		if raw := bytes.TrimSpace(f["section"]); len(raw) > 0 && string(raw) != "null" {
+			var section struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(raw, &section) != nil || (section.ID != "" && !unnamed[section.ID]) {
+				return &ext.Error{Code: "refused", Message: "Named or unknown sections are not supported for storage yet"}
+			}
+		}
+		return nil
+	}
+
+	// Process deletions first so removing a duplicate field in the same edit clears label ambiguity.
+	deletedIDs := map[string]string{}
+	for _, tf := range t.Fields {
+		if !tf.Delete {
+			continue
+		}
 		match := -1
 		for j, f := range fields {
 			var label, id string
 			_ = json.Unmarshal(f["label"], &label)
 			_ = json.Unmarshal(f["id"], &id)
-			if label == v.Name || id == v.Name {
+			if label == tf.Name || id == tf.Name {
 				if match >= 0 {
 					return nil, storeFailure()
 				}
@@ -254,23 +377,135 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 			}
 		}
 		if match < 0 {
-			fields = append(fields, map[string]json.RawMessage{})
-			match = len(fields) - 1
-			put(fields[match], "id", storeRandom()[:26])
-			put(fields[match], "label", v.Name)
+			return nil, storeFailure()
+		}
+		if err := checkSection(fields[match]); err != nil {
+			return nil, err
+		}
+		var delID string
+		_ = json.Unmarshal(fields[match]["id"], &delID)
+		deletedIDs[tf.Name] = delID
+		for _, b := range fields[match] {
+			clear(b)
+		}
+		fields = append(fields[:match], fields[match+1:]...)
+	}
+
+	writtenID := map[string]string{}
+	writtenPurpose := map[string]string{}
+	valIdx := 0
+	for _, tf := range t.Fields {
+		if tf.Delete {
+			continue
+		}
+		match := -1
+		if bid, _, bpurpose, _, ok := builtinFieldSpec(category, tf.Name, tf.Type); ok {
+			for j, f := range fields {
+				var id, purpose string
+				_ = json.Unmarshal(f["id"], &id)
+				_ = json.Unmarshal(f["purpose"], &purpose)
+				if id == bid || (bpurpose != "" && strings.EqualFold(purpose, bpurpose)) {
+					if match >= 0 {
+						return nil, storeFailure()
+					}
+					match = j
+				}
+			}
+		}
+		if match < 0 {
+			for j, f := range fields {
+				var label, id string
+				_ = json.Unmarshal(f["label"], &label)
+				_ = json.Unmarshal(f["id"], &id)
+				if label == tf.Name || id == tf.Name {
+					if match >= 0 {
+						return nil, storeFailure()
+					}
+					match = j
+				}
+			}
+		}
+		if tf.KeepValue {
+			if match < 0 {
+				return nil, storeFailure()
+			}
+			f := fields[match]
+			if err := checkSection(f); err != nil {
+				return nil, err
+			}
+			var existing string
+			if json.Unmarshal(f["value"], &existing) != nil || existing == "" {
+				return nil, storeFailure()
+			}
+			nextVal := existing
+			if tf.Type == "OTP" {
+				norm, err := normalizeOTPValue(existing, title, tf.Name)
+				if err != nil {
+					return nil, err
+				}
+				nextVal = norm
+				delete(f, "totp")
+			}
+			clear(f["value"])
+			put(f, "value", nextVal)
+			put(f, "type", tf.Type)
+			var fid string
+			_ = json.Unmarshal(f["id"], &fid)
+			writtenID[tf.Name] = fid
+			continue
+		}
+		if valIdx >= len(vals) {
+			return nil, storeFailure()
+		}
+		v := vals[valIdx]
+		valIdx++
+		nextVal := string(v.Value)
+		if tf.Type == "OTP" {
+			norm, err := normalizeOTPValue(nextVal, title, tf.Name)
+			if err != nil {
+				return nil, err
+			}
+			nextVal = norm
+		}
+		if match < 0 {
+			nf := map[string]json.RawMessage{}
+			if bid, blabel, bpurpose, btype, ok := builtinFieldSpec(category, tf.Name, tf.Type); ok {
+				put(nf, "id", bid)
+				put(nf, "label", blabel)
+				put(nf, "purpose", bpurpose)
+				put(nf, "type", btype)
+				writtenID[tf.Name] = bid
+				writtenPurpose[tf.Name] = bpurpose
+			} else {
+				newID := storeRandom()[:26]
+				put(nf, "id", newID)
+				put(nf, "label", tf.Name)
+				put(nf, "type", tf.Type)
+				writtenID[tf.Name] = newID
+			}
+			put(nf, "value", nextVal)
+			fields = append(fields, nf)
+			continue
 		}
 		f := fields[match]
-		if raw := bytes.TrimSpace(f["section"]); len(raw) > 0 && string(raw) != "null" {
-			var section struct {
-				ID string `json:"id"`
-			}
-			if json.Unmarshal(raw, &section) != nil || (section.ID != "" && !unnamed[section.ID]) {
-				return nil, &ext.Error{Code: "refused", Message: "Named or unknown sections are not supported for storage yet"}
-			}
+		if err := checkSection(f); err != nil {
+			return nil, err
+		}
+		var fid, fpurpose string
+		_ = json.Unmarshal(f["id"], &fid)
+		_ = json.Unmarshal(f["purpose"], &fpurpose)
+		if tf.Type == "OTP" {
+			delete(f, "totp")
 		}
 		clear(f["value"])
-		put(f, "value", string(v.Value))
-		put(f, "type", t.Fields[i].Type)
+		put(f, "value", nextVal)
+		typ := tf.Type
+		if bid, _, bpurpose, btype, ok := builtinFieldSpec(category, tf.Name, tf.Type); ok && (fid == bid || strings.EqualFold(fpurpose, bpurpose)) {
+			typ = btype
+			writtenPurpose[tf.Name] = bpurpose
+		}
+		put(f, "type", typ)
+		writtenID[tf.Name] = fid
 	}
 	clear(item["fields"])
 	put(item, "fields", fields)
@@ -298,15 +533,50 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 	if json.Unmarshal(out, &saved) != nil || !opID.MatchString(saved.ID) || saved.Vault.ID != t.Vault {
 		return nil, storeFailure()
 	}
+	for _, delID := range deletedIDs {
+		if delID == "" {
+			continue
+		}
+		for _, sf := range saved.Fields {
+			if sf.ID == delID {
+				return nil, storeFailure()
+			}
+		}
+	}
 	refs := map[string]string{}
 	for _, f := range t.Fields {
+		if f.Delete {
+			continue
+		}
 		id := ""
-		for _, sf := range saved.Fields {
-			if sf.Label == f.Name || sf.ID == f.Name {
-				if id != "" {
-					return nil, storeFailure()
+		if wantID := writtenID[f.Name]; wantID != "" {
+			for _, sf := range saved.Fields {
+				if sf.ID == wantID {
+					id = sf.ID
+					break
 				}
-				id = sf.ID
+			}
+		}
+		if id == "" {
+			if wantPurpose := writtenPurpose[f.Name]; wantPurpose != "" {
+				for _, sf := range saved.Fields {
+					if strings.EqualFold(sf.Purpose, wantPurpose) {
+						if id != "" {
+							return nil, storeFailure()
+						}
+						id = sf.ID
+					}
+				}
+			}
+		}
+		if id == "" {
+			for _, sf := range saved.Fields {
+				if sf.Label == f.Name || sf.ID == f.Name {
+					if id != "" {
+						return nil, storeFailure()
+					}
+					id = sf.ID
+				}
 			}
 		}
 		if id == "" || !refSafe(id) {

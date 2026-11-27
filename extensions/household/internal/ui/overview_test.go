@@ -1,13 +1,20 @@
 package ui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/wire"
 
+	"github.com/nwverse/persona-extensions/extensions/household/internal/model"
+	"github.com/nwverse/persona-extensions/extensions/household/internal/ops"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/rules"
+	"github.com/nwverse/persona-extensions/pluginkit/spaces/kernel"
+	"github.com/nwverse/persona-extensions/pluginkit/spaces/store"
 )
 
 func TestOverviewWithNoRecordsOffersSamplesAndAdd(t *testing.T) {
@@ -48,7 +55,7 @@ func TestOverviewWithSamplesShowsEverySection(t *testing.T) {
 			t.Fatalf("no section %q", title)
 		}
 	}
-	stats := v.Sections[0].Items[0]
+	stats := overviewGrid(t, v)
 	if stats.Type != wire.ComponentStatGrid || len(stats.Stats) != 4 {
 		t.Fatalf("first component %+v, want a stat grid of four", stats)
 	}
@@ -65,7 +72,7 @@ func TestOverviewStatsMatchTheRules(t *testing.T) {
 	a, _ := newApp(st)
 	h := home(t, st)
 	sum := rules.Summarize(h, testToday)
-	stats := render(t, a, state{}).Sections[0].Items[0].Stats
+	stats := overviewGrid(t, render(t, a, state{})).Stats
 	got := map[string]string{}
 	for _, s := range stats {
 		got[s.Label] = s.Value
@@ -258,7 +265,7 @@ func TestOverviewAlwaysOffersAddItem(t *testing.T) {
 	checkView(t, "populated overview", v, false)
 }
 
-func TestSectionsSayWhenEmpty(t *testing.T) {
+func TestEmptyBlocksFoldIntoOneLine(t *testing.T) {
 	st := newStore(t, false)
 	a, _ := newApp(st)
 	// One record that needs nothing: a fine item with no quantity, no expiry and no threshold.
@@ -266,12 +273,77 @@ func TestSectionsSayWhenEmpty(t *testing.T) {
 	v := render(t, a, state{})
 	checkView(t, "quiet overview", v, false)
 	for _, title := range []string{"需要补货", "先用掉", "到期家务"} {
-		sec, ok := sectionTitled(v, title)
-		if !ok {
-			t.Fatalf("no %s section", title)
+		if sec, ok := sectionTitled(v, title); ok {
+			t.Fatalf("empty %s shown: %+v", title, sec)
 		}
-		if len(sec.Items) == 0 || sec.Items[0].Type != wire.ComponentText {
-			t.Fatalf("%s with nothing to show has items %+v, want one quiet text", title, sec.Items)
+	}
+	// Nothing at all: the advice says so once, and the meal block keeps its next step.
+	advice, _ := sectionTitled(v, "今天的建议")
+	if len(advice.Items) != 1 || advice.Items[0].Text != nothingToday || advice.Footer != "" {
+		t.Fatalf("advice %+v", advice)
+	}
+	if meals, ok := sectionTitled(v, "今天吃什么"); !ok || !strings.Contains(meals.Items[0].Text, "「餐食」") {
+		t.Fatalf("meal block %+v", meals)
+	}
+
+	// A chore due: its block shows, the two empty ones are one line under the advice.
+	act(t, a, state{F: "new:chore"}, map[string]string{"title": "倒垃圾"}, "save")
+	v = render(t, a, state{})
+	checkView(t, "overview with one chore", v, false)
+	if sec, ok := sectionTitled(v, "到期家务"); !ok || sec.Items[0].Type != wire.ComponentRow {
+		t.Fatalf("chore block %+v", sec)
+	}
+	for _, title := range []string{"需要补货", "先用掉"} {
+		if _, ok := sectionTitled(v, title); ok {
+			t.Fatalf("empty %s shown", title)
+		}
+	}
+	advice, _ = sectionTitled(v, "今天的建议")
+	if advice.Footer != "库存里没有缺的，没有快过期的。" {
+		t.Fatalf("folded line %q", advice.Footer)
+	}
+	var titles []string
+	for _, s := range v.Sections {
+		titles = append(titles, s.Title)
+	}
+	want := []string{"", "今天的建议", "到期家务", "今天吃什么", addTitle}
+	if fmt.Sprint(titles) != fmt.Sprint(want) {
+		t.Fatalf("sections %q, want %q", titles, want)
+	}
+}
+
+func TestEveryWayToAddHasItsSentenceAndButton(t *testing.T) {
+	for _, samples := range []bool{false, true} {
+		a, _ := newApp(newStore(t, samples))
+		v := render(t, a, state{})
+		sec, ok := sectionTitled(v, addTitle)
+		if !ok || v.Sections[len(v.Sections)-1].Title != addTitle {
+			t.Fatalf("samples %v: 记新东西 is not the last section", samples)
+		}
+		var got []string
+		for _, c := range sec.Items {
+			switch c.Type {
+			case wire.ComponentRow:
+				if c.Subtitle == "" || c.Action != nil {
+					t.Fatalf("way %+v: wants its sentence and no tap", c)
+				}
+				got = append(got, c.Title)
+			case wire.ComponentButton:
+				got = append(got, "["+c.Title+"]")
+			}
+		}
+		want := []string{"记一样", "[添加物品]", "自己粘贴一份清单", "[粘贴清单]", "让助手帮我记"}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("samples %v: ways %q, want %q", samples, got, want)
+		}
+		if !strings.Contains(sec.Items[2].Subtitle, "不经过助手") || !strings.Contains(sec.Items[4].Subtitle, "发给助手") {
+			t.Fatalf("paste and assistant are not told apart: %+v", sec.Items)
+		}
+		// No section holds a lone button.
+		for _, s := range v.Sections {
+			if len(s.Items) == 1 && s.Items[0].Type == wire.ComponentButton {
+				t.Fatalf("samples %v: lone button %q", samples, s.Items[0].Title)
+			}
 		}
 	}
 }
@@ -294,4 +366,94 @@ func buttonByAction(v *wire.View, id string) (wire.Component, bool) {
 		}
 	}
 	return wire.Component{}, false
+}
+
+// overviewGrid is the stat grid of the overview's first section.
+func overviewGrid(t *testing.T, v *wire.View) wire.Component {
+	t.Helper()
+	for _, c := range v.Sections[0].Items {
+		if c.Type == wire.ComponentStatGrid {
+			return c
+		}
+	}
+	t.Fatalf("no stat grid in the first section: %+v", v.Sections[0].Items)
+	return wire.Component{}
+}
+
+// TestOverviewWithRecordsSaysWhatItIsForInOneLine keeps a short intro on the overview with records: one secondary
+// line, then the numbers, so the numbers stay at the top of a phone screen.
+func TestOverviewWithRecordsSaysWhatItIsForInOneLine(t *testing.T) {
+	a, _ := newApp(newStore(t, true))
+	v := render(t, a, state{})
+	items := v.Sections[0].Items
+	if len(items) != 2 || items[0].Type != wire.ComponentText || items[1].Type != wire.ComponentStatGrid {
+		t.Fatalf("first section %+v, want the intro line then the stat grid", items)
+	}
+	intro := items[0]
+	if intro.Text != overviewIntro || intro.Style != wire.TextStyleSecondary {
+		t.Fatalf("intro %+v, want %q in the secondary style", intro, overviewIntro)
+	}
+	if n := utf8.RuneCountInString(intro.Text); n > 26 || strings.Contains(intro.Text, "\n") {
+		t.Fatalf("intro %q is %d characters, want one short line", intro.Text, n)
+	}
+	for _, w := range []string{"有什么", "买", "家务", "提醒"} {
+		if !strings.Contains(intro.Text, w) {
+			t.Errorf("intro %q does not mention %q", intro.Text, w)
+		}
+	}
+}
+
+// TestOverviewNumbersSayWhatTheyCount checks 待买 and 需要处理 explain themselves: 待买 is the open shopping list,
+// 需要处理 is the items to restock plus the chores due (the two parts in its detail add up to it), and the caption
+// under the grid tells the two apart.
+func TestOverviewNumbersSayWhatTheyCount(t *testing.T) {
+	st := newStore(t, true)
+	a, _ := newApp(st)
+	v := render(t, a, state{})
+	sum := rules.Summarize(home(t, st), testToday)
+	stats := map[string]wire.Stat{}
+	for _, s := range overviewGrid(t, v).Stats {
+		stats[s.Label] = s
+	}
+	buy := sum.Expired + sum.Out + sum.Low + sum.Runout
+	if buy+sum.ChoresDue != sum.Alerts {
+		t.Fatalf("restock %d + chores %d != alerts %d", buy, sum.ChoresDue, sum.Alerts)
+	}
+	want := fmt.Sprintf("补货 %d · 家务 %d", buy, sum.ChoresDue)
+	if got := stats["需要处理"].Detail; got != want {
+		t.Fatalf("需要处理 detail %q, want %q", got, want)
+	}
+	if got := stats["待买"].Detail; !strings.Contains(got, "采购清单") {
+		t.Fatalf("待买 detail %q, want it to name the shopping list", got)
+	}
+	if f := v.Sections[0].Footer; f != statsCaption || !strings.Contains(f, "待买") || !strings.Contains(f, "需要处理") {
+		t.Fatalf("stat caption %q, want %q", f, statsCaption)
+	}
+}
+
+// TestShoppingListAloneIsNotSomethingToHandle is the case a first-time user asks about: entries on the shopping list
+// and nothing low, expiring or due. 待买 counts them, 需要处理 stays 0 and its detail says why.
+func TestShoppingListAloneIsNotSomethingToHandle(t *testing.T) {
+	st := store.Open("")
+	err := st.Update(func(b *kernel.Base, _ time.Time) error {
+		for _, n := range []string{"洗衣液", "抽纸", "鸡蛋", "酱油"} {
+			if _, err := ops.Save(b, kernel.EntityInput{Type: model.TBuy, Title: &n}, testNow, testLoc()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := newApp(st)
+	v := render(t, a, state{})
+	checkView(t, "shopping-only overview", v, false)
+	got := map[string]wire.Stat{}
+	for _, s := range overviewGrid(t, v).Stats {
+		got[s.Label] = s
+	}
+	if got["待买"].Value != "4" || got["需要处理"].Value != "0" || got["需要处理"].Detail != "补货 0 · 家务 0" {
+		t.Fatalf("stats %+v, want 待买 4 and 需要处理 0 (补货 0 · 家务 0)", got)
+	}
 }

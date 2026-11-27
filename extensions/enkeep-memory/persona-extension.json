@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "enkeep-memory",
   "name": "enkeep 记忆",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "icon": "assets/icon.png",
   "description": "从你在 Persona 里的对话、Agent 会话、卡片问答和消息来源里，整理你和 AI 怎么打交道、AI 怎么用工具、你的默认判断和做事方式、你的人和事、你自己，以及和你有来往的人；每条都带出处，你可以改、删、点对错。",
   "publisher": "nwverse",
@@ -65,7 +65,8 @@
         "id": "enkeep-memory-kb",
         "subscribe": [
           "kb.changed",
-          "kb.forgotten"
+          "kb.forgotten",
+          "assistant.entries.changed"
         ]
       }
     ],
@@ -433,7 +434,9 @@
       "todos.read",
       "notify",
       "assistant.ask",
-      "assistant.memory.read"
+      "assistant.memory.read",
+      "assistant.entries.read",
+      "sent.read"
     ]
   }
 }

@@ -350,6 +350,11 @@ def _inline_images(rich):
     return out
 
 
+def _clean_id(value):
+    s = str(value or "").strip()
+    return "" if s == "0" else s
+
+
 def normalize(msg, extract_key):
     """A message of LarkAgentX's, live or from history, as the connector keeps it. Pure, for the tests."""
     msg_type = msg.get("msg_type") or 0
@@ -385,14 +390,32 @@ def normalize(msg, extract_key):
     at = float(msg.get("create_time") or 0)
     if at > 1e12:
         at /= 1000
-    root = str(msg.get("root_id") or "")
-    parent = str(msg.get("parent_id") or "")
+    msg_id = _clean_id(msg.get("msg_id"))
+    root = _clean_id(msg.get("root_id"))
+    parent = _clean_id(msg.get("parent_id"))
+    chat_type = msg.get("chat_type")
+    scope = str(msg.get("scope") or "").strip()
+    anchor = _clean_id(msg.get("anchor"))
+    # Pinned LarkAgentX (97ad48e) folds threadId into anchor and does not emit thread_id; keep thread_id as a
+    # defensive fallback in case a future upstream pin or caller supplies it directly.
+    thread_id = _clean_id(msg.get("thread_id"))
+    topic_id = ""
+    if chat_type != 1:
+        if scope == "topic":
+            topic_id = anchor or thread_id or root or (msg_id if name != "SYSTEM" else "")
+        elif chat_type == 3 and name != "SYSTEM":
+            topic_id = anchor or thread_id or root or msg_id
+        else:
+            topic_id = thread_id or root
+    if not root and chat_type != 1 and scope == "topic":
+        # LarkAgentX identifies roots in topic groups before any replies arrive.
+        root = msg_id
     return {
-        "id": str(msg.get("msg_id") or ""), "chat": str(msg.get("chat_id") or ""),
-        "chat_kind": "dm" if msg.get("chat_type") == 1 else "group",
+        "id": msg_id, "chat": str(msg.get("chat_id") or ""),
+        "chat_kind": "dm" if chat_type == 1 else "group",
         "position": int(msg.get("position") or 0), "sender": str(msg.get("from_id") or ""), "type": name,
-        "text": text, "at": at or time.time(), "root": "" if root == "0" else root,
-        "parent": "" if parent == "0" else parent, "at_me": bool(msg.get("at_me")), "media": media,
+        "text": text, "at": at or time.time(), "root": root,
+        "parent": parent, "topic_id": topic_id, "at_me": bool(msg.get("at_me")), "media": media,
         "mentions": mentions, "markdown": markdown or "",
     }
 
@@ -818,6 +841,56 @@ class RealBackend:
     def user_name(self, user, chat):
         return self._client.get_user_name(user, chat)
 
+    def chat_members(self, chat, limit=100):
+        """List members of a group chat, including bots, via chats.PullChatChattersRequest."""
+        out, seen = [], set()
+        cursor = 0
+        max_pages = 5
+        for _ in range(max_pages):
+            if len(out) >= limit:
+                break
+            params = {"chatId": str(chat), "needChatters": True, "limit": min(100, max(20, limit - len(out)))}
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._client.api("chats.PullChatChattersRequest", params) or {}
+            chatters = resp.get("chatters") or {}
+            nicknames = resp.get("groupNicknames") or {}
+            if not isinstance(chatters, dict) or not chatters:
+                break
+            added = 0
+            for cid_key, ch in chatters.items():
+                if not isinstance(ch, dict):
+                    continue
+                uid = str(ch.get("id") or cid_key or "")
+                if not uid.isdigit() or int(uid) <= 0 or uid in seen:
+                    continue
+                seen.add(uid)
+                added += 1
+                raw_type = ch.get("type")
+                is_bot = raw_type in (2, 3, "BOT", "AI") or bool(ch.get("botConfig"))
+                real_name = (ch.get("name") or ch.get("enUsName") or ch.get("alias") or "").strip()
+                nick = (nicknames.get(uid) or "").strip() if isinstance(nicknames, dict) else ""
+                display = nick or real_name
+                if not display:
+                    continue
+                out.append({
+                    "id": uid,
+                    "name": display,
+                    "real_name": real_name,
+                    "kind": "bot" if is_bot else "user",
+                })
+                if len(out) >= limit:
+                    break
+            next_cursor = resp.get("nextCursor") or 0
+            try:
+                next_cursor = int(next_cursor)
+            except (TypeError, ValueError):
+                next_cursor = 0
+            if not next_cursor or next_cursor == cursor or added == 0:
+                break
+            cursor = next_cursor
+        return out
+
     def download(self, msg_id, chat, key, most):
         from larkx import media
         url = media.message_resource_url(msg_id, key, chat, host=self._auth.region.file_host)
@@ -869,7 +942,7 @@ def mention_parts(text, mentions):
         raise ValueError("two mentioned people cannot have the same name")
     targets.sort(key=lambda target: len(target[1]), reverse=True)
     import re
-    pattern = re.compile("(" + "|".join("@" + re.escape(name) for _, name in targets) + ")") if targets else None
+    pattern = re.compile("(" + "|".join("@" + re.escape(name) for _, name in targets) + r")(?![\w-])") if targets else None
     by_name = {name: {"id": user_id, "name": name} for user_id, name in targets}
     out = []
     for part in pattern.split(text) if pattern else [text]:

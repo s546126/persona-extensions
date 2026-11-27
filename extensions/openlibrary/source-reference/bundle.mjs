@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "openlibrary", name: "Open Library \u56FE\u4E66\u53D1\u73B0", version: "0.1.4", icon: "assets/icon.png", description: "\u6309\u4E66\u540D\u3001\u4F5C\u8005\u6216 ISBN \u641C\u7D22\u56FE\u4E66\uFF0C\u67E5\u770B\u51FA\u7248\u4FE1\u606F\u3001\u4F5C\u54C1\u7B80\u4ECB\u548C Open Library \u9605\u8BFB\u5165\u53E3\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/openlibrary/README.md", tags: ["\u56FE\u4E66", "\u9605\u8BFB", "Open Library"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/openlibrary.mjs", sha256: "" } }, contributes: { connectors: [{ id: "openlibrary", name: "Open Library", capabilities: ["status", "tools"], hosts: ["openlibrary.org"], agent_tools: ["openlibrary_*"] }], ui: [{ id: "openlibrary", title: "\u53D1\u73B0\u56FE\u4E66", placement: "nav_page", icon: "doc" }] }, permissions: { network: ["openlibrary.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "openlibrary", name: "Open Library \u56FE\u4E66\u53D1\u73B0", version: "0.1.5", icon: "assets/icon.png", description: "\u6309\u4E66\u540D\u3001\u4F5C\u8005\u6216 ISBN \u641C\u7D22\u56FE\u4E66\uFF0C\u67E5\u770B\u51FA\u7248\u4FE1\u606F\u3001\u4F5C\u54C1\u7B80\u4ECB\u548C Open Library \u9605\u8BFB\u5165\u53E3\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/openlibrary/README.md", tags: ["\u56FE\u4E66", "\u9605\u8BFB", "Open Library"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/openlibrary.mjs", sha256: "" } }, contributes: { connectors: [{ id: "openlibrary", name: "Open Library", capabilities: ["status", "tools"], hosts: ["openlibrary.org"], agent_tools: ["openlibrary_*"] }], ui: [{ id: "openlibrary", title: "\u53D1\u73B0\u56FE\u4E66", placement: "nav_page", icon: "doc" }] }, permissions: { network: ["openlibrary.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 2 << 20, fresh: 60 * 6e4, cache: 40, cacheBytes: 2 << 20, gap: 250 });
@@ -779,8 +779,30 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var plain = (text) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, raw, most = 128) {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 function object(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
   return value;
@@ -802,10 +824,17 @@ function workKey(value) {
   if (typeof value !== "string" || !/^OL[1-9][0-9]{0,9}W$/.test(value)) throw new ReadError("invalid");
   return value;
 }
+function upstreamWorkKey(value) {
+  try {
+    return workKey(string(value).replace(/^\/works\//, ""));
+  } catch {
+    throw new ReadError("bad_answer");
+  }
+}
 function queryText(value) {
   if (typeof value !== "string") throw new ReadError("invalid");
   const text = plain(value);
-  if (!text || Array.from(text).length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (!text || Array.from(text).length > 200 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   return text;
 }
 function searchPath(query, limit = 20) {
@@ -831,10 +860,10 @@ function identifier(value) {
   return id;
 }
 function parseBook(raw) {
-  const value = object(raw), key = workKey(string(value.key).replace(/^\/works\//, ""));
-  const title = clip(plain(string(value.title)), 500);
+  const value = object(raw), key = upstreamWorkKey(value.key);
+  const title = clip(plain(string(value.title).replace(/[\ud800-\udfff]/gu, "")), 500);
   if (!title) throw new ReadError("bad_answer");
-  const authors = array(value.author_name ?? []).slice(0, 8).map((name) => clip(plain(string(name)), 200)).filter(Boolean);
+  const authors = array(value.author_name ?? []).slice(0, 8).map((name) => clip(plain(string(name).replace(/[\ud800-\udfff]/gu, "")), 200)).filter(Boolean);
   const year = value.first_publish_year == null ? void 0 : integer(value.first_publish_year, 2200);
   const editions = value.edition_count == null ? void 0 : integer(value.edition_count);
   const availability = access(value.ebook_access);
@@ -873,16 +902,16 @@ function parseSearch(raw, at) {
 }
 function description(value) {
   if (value == null) return "";
-  if (typeof value === "string") return clip(plain(value), 8e3);
+  if (typeof value === "string") return clip(plain(value.replace(/[\ud800-\udfff]/gu, "")), 8e3);
   const item = object(value);
   if (item.type != null && item.type !== "/type/text") throw new ReadError("bad_answer");
-  return clip(plain(string(item.value)), 8e3);
+  return clip(plain(string(item.value).replace(/[\ud800-\udfff]/gu, "")), 8e3);
 }
 function parseWork(raw, base, at) {
-  const value = object(raw), key = workKey(string(value.key).replace(/^\/works\//, ""));
-  const title = clip(plain(string(value.title)), 500);
+  const value = object(raw), key = upstreamWorkKey(value.key);
+  const title = clip(plain(string(value.title).replace(/[\ud800-\udfff]/gu, "")), 500);
   if (key !== base.key || !title || title !== base.title) throw new ReadError("bad_answer");
-  const subjects = array(value.subjects ?? []).slice(0, 12).map((item) => clip(plain(string(item)), 100)).filter(Boolean);
+  const subjects = array(value.subjects ?? []).slice(0, 12).map((item) => clip(plain(string(item).replace(/[\ud800-\udfff]/gu, "")), 100)).filter(Boolean);
   return { ...base, title, description: description(value.description), subjects, at };
 }
 
@@ -1021,7 +1050,17 @@ function errorText(error, locale = "") {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 function readTime(at, timeZone = "Local", locale = "en") {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? void 0 : timeZone }).format(at);
+  if (!Number.isFinite(at)) return "";
+  const opts = { year: "numeric", month: "short", day: "numeric" };
+  try {
+    return new Intl.DateTimeFormat(locale, { ...opts, timeZone: timeZone === "Local" ? void 0 : timeZone }).format(at);
+  } catch {
+    try {
+      return new Intl.DateTimeFormat("en", { ...opts, timeZone: "UTC" }).format(at);
+    } catch {
+      return new Date(at).toISOString().slice(0, 10);
+    }
+  }
 }
 
 // src/service.ts
@@ -1060,16 +1099,31 @@ var OpenLibrary = class {
   queue = Promise.resolve();
   lastOK;
   lastError;
+  touch(path, item) {
+    this.cache.delete(path);
+    this.cache.set(path, item);
+  }
   cached(path, fresh) {
     const item = this.cache.get(path);
-    return item && this.monotonic() - item.used < fresh ? { raw: item.raw, at: item.at } : void 0;
+    if (!item || this.monotonic() - item.saved >= fresh) return void 0;
+    this.touch(path, item);
+    return { raw: item.raw, at: item.at };
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    if (bytes > this.limits.cacheBytes) {
+      if (old) {
+        this.bytes -= old.bytes;
+        this.cache.delete(path);
+      }
+      return;
+    }
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    this.cache.set(path, { raw, at, saved: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       const oldest = this.cache.keys().next().value;
@@ -1091,6 +1145,21 @@ var OpenLibrary = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1107,7 +1176,8 @@ var OpenLibrary = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1128,20 +1198,18 @@ var OpenLibrary = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal) {
+  async read(path, fresh, signal, validate) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1162,16 +1230,22 @@ var OpenLibrary = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
+        validate(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
         if (request.signal.aborted) {
-          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+          const aborted = cancellation(request.signal);
+          if (aborted instanceof ReadError) {
+            this.lastError = { code: aborted.code, status: aborted.status, at: this.monotonic() };
+            throw aborted;
+          }
+          throw error instanceof Error && error.name === "AbortError" ? error : aborted;
         }
         const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1185,8 +1259,11 @@ var OpenLibrary = class {
       return await run;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
-      const old = this.cached(path, Infinity);
-      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+      const old = this.cache.get(path);
+      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
+        this.touch(path, old);
+        return { raw: old.raw, at: old.at, stale: error instanceof ReadError ? error : new ReadError("network") };
+      }
       throw error;
     }
   }
@@ -1196,15 +1273,19 @@ var OpenLibrary = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 20, refresh = false, signal) {
-    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal);
+    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
+      parseSearch(raw, at);
+    });
     return { ...parseSearch(rd.raw, rd.at), stale: rd.stale };
   }
   async work(key, base, refresh = false, signal) {
-    const rd = await this.read(workPath(key), refresh ? 0 : this.limits.fresh, signal);
+    const rd = await this.read(workPath(key), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
+      parseWork(raw, base, at);
+    });
     return { ...parseWork(rd.raw, base, rd.at), stale: rd.stale };
   }
   cacheStats() {
@@ -1240,14 +1321,36 @@ Subjects: ${work.subjects.join(", ")}`;
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const key of ["query", "work"]) for (const token of exact.fieldValues(key)) {
+      if (token.raw === "null") {
+        delete args[key];
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[key] = value2;
     }
-    const parsed = exact.int64Fields(["limit"]).limit;
-    if (parsed !== 0n) args.limit = parsed;
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1258,23 +1361,33 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "openlibrary_search" && name !== "openlibrary_work") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "openlibrary_search") {
-      if (typeof args.query !== "string") throw new ReadError("invalid");
-      const limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 30) throw new ReadError("invalid");
-      const result = await service.search(args.query, limit, false, request.signal);
-      return clip(result.books.length ? result.books.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29999);
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 30n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 30) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
+      const result = await service.search(query, limit, false, request.signal);
+      return clip(result.books.length ? result.books.map(line).join("\n").trim() : fmt(t.results, { query }) + "\n" + t.empty, 29999);
     }
-    if (name === "openlibrary_work") {
-      if (typeof args.work !== "string") throw new ReadError("invalid");
-      const search = await service.search(args.work, 30, false, request.signal);
-      const base = search.books.find((book2) => book2.key === args.work);
-      if (!base) throw new ReadError("not_found");
-      return clip(detail(await service.work(base.key, base, false, request.signal)), 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    const key = workKey(args.work);
+    const search = await service.search(key, 30, false, request.signal);
+    const base = search.books.find((book2) => book2.key === key);
+    if (!base) throw new ReadError("not_found");
+    return clip(detail(await service.work(base.key, base, false, request.signal)), 29999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1306,14 +1419,43 @@ var jsx = createElement;
 var jsxs = createElement;
 
 // src/page.tsx
+var TEXT_MAX = 2e3;
+var KEY_MAX = 128;
+var ITEMS_MAX = 300;
+var STATE_MAX = 16384;
+var FRAME_MAX = 512 * 1024;
+var URL_MAX = 4096;
+var utf8 = new TextEncoder();
+var byteLength = (text) => utf8.encode(text).byteLength;
+function safeLinkURL(value) {
+  if (typeof value !== "string" || !value) return void 0;
+  let link;
+  try {
+    link = new URL(value);
+  } catch {
+    return void 0;
+  }
+  if (link.protocol !== "https:" || link.username || link.password || link.port || link.href.length > URL_MAX) return void 0;
+  return link.href;
+}
+function uniqueKey(used, prefix, raw) {
+  let key = boundedID(prefix, raw, KEY_MAX);
+  let attempt = 2;
+  while (used.has(key)) {
+    key = boundedID(prefix, `${raw}#${attempt}`, KEY_MAX);
+    attempt++;
+  }
+  used.add(key);
+  return key;
+}
 var initialState = { v: "discover", q: "", k: "" };
 function book(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return void 0;
   const b = raw;
-  if (typeof b.key !== "string" || typeof b.title !== "string" || !Array.isArray(b.authors) || b.authors.some((x) => typeof x !== "string") || typeof b.url !== "string" || b.url !== `https://openlibrary.org/works/${b.key}` || typeof b.access !== "string" || !["public", "borrowable", "printdisabled", "no_ebook"].includes(b.access)) return void 0;
+  if (typeof b.key !== "string" || typeof b.title !== "string" || /[\ud800-\udfff]/u.test(b.title) || !Array.isArray(b.authors) || b.authors.some((x) => typeof x !== "string" || /[\ud800-\udfff]/u.test(x)) || typeof b.url !== "string" || b.url !== `https://openlibrary.org/works/${b.key}` || typeof b.access !== "string" || !["public", "borrowable", "printdisabled", "no_ebook"].includes(b.access)) return void 0;
   if (b.year != null && (typeof b.year !== "number" || !Number.isSafeInteger(b.year) || b.year < 0 || b.year > 2200)) return void 0;
   if (b.editions != null && (typeof b.editions !== "number" || !Number.isSafeInteger(b.editions) || b.editions < 0)) return void 0;
-  if (b.readingURL != null && (typeof b.readingURL !== "string" || !/^https:\/\/openlibrary\.org\/books\/ia:[A-Za-z0-9][A-Za-z0-9._%-]{0,150}$/.test(b.readingURL))) return void 0;
+  if (b.readingURL != null && (typeof b.readingURL !== "string" || b.readingURL.length > URL_MAX || !/^https:\/\/openlibrary\.org\/books\/ia:[A-Za-z0-9][A-Za-z0-9._%-]{0,150}$/.test(b.readingURL))) return void 0;
   try {
     workKey(b.key);
   } catch {
@@ -1331,23 +1473,34 @@ function book(raw) {
   };
 }
 function readState(raw) {
-  if (typeof raw !== "string" || raw.length > 8e3) return initialState;
+  if (typeof raw !== "string" || byteLength(raw) > STATE_MAX) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value)) return initialState;
-    const state = {
-      v: value.v === "search" || value.v === "work" ? value.v : "discover",
-      q: typeof value.q === "string" ? clip(value.q.trim(), 200) : "",
-      k: typeof value.k === "string" && value.k ? workKey(value.k) : "",
-      ...value.b === void 0 ? {} : { b: book(value.b) }
-    };
-    if (state.v === "work" && (!state.k || !state.b) || state.v === "search" && !state.q) return initialState;
-    return state;
+    const v = value.v === "search" || value.v === "work" ? value.v : "discover";
+    const q = typeof value.q === "string" && value.q !== "" ? queryText(value.q) : "";
+    const k = typeof value.k === "string" && value.k ? workKey(value.k) : "";
+    const b = value.b === void 0 ? void 0 : book(value.b);
+    if (value.b !== void 0 && !b) return initialState;
+    if (v === "work" && (!k || !b || k !== b.key) || v === "search" && !q) return initialState;
+    return { v, q, k, ...b === void 0 ? {} : { b } };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+var encodeState = (state) => {
+  const encoded = JSON.stringify(state);
+  if (byteLength(encoded) <= STATE_MAX) return encoded;
+  const slim = JSON.stringify(state.q ? { v: "search", q: state.q, k: "" } : initialState);
+  return byteLength(slim) <= STATE_MAX ? slim : JSON.stringify(initialState);
+};
+function safeState(state) {
+  try {
+    return readState(JSON.stringify(state));
+  } catch {
+    return initialState;
+  }
+}
 function transition(state, id, values = {}) {
   const [kind, argument] = id.split(":", 2);
   if (kind === "work" && argument && state.b?.key === argument) return { ...state, v: "work", k: argument };
@@ -1363,9 +1516,14 @@ function transition(state, id, values = {}) {
   fields2 = values;
   const string2 = (key) => typeof fields2[key] === "string" ? fields2[key] : void 0;
   if (kind === "search") {
-    const raw = string2("query") ?? "";
-    const query = clip(raw.trim(), 200);
-    return query ? { v: "search", q: query, k: "" } : state;
+    const raw = string2("query");
+    if (raw === void 0 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\ud800-\udfff]/u.test(raw)) return state;
+    try {
+      const query = queryText(clip(plain(raw), 200));
+      return { v: "search", q: query, k: "" };
+    } catch {
+      return state;
+    }
   }
   if (kind === "back") return state.q ? { v: "search", q: state.q, k: "" } : initialState;
   if (kind === "home") return initialState;
@@ -1388,59 +1546,76 @@ async function loadPage(service, state, refresh, signal) {
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "openlibrary", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 8e3), style }, key);
-  const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "book-query"),
-    /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "book-search-submit")
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), stateJSON = encodeState(state), t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
+  const act = (id, next, title) => {
+    const cleanTitle = title ? clip(title, TEXT_MAX) : void 0;
+    return props.action?.(id, next, cleanTitle) ?? (next && uiVersion >= 3 ? { id, push: { ui: "openlibrary", state: encodeState(next), ...cleanTitle ? { title: cleanTitle } : {} } } : { id });
+  };
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, TEXT_MAX), style }, key);
+  const search = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, TEXT_MAX), children: [
+    /* @__PURE__ */ jsx(Field, { name: "query", label: clip(t.search, TEXT_MAX), kind: "text", placeholder: clip(t.searchHint, TEXT_MAX), value: state.q }, "book-query"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.searchAction, TEXT_MAX), action: act("search") }, "book-search-submit")
   ] }, "book-search");
-  const navigation = /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Button, { title: state.q ? t.back : t.backDiscover, action: act("back") }, "book-back") }, "book-navigation");
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.discover, state: encodeState(state), children: [
+  const navigation = /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Button, { title: clip(state.q ? t.back : t.backDiscover, TEXT_MAX), action: act("back") }, "book-back") }, "book-navigation");
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.discover, TEXT_MAX), state: stateJSON, children: [
     search,
     state.v !== "discover" ? navigation : null,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "book-loading-indicator") }, "book-loading")
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, TEXT_MAX) }, "book-loading-indicator") }, "book-loading")
   ] }, "openlibrary");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.discover, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.discover, TEXT_MAX), state: stateJSON, children: [
     search,
     state.v !== "discover" ? navigation : null,
     /* @__PURE__ */ jsxs(Section, { children: [
       text("book-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "book-retry")
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, TEXT_MAX), action: act("refresh") }, "book-retry")
     ] }, "book-error")
   ] }, "openlibrary");
   if (state.v === "work") {
     if (loaded.kind !== "work") throw new ReadError("invalid");
     const work = loaded.work;
-    return /* @__PURE__ */ jsxs(View, { title: work.title, state: encodeState(state), children: [
-      /* @__PURE__ */ jsxs(Section, { title: work.title, footer: [work.year ? fmt(t.year, { year: work.year }) : t.unknownYear, work.editions ? fmt(t.editions, { count: work.editions }) : "", t[work.access]].filter(Boolean).join(" \xB7 "), children: [
-        text("work-authors", work.authors.join(" \xB7 "), "body"),
+    const readLink = safeLinkURL(work.readingURL), workLink = safeLinkURL(work.url);
+    const readAt = readTime(work.at, tz, props.locale ?? service.locale);
+    const footerText = clip(`${readAt ? fmt(t.readAt, { at: readAt }) : ""}${work.stale ? `${readAt ? " \xB7 " : ""}${errorText(work.stale, props.locale ?? service.locale)}` : ""}`, TEXT_MAX);
+    return /* @__PURE__ */ jsxs(View, { title: clip(work.title, TEXT_MAX), state: stateJSON, children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(work.title, TEXT_MAX), footer: clip([work.year ? fmt(t.year, { year: work.year }) : t.unknownYear, work.editions ? fmt(t.editions, { count: work.editions }) : "", t[work.access]].filter(Boolean).join(" \xB7 "), TEXT_MAX), children: [
+        work.authors.length ? text("work-authors", work.authors.join(" \xB7 "), "body") : null,
         text("work-description", work.description || t.noDescription, "body")
       ] }, "work-details"),
-      work.subjects.length ? /* @__PURE__ */ jsx(Section, { title: t.subjects, children: text("work-subject-list", work.subjects.join(" \xB7 ")) }, "work-subjects") : null,
+      work.subjects.length ? /* @__PURE__ */ jsx(Section, { title: clip(t.subjects, TEXT_MAX), children: text("work-subject-list", work.subjects.join(" \xB7 ")) }, "work-subjects") : null,
       /* @__PURE__ */ jsxs(Section, { children: [
-        work.readingURL ? /* @__PURE__ */ jsx(Link, { title: t.read, url: work.readingURL }, "work-read") : null,
-        /* @__PURE__ */ jsx(Link, { title: t.open, url: work.url }, "work-open"),
-        /* @__PURE__ */ jsx(Button, { title: t.back, action: act("back") }, "work-back")
+        readLink ? /* @__PURE__ */ jsx(Link, { title: clip(t.read, TEXT_MAX), url: readLink }, "work-read") : null,
+        workLink ? /* @__PURE__ */ jsx(Link, { title: clip(t.open, TEXT_MAX), url: workLink }, "work-open") : null,
+        /* @__PURE__ */ jsx(Button, { title: clip(t.back, TEXT_MAX), action: act("back") }, "work-back")
       ] }, "work-actions"),
-      /* @__PURE__ */ jsx(Section, { footer: `${fmt(t.readAt, { at: readTime(work.at, tz, props.locale ?? service.locale) })}${work.stale ? ` \xB7 ${errorText(work.stale, props.locale ?? service.locale)}` : ""}`, children: /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "work-refresh") }, "work-footer"),
+      /* @__PURE__ */ jsx(Section, { footer: footerText, children: /* @__PURE__ */ jsx(Button, { title: clip(t.refresh, TEXT_MAX), action: act("refresh") }, "work-refresh") }, "work-footer"),
       /* @__PURE__ */ jsx(Section, { children: text("work-license", t.attribution, "caption") }, "work-attribution")
     ] }, "openlibrary");
   }
-  const row = (book2) => /* @__PURE__ */ jsx(
-    Row,
-    {
-      title: book2.title,
-      subtitle: [book2.authors.join(" \xB7 "), book2.year ? fmt(t.year, { year: book2.year }) : "", t[book2.access]].filter(Boolean).join(" \xB7 "),
-      action: act(`work:${book2.key}`, { v: "work", q: state.q, k: book2.key, b: book2 }, book2.title)
-    },
-    `book-${book2.key}`
-  );
-  return /* @__PURE__ */ jsxs(View, { title: state.v === "search" ? fmt(t.results, { query: clip(state.q, 100) }) : t.discover, state: encodeState(state), children: [
+  const usedKeys = /* @__PURE__ */ new Set(["book-search", "book-query", "book-search-submit", "book-results", "book-empty", "book-home", "book-welcome", "book-welcome-text", "book-attribution", "book-license"]);
+  const reservedItems = 2 + 1 + 1;
+  let remainingItems = Math.max(0, ITEMS_MAX - reservedItems);
+  let remainingBytes = FRAME_MAX - byteLength(stateJSON) - 8192;
+  const rows = [];
+  if (state.v === "search" && loaded.kind === "search") {
+    for (const item of loaded.result.books) {
+      if (remainingItems < 1) break;
+      const rowKey = uniqueKey(usedKeys, "book-", item.key);
+      const title = clip(item.title, TEXT_MAX);
+      const subtitle = clip([item.authors.join(" \xB7 "), item.year ? fmt(t.year, { year: item.year }) : "", t[item.access]].filter(Boolean).join(" \xB7 "), TEXT_MAX);
+      const nextState = { v: "work", q: state.q, k: item.key, b: item };
+      const nextStateJSON = uiVersion >= 3 ? encodeState(nextState) : "";
+      const estimatedBytes = byteLength(rowKey) + byteLength(title) + byteLength(subtitle) + byteLength(nextStateJSON) + 384;
+      if (estimatedBytes > remainingBytes) break;
+      remainingItems -= 1;
+      remainingBytes -= estimatedBytes;
+      rows.push(/* @__PURE__ */ jsx(Row, { title, subtitle, action: act(`work:${item.key}`, nextState, title) }, rowKey));
+    }
+  }
+  return /* @__PURE__ */ jsxs(View, { title: clip(state.v === "search" ? fmt(t.results, { query: clip(state.q, 100) }) : t.discover, TEXT_MAX), state: stateJSON, children: [
     search,
-    state.v === "search" ? /* @__PURE__ */ jsxs(Section, { title: fmt(t.results, { query: clip(state.q, 100) }), children: [
-      loaded.kind === "search" && loaded.result.books.length ? loaded.result.books.map(row) : text("book-empty", t.empty),
-      /* @__PURE__ */ jsx(Button, { title: t.backDiscover, action: act("home") }, "book-home")
+    state.v === "search" ? /* @__PURE__ */ jsxs(Section, { title: clip(fmt(t.results, { query: clip(state.q, 100) }), TEXT_MAX), children: [
+      rows.length ? rows : text("book-empty", t.empty),
+      /* @__PURE__ */ jsx(Button, { title: clip(t.backDiscover, TEXT_MAX), action: act("home") }, "book-home")
     ] }, "book-results") : /* @__PURE__ */ jsx(Section, { children: text("book-welcome-text", t.searchHint, "body") }, "book-welcome"),
     /* @__PURE__ */ jsx(Section, { children: text("book-license", t.attribution, "caption") }, "book-attribution")
   ] }, "openlibrary");
@@ -1453,13 +1628,14 @@ function Root(options) {
   const [result, setResult] = useState(void 0);
   const identity = `${state.v}:${state.q}:${state.k}:${refresh}`;
   useLoadEffect(async (signal) => {
-    const loaded = await loadPage(options.service, state, refresh > 0, signal);
-    if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded) ? previous : { service: options.service, identity, loaded });
+    const loaded2 = await loadPage(options.service, state, refresh > 0, signal);
+    if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded2) ? previous : { service: options.service, identity, loaded: loaded2 });
   }, [options.service, identity]);
+  const loaded = result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" };
   return page({
     ...options,
     state,
-    loaded: result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" },
+    loaded,
     action: (id, next, title) => {
       if (next && (options.uiVersion ?? 0) >= 3) {
         const push = { ui: "openlibrary", state: encodeState(next), ...title ? { title } : {} };
@@ -1469,9 +1645,15 @@ function Root(options) {
         if (id === "refresh") setRefresh((previous) => previous + 1);
         else if (id.startsWith("work:")) {
           const key = id.slice("work:".length);
-          const base = result?.loaded.kind === "search" ? result.loaded.result.books.find((book2) => book2.key === key) : void 0;
-          if (base) setState({ v: "work", q: state.q, k: key, b: base });
-        } else setState((previous) => transition(previous, id, values));
+          const base = loaded.kind === "search" ? loaded.result.books.find((book2) => book2.key === key) : void 0;
+          if (base) {
+            setRefresh(0);
+            setState({ v: "work", q: state.q, k: key, b: base });
+          }
+        } else {
+          setRefresh(0);
+          setState((previous) => transition(previous, id, values));
+        }
       }, { submit: true });
     }
   });

@@ -23,7 +23,8 @@ func TestMemoryEntries(t *testing.T) {
 		t.Fatalf("before a snapshot: %v", err)
 	}
 	st.S.Entries = map[string]*entry.Entry{"i-a": {ID: "i-a", Facet: entry.Interaction, Grain: entry.Class, Text: "report the conclusion first",
-		Status: entry.Stable, Count: 2, Origin: entry.Behavior}}
+		Status: entry.Stable, Count: 2, Origin: entry.Behavior,
+		Leverage: &entry.Leverage{Reach: entry.ReachCrossProject, Horizon: entry.HorizonLasting}}}
 	a.c.Live = &curate.Live{}
 	a.c.Publish()
 	if _, err := a.memory(t.Context(), "entries", raw(map[string]any{"contribution": "other", "limit": 200})); err == nil {

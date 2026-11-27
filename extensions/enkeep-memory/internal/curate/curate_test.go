@@ -168,20 +168,23 @@ func TestDailyItemsGraphAndIdempotence(t *testing.T) {
 	}) {
 		t.Error("someone else's procedure is rejected as NOT_ABOUT_OWNER")
 	}
-	// Graph: Blake owns the payment gateway (seeded from the knowledge base's person), the owner committed.
-	var owns, committed bool
+	// Graph: Blake owns the payment gateway (seeded from the knowledge base's person); v0.4.0 forbids creating
+	// persistent task nodes in the graph (commitments stay in entries, not graph task nodes).
+	var owns, hasTaskNode bool
 	for _, a := range c.St.S.Graph.Assertions {
 		s := c.St.S.Graph.Nodes[a.S]
 		o := c.St.S.Graph.Nodes[a.O]
 		if a.P == "owns" && s.Name == "Blake Wu" && strings.Contains(o.Name, "支付网关") && len(s.Refs) == 1 {
 			owns = true
 		}
-		if a.P == "committed" && a.S == "me" {
-			committed = true
+	}
+	for _, n := range c.St.S.Graph.Nodes {
+		if n.Type == "task" {
+			hasTaskNode = true
 		}
 	}
-	if !owns || !committed {
-		t.Errorf("graph: owns %v committed %v; %d assertions", owns, committed, len(c.St.S.Graph.Assertions))
+	if !owns || hasTaskNode {
+		t.Errorf("graph: owns %v hasTaskNode %v; %d assertions", owns, hasTaskNode, len(c.St.S.Graph.Assertions))
 	}
 }
 

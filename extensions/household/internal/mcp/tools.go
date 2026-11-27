@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nwverse/persona-extensions/extensions/household/internal/imports"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/model"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/ops"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/rules"
@@ -29,9 +30,11 @@ type Tool struct {
 var destructive = map[string]bool{
 	"household_save": true, "household_use": true, "household_purchase": true,
 	"household_chore_done": true, "household_remove": true,
+	"household_import_apply": true, "household_import_undo": true,
 }
 
-// table is the one list of tools, in the order the server lists them. The manifest allows exactly the read-only ones.
+// table is the one list of tools, in the order the server lists them. The manifest allows exactly the read-only ones:
+// the hub asks the user before every other call. The import tools are in imports.go.
 var table = []Tool{
 	{Name: "household_status", Read: true, Input: statusInput, Run: runStatus,
 		About: "家庭管家总览：需要处理的物品（已过期、已用完、低库存、用量预警、即将过期）、待买的采购、到期的家务、今天和明天计划的餐食，以及汇总数字。"},
@@ -51,6 +54,12 @@ var table = []Tool{
 		About: "完成一次家务：记下今天完成，并按周期安排下一次；没有周期的家务完成后不再安排。"},
 	{Name: "household_remove", Input: removeInput, Run: runRemove,
 		About: "删除一条记录。指向它的关联会被去掉。不能撤销。"},
+	{Name: "household_import_preview", Read: true, Input: importPreviewInput, Run: runImportPreview, About: aboutPreview},
+	{Name: "household_import_list", Read: true, Input: noInput, Run: runImportList, About: aboutList},
+	{Name: "household_import_apply", Input: importApplyInput, Run: runImportApply, About: aboutApply},
+	{Name: "household_import_undo", Input: importUndoInput, Run: runImportUndo, About: aboutUndo},
+	{Name: "household_import_discard", Input: importDiscardInput, Run: runImportDiscard, About: aboutDiscard},
+	{Name: "household_advise", Read: true, Input: noInput, Run: runAdvise, About: aboutAdvise},
 }
 
 // Tools returns the tools in the order the server lists them.
@@ -79,6 +88,17 @@ type env struct {
 	b   *kernel.Base
 	now time.Time
 	loc *time.Location
+	imp *imports.Store
+	// after holds what a write tool runs once the records were saved (true) or not (false): the second phase of an
+	// import or an undo.
+	after *[]func(ok bool)
+}
+
+// onSaved registers f to run after the records' update, with whether it was saved.
+func (e env) onSaved(f func(ok bool)) {
+	if e.after != nil {
+		*e.after = append(*e.after, f)
+	}
 }
 
 func (e env) today() model.Day { return model.DayOf(e.now, e.loc) }

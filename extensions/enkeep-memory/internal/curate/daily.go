@@ -61,6 +61,20 @@ func (c *Curator) RunDaily(ctx context.Context, day string, dry bool) (*store.Ru
 	if err != nil {
 		return nil, err
 	}
+	var preclean PrecleanStats
+	units, preclean = PrecleanUnits(units, c.St.S)
+	if preclean.BoilerplateLines > 0 {
+		run.Counts["preclean_boilerplate_lines"] = preclean.BoilerplateLines
+	}
+	if preclean.TemplateLines > 0 {
+		run.Counts["preclean_template_lines"] = preclean.TemplateLines
+	}
+	if d := preclean.BytesBefore - preclean.BytesAfter; d > 0 {
+		run.Counts["preclean_bytes_stripped"] = d
+	}
+	if preclean.S3UnitsDropped > 0 {
+		run.Counts["preclean_s3_units_dropped"] = preclean.S3UnitsDropped
+	}
 	var m model.Model
 	var metered *model.Metered
 	if c.Model != nil {

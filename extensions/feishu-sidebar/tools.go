@@ -16,7 +16,7 @@ type Tool struct {
 
 var tools = []Tool{
 	{Name: "feishu_sidebar_link",
-		Description: "拼一个飞书 applink：在飞书里点开（或复制后发到飞书）会在侧边栏打开用户的 Persona 网页。path 是站内相对路径（如 / 或 /j/<对话id>），不填用扩展设置里的默认路径。返回拼好的链接和一句说明。",
+		Description: "拼一个飞书 applink：在飞书里点开（或复制后发到飞书）会在桌面端飞书的左侧主导航打开用户的 Persona 网页。path 是站内相对路径（如 / 或 /j/<对话id>），不填用扩展设置里的默认路径。返回拼好的链接和一句说明。",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 			"path": map[string]any{"type": "string", "description": "站内相对路径，以 / 开头，如 / 或 /j/abc123；不填用默认"}}}},
 }
@@ -47,5 +47,5 @@ func (a *app) linkText(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s\n在飞书里打开上面的链接（或复制后发到飞书）会在侧边栏打开 Persona：%s。第一次打开要在飞书的内置浏览器里登录一次。", link, target), nil
+	return fmt.Sprintf("%s\n在飞书里打开上面的链接（或复制后发到飞书）会在桌面端飞书的左侧主导航打开 Persona：%s。第一次打开要在飞书的内置浏览器里登录一次。", link, target), nil
 }

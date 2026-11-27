@@ -85,7 +85,11 @@ test("history clear, replay and three-language pure snapshots remain safe", asyn
     await h.call("ui.page.event", { session: "owned", ticket: "host-ticket", interaction: interaction(await settled(h, "owned", "Example Registrar"), "domain-history") });
     const history = await settled(h, "owned", "history-example.com");
     await h.call("ui.page.event", { session: "owned", ticket: "host-ticket", interaction: interaction(history, "history-clear") });
-    await settled(h, "owned", "Recent lookups cleared.");
+    const cleared = await settled(h, "owned", "Recent lookups cleared.");
+    assert.equal(body(cleared).includes("history-example.com"), false, "cleared history must not still display old rows");
+    assert.equal(cleared.view.sections.flatMap(s => s.items).some(item => item.key === "history-clear"), false, "cleared history must not still display clear button");
+    assert.equal(body(cleared).includes("history-empty"), true, "cleared history must show empty state");
+    assert.equal((await h.call("connector.tools.call", { name: "unknown_tool", args: {} })).error.code, "unknown_method");
     assert.equal((await h.call("connector.tools.call", { name: "domains_lookup", args: { domain: "example.com" } })).result.text.includes("Example Registrar"), true);
     const remount: Snapshot = (await h.call("ui.page.mount", { session: "new", params: { contribution: "domains", ui_version: 5 } })).result;
     assert.notEqual(remount.generation, welcome.generation);

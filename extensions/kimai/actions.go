@@ -76,7 +76,6 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 }
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
-	keyData, _ := json.Marshal(raw)
 	var text string
 	var err error
 	switch name {
@@ -92,7 +91,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if begin, end, err = a.client.localTimes(ctx, in.Begin, in.End); err != nil {
 			return nil, err
 		}
-		text, err = a.receipts.commit(requestID, string(keyData), func() (string, error) {
+		keyData, _ := json.Marshal(in)
+		text, err = a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 			item, err := a.client.createTimesheet(ctx, in.ProjectID, in.ActivityID, begin, end, in.Description)
 			if err != nil {
 				return "", err
@@ -109,7 +109,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if in.TimesheetID <= 0 {
 			return nil, errors.New("timesheet ID must be positive")
 		}
-		text, err = a.receipts.commit(requestID, string(keyData), func() (string, error) {
+		keyData, _ := json.Marshal(in)
+		text, err = a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 			if _, err := a.client.stopTimesheet(ctx, in.TimesheetID); err != nil {
 				return "", err
 			}

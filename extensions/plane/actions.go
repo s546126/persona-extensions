@@ -166,6 +166,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
 	var workspace string
 	var body map[string]any
+	var keyArgs any
 	var fn func() (string, error)
 	switch name {
 	case "plane_create_work_item":
@@ -187,6 +188,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 			}
 		}
 		body = in.body()
+		keyArgs = in
 		fn = func() (string, error) {
 			item, err := a.client.create(ctx, workspace, in.ProjectID, body)
 			if err != nil {
@@ -213,6 +215,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 			}
 		}
 		body = in.body()
+		keyArgs = in
 		fn = func() (string, error) {
 			if _, err := a.client.update(ctx, workspace, in.ProjectID, in.WorkItemID, body); err != nil {
 				return "", err
@@ -222,8 +225,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(keyArgs)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

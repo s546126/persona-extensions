@@ -179,7 +179,7 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 	if len(f.favorites) != 1 {
 		t.Fatal("restart repeated favorite update")
 	}
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(args), Status: "pending", StartedAt: time.Now()}})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "jellyfin_set_favorite:" + string(args), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

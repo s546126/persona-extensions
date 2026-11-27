@@ -31,11 +31,11 @@ disklessly 0.3.0
 Filesystem     1024-blocks      Used Available Capacity Mounted on
 /dev/disk3s5     524288000 251658240 272629760      48% /System/Volumes/Data
 @@SECTION:CACHES
-cache-gobuild	go-cache	Go 编译构建缓存 (go-build)	/Users/dev/Library/Caches/go-build	1048576	safe	可随时重建的 Go 编译器构建缓存
-cache-xcode-derived	rust-xcode-build	Xcode DerivedData 构建产物	/Users/dev/Library/Developer/Xcode/DerivedData	6291456	safe	可重新编译的 Xcode DerivedData 缓存
-cache-playwright	rust-xcode-build	Playwright 浏览器缓存 (ms-playwright)	/Users/dev/.cache/ms-playwright	1572864	review	无头浏览器镜像，清理后首次运行需重新下载
+cache-gobuild	go-cache	Go 编译缓存	/Users/dev/Library/Caches/go-build	1048576	safe	Go 编译时留下的缓存，删了下次编译会自动再生成
+cache-xcode-derived	rust-xcode-build	Xcode 编译缓存	/Users/dev/Library/Developer/Xcode/DerivedData	6291456	safe	Xcode 编译时留下的文件，删了下次编译会重新生成，第一次会慢一些
+cache-playwright	rust-xcode-build	Playwright 自动测试用的浏览器	/Users/dev/.cache/ms-playwright	1572864	review	自动测试用的几个浏览器，删了下次跑测试前要重新下载，比较大、比较慢
 @@SECTION:TMP_LOGS
-tmp-stale	tmp-logs	/tmp 陈旧构建与临时产物 (>7天)	/tmp	262144	safe	超过 7 天或已退出的临时目录
+tmp-stale	tmp-logs	临时文件夹里的旧文件和编译剩下的文件	/tmp	262144	safe	临时文件夹 /tmp 里编译和安装剩下的文件（go-build、playwright、npm、pnpm、cargo-install 等开头的，最近的也删）和放了 7 天以上的文件
 @@SECTION:DOCKER
 @@SECTION:SESSIONS
 tool	claude	Claude Code	/Users/dev/.claude/projects	12	163840	8	524288	/Users/dev/.claude/projects
@@ -230,7 +230,7 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 	if fleetView.Fallback == "" || utf8.RuneCountInString(fleetView.Fallback) > 2000 {
 		t.Fatalf("unexpected fallback length %d: %q", utf8.RuneCountInString(fleetView.Fallback), fleetView.Fallback)
 	}
-	for _, word := range []string{"橙色预警", "红色告警", "正常", "local", "armbox", "mac-mini"} {
+	for _, word := range []string{"偏满", "快满了", "宽裕", localMachineName, "armbox", "mac-mini"} {
 		if !strings.Contains(fleetView.Fallback, word) {
 			t.Fatalf("fallback missing %q:\n%s", word, fleetView.Fallback)
 		}
@@ -246,16 +246,34 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 		coldName   string
 	}{
 		// local: 85% used -> warning (caution orange), has safe + review + cold-session CLI offload (3 series)
-		{id: "local", tone: wire.ToneCaution, levelWord: "橙色预警", wantDetail: "85.0% · 橙色预警", wantLabel: "已用 170.0 / 200.0 GiB", wantSer: 3, coldName: "冷会话上云"},
+		{id: "local", tone: wire.ToneCaution, levelWord: "偏满", wantDetail: "85.0% · 偏满", wantLabel: "已用 170.0 / 200.0 GiB", wantSer: 3, coldName: "搬到网盘"},
 		// armbox: 92% used -> critical (danger red), has safe + pending cold sessions without CLI (2 series)
-		{id: "armbox", tone: wire.ToneDanger, levelWord: "红色告警", wantDetail: "92.0% · 红色告警", wantLabel: "已用 92.0 / 100.0 GiB", wantSer: 2, coldName: "冷会话(需CLI)"},
+		{id: "armbox", tone: wire.ToneDanger, levelWord: "快满了", wantDetail: "92.0% · 快满了", wantLabel: "已用 92.0 / 100.0 GiB", wantSer: 2, coldName: "搬到网盘（缺小工具）"},
 		// mac-mini: 48% used -> ok (positive green), has safe + review + cold-session CLI offload (3 series)
-		{id: "mac-mini", tone: wire.TonePositive, levelWord: "正常", wantDetail: "48.0% · 正常", wantLabel: "已用 240.0 / 500.0 GiB", wantSer: 3, coldName: "冷会话上云"},
+		{id: "mac-mini", tone: wire.TonePositive, levelWord: "宽裕", wantDetail: "48.0% · 宽裕", wantLabel: "已用 240.0 / 500.0 GiB", wantSer: 3, coldName: "搬到网盘"},
 	}
 
-	wantAxis := []string{"Go", "Node/Py", "容器", "Rust/XC", "日志", "冷会话"}
+	wantAxis := []string{"Go", "Node/Py", "容器", "Rust/XC", "日志", "旧对话"}
 
 	for _, wm := range wantMachines {
+		// The charts are drawn for the selected computer; the others keep their bar only.
+		fleetView, err := a.render(ctx, &ext.UIRequest{UIParams: wire.UIParams{UIVersion: 8, TZ: "Asia/Shanghai", State: ext.EncodeState(page{Machine: wm.id})}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkStrictView(t, fleetView, false)
+		assertMobileReadability360px(t, "fleet "+wm.id, fleetView)
+		for _, other := range wantMachines {
+			if other.id == wm.id {
+				continue
+			}
+			if findComponentByKey(fleetView, "fleet-root-"+other.id) != nil || findComponentByKey(fleetView, "fleet-stats-"+other.id) != nil {
+				t.Fatalf("%s selected: %s also drawn in full", wm.id, other.id)
+			}
+			if findComponentByKey(fleetView, "prog-"+other.id) == nil || findComponentByKey(fleetView, "btn-plan-"+other.id) == nil {
+				t.Fatalf("%s selected: %s lost its bar or buttons", wm.id, other.id)
+			}
+		}
 		if findComponentByKey(fleetView, "fleet-stats-"+wm.id) == nil {
 			t.Fatalf("%s: missing disjoint fleet-stats-%s stat_grid", wm.id, wm.id)
 		}
@@ -268,20 +286,9 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 				wm.id, prog.Tone, prog.Label, prog.Detail, wm.tone, wm.wantLabel, wm.wantDetail)
 		}
 
-		rootChart := findComponentByKey(fleetView, "fleet-root-"+wm.id)
-		if rootChart == nil || rootChart.Type != wire.ComponentChart || rootChart.Kind != wire.ChartKindBar || !rootChart.Stacked {
-			t.Fatalf("%s: missing or non-stacked root chart: %+v", wm.id, rootChart)
-		}
-		if len(rootChart.Series) != 2 || rootChart.Series[0].Tone != wm.tone || rootChart.Series[1].Tone != wire.ToneNeutral {
-			t.Fatalf("%s: root chart series = %+v, want [tone=%s, tone=neutral]", wm.id, rootChart.Series, wm.tone)
-		}
-		if !strings.Contains(rootChart.Series[0].Name, wm.levelWord) || !strings.Contains(rootChart.Detail, wm.levelWord) ||
-			!strings.Contains(rootChart.Series[0].Points[0].Display, wm.levelWord) {
-			t.Fatalf("%s: root chart must carry non-color level text %q: series=%q display=%q detail=%q",
-				wm.id, wm.levelWord, rootChart.Series[0].Name, rootChart.Series[0].Points[0].Display, rootChart.Detail)
-		}
-		if len(rootChart.Series[0].Points) != 1 || len(rootChart.Series[1].Points) != 1 {
-			t.Fatalf("%s: root share bar must have 1 point per series: %+v", wm.id, rootChart.Series)
+		// The system disk is the bar above (prog-) and the table's caption: no tall one-bar chart.
+		if rootChart := findComponentByKey(fleetView, "fleet-root-"+wm.id); rootChart != nil {
+			t.Fatalf("%s: a separate system-disk chart is drawn next to its bar: %+v", wm.id, rootChart)
 		}
 
 		catChart := findComponentByKey(fleetView, "fleet-cats-"+wm.id)
@@ -322,7 +329,7 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 	}
 	checkStrictView(t, itemsView, false)
 	assertMobileReadability360px(t, "items", itemsView)
-	if findComponentByKey(itemsView, "items-root-local") == nil || findComponentByKey(itemsView, "items-cats-local") == nil {
+	if findComponentByKey(itemsView, "prog-local") == nil || findComponentByKey(itemsView, "items-cats-local") == nil {
 		t.Fatal("items tab missing per-machine charts")
 	}
 	if tbl := findComponentByKey(itemsView, "items-detail-tbl-local"); tbl == nil || len(tbl.Columns) != 4 {
@@ -356,7 +363,7 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 	}
 	checkStrictView(t, emptyFilterRes.View, false)
 	assertMobileReadability360px(t, "items-empty-filter", emptyFilterRes.View)
-	if findComponentByKey(emptyFilterRes.View, "items-root-local") == nil || findComponentByKey(emptyFilterRes.View, "items-tbl-local") == nil {
+	if findComponentByKey(emptyFilterRes.View, "prog-local") == nil || findComponentByKey(emptyFilterRes.View, "items-tbl-local") == nil {
 		t.Fatalf("empty search filter on items tab must still include companion detail table items-tbl-local: %+v", emptyFilterRes.View)
 	}
 
@@ -378,12 +385,12 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 		t.Fatalf("armbox plan impact series tones = [%s, %s, %s], want [danger, caution, neutral]",
 			impact.Series[0].Tone, impact.Series[1].Tone, impact.Series[2].Tone)
 	}
-	if !strings.Contains(impact.Series[0].Points[0].Display, "红色告警") || !strings.Contains(impact.Series[1].Points[1].Display, "橙色预警") {
+	if !strings.Contains(impact.Series[0].Points[0].Display, "快满了") || !strings.Contains(impact.Series[1].Points[1].Display, "偏满") {
 		t.Fatalf("armbox plan impact Point.Display must carry status words: before=%q after=%q",
 			impact.Series[0].Points[0].Display, impact.Series[1].Points[1].Display)
 	}
-	if !strings.Contains(impact.Detail, "红色告警") || !strings.Contains(impact.Detail, "橙色预警") || !strings.Contains(impact.Detail, "< 25 GiB") {
-		t.Fatalf("armbox plan impact Detail should explain why 79.7%% (<80%%) stays 橙色预警 (< 25 GiB free): %q", impact.Detail)
+	if !strings.Contains(impact.Detail, "快满了") || !strings.Contains(impact.Detail, "偏满") || !strings.Contains(impact.Detail, "不到 25 GiB") {
+		t.Fatalf("armbox plan impact Detail should explain why 79.7%% (<80%%) stays 偏满 (< 25 GiB free): %q", impact.Detail)
 	}
 	if tbl := findComponentByKey(planView, "plan-tbl-armbox"); tbl == nil || len(tbl.Columns) != 4 {
 		t.Fatalf("plan tab missing 4-column table: %+v", tbl)
@@ -415,7 +422,7 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 	if findComponentByKey(cardBefore, "card-stats") == nil || cardBeforeRoot == nil || findComponentByKey(cardBefore, "card-mach-armbox") == nil {
 		t.Fatalf("overview card before clean-safe should feature highest-severity machine armbox chart and card-mach-* rows: %+v", cardBefore)
 	}
-	if cardBeforeRoot.Series[0].Tone != wire.ToneDanger || !strings.Contains(cardBeforeRoot.Series[0].Name, "红色告警") {
+	if cardBeforeRoot.Type != wire.ComponentProgress || cardBeforeRoot.Tone != wire.ToneDanger || !strings.Contains(cardBeforeRoot.Detail, "快满了") || !strings.HasPrefix(cardBeforeRoot.Label, "armbox · ") {
 		t.Fatalf("card-root-armbox should reflect critical danger state: %+v", cardBeforeRoot)
 	}
 
@@ -455,10 +462,10 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 	if findComponentByKey(cardAfter, "card-stats") == nil || cardAfterRoot == nil || findComponentByKey(cardAfter, "card-root-armbox") != nil {
 		t.Fatalf("overview card after armbox clean-safe should switch featured chart to warning machine local: %+v", cardAfter)
 	}
-	if cardAfterRoot.Series[0].Tone != wire.ToneCaution || !strings.Contains(cardAfterRoot.Series[0].Name, "橙色预警") {
+	if cardAfterRoot.Type != wire.ComponentProgress || cardAfterRoot.Tone != wire.ToneCaution || !strings.Contains(cardAfterRoot.Detail, "偏满") {
 		t.Fatalf("card-root-local should reflect warning caution state: %+v", cardAfterRoot)
 	}
-	if !strings.Contains(texts(cardAfter), "最近清理 armbox") {
+	if !strings.Contains(texts(cardAfter), "最近一次清理 armbox") {
 		t.Fatalf("overview card after clean-safe should include latest df cleanup ledger summary:\n%s", texts(cardAfter))
 	}
 
@@ -491,6 +498,45 @@ func TestPerMachineChartsThresholdsAndDetailTables(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+// The hub's own computer in the 清理记录 table's narrow 电脑 cell.
+func TestHistoryTableNamesThisComputerReadably(t *testing.T) {
+	a := seedScannedThreeMachineFleet(t)
+	ctx := context.Background()
+	for _, id := range []string{"armbox", "local"} {
+		if _, err := a.action(ctx, &ext.UIRequest{UIParams: wire.UIParams{UIVersion: 8, State: ext.EncodeState(page{Machine: id, Tab: tabPlan}),
+			Action: "clean-safe", Values: map[string]string{"m": id}}}); err != nil {
+			t.Fatal(err)
+		}
+		a.waitJobs()
+	}
+	// The hub's own computer in the narrow 电脑 cell reads 本机, not a clipped 「运行 P…」, and the
+	// record rows below still spell out its name.
+	histView, err := a.render(ctx, &ext.UIRequest{UIParams: wire.UIParams{UIVersion: 8, State: ext.EncodeState(page{Machine: "local", Tab: tabHistory})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := findComponentByKey(histView, "hist-tbl")
+	if tbl == nil {
+		t.Fatal("history tab should include hist-tbl")
+	}
+	cells := map[string]bool{}
+	for _, r := range tbl.Rows {
+		cells[r[1]] = true
+		if strings.HasPrefix(r[1], "运行") {
+			t.Fatalf("local computer clipped in the history table: %q", r[1])
+		}
+	}
+	if !cells[localMachineCell] || !cells["armbox"] {
+		t.Fatalf("history 电脑 cells: %v", cells)
+	}
+	if w := personaLabelWidth(localMachineCell, 12.5); w > 48 {
+		t.Fatalf("%q is %.1fpx, wider than the 48px cell", localMachineCell, w)
+	}
+	if !strings.Contains(visibleText(histView), localMachineName) {
+		t.Fatalf("history page no longer names %s:\n%s", localMachineName, visibleText(histView))
 	}
 }
 
@@ -583,7 +629,7 @@ func TestMobileAxisLabelsFit360pxPhoneAndPrivacy(t *testing.T) {
 		}
 	}
 
-	// Verify exact 80% / 90% / <80% thresholds across EvaluateHealth, machineProgressComponent, and rootUsageChart.
+	// Verify exact 80% / 90% / <80% thresholds across EvaluateHealth, machineProgressComponent, and rootUsageMeter.
 	cases := []struct {
 		name      string
 		totalGiB  uint64
@@ -592,10 +638,10 @@ func TestMobileAxisLabelsFit360pxPhoneAndPrivacy(t *testing.T) {
 		wantTone  string
 		wantText  string
 	}{
-		{name: "below_80_ok", totalGiB: 200, usedPct: 79.5, wantLevel: HealthOK, wantTone: wire.TonePositive, wantText: "正常"},
-		{name: "exact_80_warning", totalGiB: 200, usedPct: 80.0, wantLevel: HealthWarning, wantTone: wire.ToneCaution, wantText: "橙色预警"},
-		{name: "89_5_warning", totalGiB: 200, usedPct: 89.5, wantLevel: HealthWarning, wantTone: wire.ToneCaution, wantText: "橙色预警"},
-		{name: "exact_90_critical", totalGiB: 200, usedPct: 90.0, wantLevel: HealthCritical, wantTone: wire.ToneDanger, wantText: "红色告警"},
+		{name: "below_80_ok", totalGiB: 200, usedPct: 79.5, wantLevel: HealthOK, wantTone: wire.TonePositive, wantText: "宽裕"},
+		{name: "exact_80_warning", totalGiB: 200, usedPct: 80.0, wantLevel: HealthWarning, wantTone: wire.ToneCaution, wantText: "偏满"},
+		{name: "89_5_warning", totalGiB: 200, usedPct: 89.5, wantLevel: HealthWarning, wantTone: wire.ToneCaution, wantText: "偏满"},
+		{name: "exact_90_critical", totalGiB: 200, usedPct: 90.0, wantLevel: HealthCritical, wantTone: wire.ToneDanger, wantText: "快满了"},
 	}
 	for _, tc := range cases {
 		tot := tc.totalGiB * gib
@@ -618,9 +664,9 @@ func TestMobileAxisLabelsFit360pxPhoneAndPrivacy(t *testing.T) {
 		if prog.Tone != tc.wantTone || prog.Detail != wantDetail {
 			t.Fatalf("%s: progress tone=%q detail=%q, want tone=%q detail=%q", tc.name, prog.Tone, prog.Detail, tc.wantTone, wantDetail)
 		}
-		rc := rootUsageChart(ms, "/", "test")
-		if rc.Series[0].Tone != tc.wantTone || !strings.Contains(rc.Series[0].Name, tc.wantText) {
-			t.Fatalf("%s: rootUsageChart series[0]=%+v, want tone=%q with %q", tc.name, rc.Series[0], tc.wantTone, tc.wantText)
+		rc := rootUsageMeter(ms, "test")
+		if rc.Type != wire.ComponentProgress || rc.Tone != tc.wantTone || !strings.Contains(rc.Detail, tc.wantText) || rc.Key != "test-root-node" {
+			t.Fatalf("%s: rootUsageMeter=%+v, want a bar with tone=%q and %q", tc.name, rc, tc.wantTone, tc.wantText)
 		}
 	}
 
@@ -745,8 +791,8 @@ func TestDisjointComponentKeyNamespacesAndEmptyItemsDetailTable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if findComponentByKey(v, "items-root-"+machID) == nil || findComponentByKey(v, "items-tbl-"+machID) == nil {
-			t.Fatalf("%s: itemsTab with 0 cache items must render both items-root-%s and items-tbl-%s", machID, machID, machID)
+		if findComponentByKey(v, "prog-"+machID) == nil || findComponentByKey(v, "items-tbl-"+machID) == nil {
+			t.Fatalf("%s: itemsTab with 0 cache items must render both prog-%s and items-tbl-%s", machID, machID, machID)
 		}
 	}
 	coldOnlyItems, _ := a.render(ctx, &ext.UIRequest{UIParams: wire.UIParams{
@@ -818,7 +864,7 @@ func TestUIVersion1PlainTextDegradation(t *testing.T) {
 		}
 		if tab == tabFleet {
 			all := texts(v)
-			for _, want := range []string{"橙色预警", "红色告警", "Go", "容器"} {
+			for _, want := range []string{"偏满", "快满了", "Go", "Docker"} {
 				if !strings.Contains(all, want) {
 					t.Fatalf("UIVersion 1 fleet text missing %q:\n%s", want, all)
 				}

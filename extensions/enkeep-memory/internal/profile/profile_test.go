@@ -295,3 +295,71 @@ func TestSynthReplyBound(t *testing.T) {
 		t.Fatalf("max tokens %d", fm.maxTok)
 	}
 }
+
+// v0.4.0: profile summary excludes S3/S4-only persona hallucinations and S6 assistant notes, and strictly isolates
+// work-methodology rules from sensitive sections (0 work rules in profile:cat:emotion or profile:cat:health).
+func TestV04ProfileExcludesS3S6AndIsolatesWorkRulesFromSensitive(t *testing.T) {
+	st := &store.State{Entries: map[string]*entry.Entry{
+		"s3-sup": {
+			ID: "s3-sup", Facet: entry.Persona, Origin: entry.Behavior, Status: entry.Stable,
+			Text: "用户担任某平台自动调度主管", Count: 5, Last: "2026-11-24", Tagged: true,
+			Evidence: []entry.Evidence{{Source: entry.SrcAgent, Ref: "ag/1", Day: "2026-11-24", Who: entry.WhoSelf, Quote: "平台主管"}},
+		},
+		"s6-note": {
+			ID: "s6-note", Facet: entry.Interaction, Origin: entry.OriginAssistantNote, Status: entry.Stable,
+			Text: "助手反思笔记：切勿说我改了目标", Count: 5, Last: "2026-11-24", Tagged: true,
+		},
+		"work-emo-false": {
+			ID: "work-emo-false", Facet: entry.Interaction, Origin: entry.Behavior, Status: entry.Stable,
+			Text: "反复发问会让用户不满，嫌解释绕要求说人话", Count: 4, Last: "2026-11-24", Tagged: true,
+			Categories: []entry.Category{{Name: entry.CatEmotion, By: entry.ByModel}},
+		},
+		"work-health-false": {
+			ID: "work-health-false", Facet: entry.Interaction, Origin: entry.Behavior, Status: entry.Stable,
+			Text: "要的是例行方案不要一次性导出", Count: 4, Last: "2026-11-24", Tagged: true,
+			OriginSpace: "health",
+			Categories:  []entry.Category{{Name: entry.CatHealth, By: entry.BySpaceDefault}},
+		},
+		"true-health": {
+			ID: "true-health", Facet: entry.Persona, Origin: entry.Behavior, Status: entry.Stable,
+			Text: "近期体检空腹血糖偏高，需要按医生建议复查", Count: 2, Last: "2026-11-24", Tagged: true,
+			Evidence: []entry.Evidence{{Source: entry.SrcAssistant, Ref: "c/1", Day: "2026-11-24", Who: entry.WhoSelf, Quote: "体检血糖高"}},
+		},
+	}}
+
+	sum := Build(st, time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC), "zh-Hans")
+	// 1. S3 persona hallucination and S6 assistant note must be excluded everywhere.
+	for _, sec := range sum.Sections {
+		for _, pt := range sec.Points {
+			if pt.ID == "s3-sup" || pt.ID == "s6-note" {
+				t.Errorf("forbidden entry %s leaked into profile section %s", pt.ID, sec.Facet)
+			}
+		}
+	}
+	// 2. Work rules mis-tagged emotion/health must land in general interaction section, NEVER in Sensitive.
+	inter, ok := sum.SectionByFacet(entry.Interaction)
+	if !ok || len(inter.Points) != 2 {
+		t.Fatalf("expected 2 general interaction points (mis-tagged work rules released), got %+v", inter.Points)
+	}
+	for _, sens := range sum.Sensitive {
+		for _, pt := range sens.Points {
+			if pt.ID == "work-emo-false" || pt.ID == "work-health-false" {
+				t.Errorf("work rule %s must not enter sensitive section %s", pt.ID, sens.Category)
+			}
+		}
+	}
+	// 3. Genuine health payload must still be strictly isolated into Sensitive[health].
+	foundHealth := false
+	for _, sens := range sum.Sensitive {
+		if sens.Category == entry.CatHealth {
+			for _, pt := range sens.Points {
+				if pt.ID == "true-health" {
+					foundHealth = true
+				}
+			}
+		}
+	}
+	if !foundHealth {
+		t.Fatalf("genuine health disclosure missing from Sensitive[health]: %+v", sum.Sensitive)
+	}
+}

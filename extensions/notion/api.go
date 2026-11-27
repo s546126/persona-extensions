@@ -124,17 +124,17 @@ func (c *client) page(ctx context.Context, id string) (notionPage, error) {
 	return out, err
 }
 
-func (c *client) append(ctx context.Context, id string, children []block) error {
+func (c *client) append(ctx context.Context, id string, children []map[string]any) error {
 	return c.do(ctx, http.MethodPatch, "/blocks/"+url.PathEscape(id)+"/children", nil, map[string]any{"children": children}, nil)
 }
 
 func (c *client) create(ctx context.Context, parentID, title, content string) (notionPage, error) {
 	in := map[string]any{
 		"parent":     map[string]string{"type": "page_id", "page_id": parentID},
-		"properties": map[string]any{"title": []richText{{PlainText: title}}},
+		"properties": map[string]any{"title": map[string]any{"title": textItems(title)}},
 	}
 	if content != "" {
-		in["children"] = []block{paragraphBlock(content)}
+		in["children"] = []map[string]any{paragraphRequest(content)}
 	}
 	var out notionPage
 	err := c.do(ctx, http.MethodPost, "/pages", nil, in, &out)

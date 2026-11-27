@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	stdsync "sync"
 	"time"
 	"unicode/utf8"
 
@@ -98,6 +99,99 @@ type Client struct {
 	base, token string
 	http        *http.Client
 	call        func(ctx context.Context, method string, out any) error // the extension methods; nil when there is no hub
+
+	mu   stdsync.Mutex
+	last PullReport // how the last pull round ended
+}
+
+// PullReport is how a pull round ended. Err is set when nothing could be read (the computer list failed); otherwise
+// Failed lists the computers whose usage could not be read or saved, out of Total.
+type PullReport struct {
+	At     time.Time
+	Err    error
+	Total  int
+	Failed []FailedMachine
+}
+
+// FailedMachine is one computer a round could not read: its display name and why.
+type FailedMachine struct {
+	Name string
+	Err  error
+}
+
+// NotFound reports whether err is the hub answering 404, which for one computer's usage means it is gone.
+func NotFound(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == http.StatusNotFound
+}
+
+// Error is a failed call told for the user: Error() says what happened and what to do, in plain words, without the
+// technical detail; Detail is that detail (status, body, network error) for the log.
+type Error struct {
+	Status  int // the HTTP status, 0 when there was no answer
+	Message string
+	Detail  string
+}
+
+func (e *Error) Error() string { return e.Message }
+
+// LogText is err with its technical detail, for the log.
+func LogText(err error) string {
+	var e *Error
+	if errors.As(err, &e) && e.Detail != "" {
+		return e.Message + "（" + e.Detail + "）"
+	}
+	return err.Error()
+}
+
+// The messages the page shows. They name "运行 Persona 的那台电脑", the computer the hub runs on, and what to do.
+const (
+	msgNoAccess    = "运行 Persona 的那台电脑没有给这个扩展读取用量的权限，所以这里读不到数据。请到 设置 › 扩展 › Token 用量，把它关掉再打开；还不行就重启 Persona。"
+	msgUnreachable = "这个扩展暂时连不上 Persona，可能 Persona 正在重启或更新。这里每 10 分钟会自动再试；一直这样的话，请重启 Persona。"
+	msgBadAddress  = "这个扩展拿到的 Persona 地址用不了，所以发不出读取请求。请到 设置 › 扩展 › Token 用量，把它关掉再打开；还不行就重启 Persona。"
+	msgCutOff      = "读取用量时连接中途断了，没读完。这里每 10 分钟会自动再试，不用做别的。"
+	msgBadAnswer   = "运行 Persona 的那台电脑回来的内容这个扩展读不懂，可能 Persona 正在更新，或者它和这个扩展的版本不配套。这里每 10 分钟会自动再试；一直这样的话，请把 Persona 和这个扩展都更新到最新版。"
+	msgRefused     = "运行 Persona 的那台电脑拒绝了读取用量（权限不够或已过期）。请到 设置 › 扩展 › Token 用量，把它关掉再打开。"
+	msgTooOld      = "运行 Persona 的那台电脑不认识读取用量的请求，多半是 Persona 版本太旧。请把那台电脑上的 Persona 更新到最新版。"
+	msgBusy        = "运行 Persona 的那台电脑暂时出了问题（错误码 %d）。不用处理，这里每 10 分钟会自动再试。"
+	msgOther       = "运行 Persona 的那台电脑没有接受读取用量的请求（错误码 %d）。这里每 10 分钟会自动再试；一直这样的话，请把 Persona 更新到最新版。"
+)
+
+// statusError is the user's words for an HTTP status the hub answered with.
+func statusError(status int, body string) *Error {
+	e := &Error{Status: status, Detail: fmt.Sprintf("HTTP %d：%s", status, body)}
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		e.Message = msgRefused
+	case status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented:
+		e.Message = msgTooOld
+	case status >= 500 || status == http.StatusTooManyRequests:
+		e.Message = fmt.Sprintf(msgBusy, status)
+	default:
+		e.Message = fmt.Sprintf(msgOther, status)
+	}
+	return e
+}
+
+// ReportPull records how a pull round ended.
+func (c *Client) ReportPull(r PullReport) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.last = r
+}
+
+// LastPull is how the last pull round ended; a zero At when none has ended yet. A client that cannot call the hub at
+// all answers that error at once, so the page can say so before any round.
+func (c *Client) LastPull() PullReport {
+	if !c.Usable() {
+		return PullReport{Err: &Error{Message: msgNoAccess, Detail: "no hub address or token"}}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.last
 }
 
 // New returns a client for the hub at base, authorised by token. call runs an extension method such as
@@ -229,19 +323,19 @@ func (c *Client) post(ctx context.Context, path string, body any) error {
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	if !c.Usable() {
-		return errors.New("没有 hub 地址或令牌")
+		return &Error{Message: msgNoAccess, Detail: "no hub address or token"}
 	}
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return &Error{Message: msgBadAnswer, Detail: "encode request: " + err.Error()}
 		}
 		r = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, r)
 	if err != nil {
-		return err
+		return &Error{Message: msgBadAddress, Detail: err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -249,19 +343,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("连不上 hub：%w", err)
+		return &Error{Message: msgUnreachable, Detail: err.Error()}
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return err
+		return &Error{Status: resp.StatusCode, Message: msgCutOff, Detail: "read body: " + err.Error()}
 	}
 	if resp.StatusCode >= 300 {
-		msg := clipBytes(strings.TrimSpace(string(raw)), 200)
-		return fmt.Errorf("hub 回了 HTTP %d：%s", resp.StatusCode, msg)
+		return statusError(resp.StatusCode, clipBytes(strings.TrimSpace(string(raw)), 200))
 	}
 	if out != nil && len(raw) > 0 {
-		return json.Unmarshal(raw, out)
+		if err := json.Unmarshal(raw, out); err != nil {
+			return &Error{Status: resp.StatusCode, Message: msgBadAnswer,
+				Detail: "decode answer: " + err.Error() + "：" + clipBytes(strings.TrimSpace(string(raw)), 200)}
+		}
 	}
 	return nil
 }

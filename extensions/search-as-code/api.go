@@ -262,7 +262,7 @@ func (a *app) cardSummary(ctx context.Context, summary string) string {
 		if vals, err := parseQuery(m[6]); err == nil {
 			for _, k := range []string{"q", "recipe", "code", "since"} {
 				if v := strings.TrimSpace(vals[k]); v != "" {
-					b.WriteString("\n" + map[string]string{"q": "查询", "recipe": "配方", "code": "流水线", "since": "时间"}[k] + "：" + clipRunes(v, 200))
+					b.WriteString("\n" + map[string]string{"q": "查询", "recipe": "常用搜索", "code": "搜索步骤", "since": "时间"}[k] + "：" + clipRunes(v, 200))
 				}
 			}
 		}

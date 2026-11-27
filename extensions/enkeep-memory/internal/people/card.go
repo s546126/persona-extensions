@@ -139,12 +139,60 @@ type Input struct {
 	Entries  map[string]*entry.Entry
 	Contacts map[string]*entry.Contact
 	Merges   []entry.PersonMerge
-	Switches map[string]entry.SwitchSetting
-	Rhythm   map[string]*Rhythm
-	Names    func(person string) string
+	// GraphMerges carries canonical person groups derived from graph merges (graph.PersonMergesFromGraph) so
+	// cards consume merged canonical entities alongside user-declared PersonMerges.
+	GraphMerges []entry.PersonMerge
+	Switches    map[string]entry.SwitchSetting
+	Rhythm      map[string]*Rhythm
+	Names       func(person string) string
+	// Today (optional YYYY-MM-DD) enables age-based ephemeral decay checks when building cards.
+	Today string
 	// Due and Overdue are the open commitments due soon and possibly overdue (curate.CommitmentsDue): the ledger is
 	// kept there, the card only shows it.
 	Due, Overdue map[string]bool
+}
+
+// allMerges combines user-declared PersonMerges (taking precedence for display name and ID) with GraphMerges.
+func allMerges(in Input) []entry.PersonMerge {
+	if len(in.GraphMerges) == 0 {
+		return in.Merges
+	}
+	if len(in.Merges) == 0 {
+		return in.GraphMerges
+	}
+	out := make([]entry.PersonMerge, 0, len(in.Merges)+len(in.GraphMerges))
+	for _, m := range in.Merges {
+		m.Persons = slices.Clone(m.Persons)
+		out = append(out, m)
+	}
+	for _, gm := range in.GraphMerges {
+		mergedIdx := -1
+		for i := range out {
+			for _, p := range gm.Persons {
+				if slices.Contains(out[i].Persons, p) {
+					mergedIdx = i
+					break
+				}
+			}
+			if mergedIdx >= 0 {
+				break
+			}
+		}
+		if mergedIdx >= 0 {
+			for _, p := range gm.Persons {
+				if !slices.Contains(out[mergedIdx].Persons, p) {
+					out[mergedIdx].Persons = append(out[mergedIdx].Persons, p)
+				}
+			}
+			if out[mergedIdx].Name == "" && gm.Name != "" {
+				out[mergedIdx].Name = gm.Name
+			}
+		} else {
+			gm.Persons = slices.Clone(gm.Persons)
+			out = append(out, gm)
+		}
+	}
+	return out
 }
 
 // Group is the person entries a person's card covers: the merge it is in, else itself. The first is the card key.
@@ -191,19 +239,21 @@ const Standalone = "standalone"
 
 // BuildCard assembles the card of a person (and of everyone merged with them).
 func BuildCard(in Input, person string) *Card {
-	persons, merge := Group(in.Merges, person)
+	merges := allMerges(in)
+	persons, merge := Group(merges, person)
 	c := &Card{Person: persons[0], Persons: persons, Merge: merge, Parts: map[string][]Line{}}
-	for _, m := range in.Merges {
+	for _, m := range merges {
 		if m.ID == merge && m.Name != "" {
-			c.Name = m.Name
+			c.Name = CanonicalName(m.Name)
 		}
 	}
 	var ct *entry.Contact
 	var rs []*Rhythm
 	for _, p := range persons {
 		if x := in.Contacts[p]; x != nil {
+			cleanName := CanonicalName(x.Name)
 			if ct == nil {
-				ct = &entry.Contact{Person: c.Person, Name: x.Name, Source: x.Source, Ties: map[string]int{}, First: x.First, Last: x.Last}
+				ct = &entry.Contact{Person: c.Person, Name: cleanName, Source: x.Source, Ties: map[string]int{}, First: x.First, Last: x.Last}
 			}
 			for k, v := range x.Ties {
 				ct.Ties[k] += v
@@ -214,8 +264,8 @@ func BuildCard(in Input, person string) *Card {
 			if x.Last > ct.Last {
 				ct.Last = x.Last
 			}
-			if c.Name == "" && x.Name != "" {
-				c.Name = x.Name
+			if c.Name == "" && cleanName != "" {
+				c.Name = cleanName
 			}
 		}
 		rs = append(rs, in.Rhythm[p])
@@ -225,7 +275,7 @@ func BuildCard(in Input, person string) *Card {
 	}
 	c.Contact, c.Rhythm = ct, MergeRhythm(rs...)
 	if c.Name == "" && in.Names != nil {
-		c.Name = in.Names(c.Person)
+		c.Name = CanonicalName(in.Names(c.Person))
 	}
 	ids := make([]string, 0, len(in.Entries))
 	for id := range in.Entries {
@@ -242,6 +292,16 @@ func BuildCard(in Input, person string) *Card {
 		}
 		if !e.Live() {
 			continue
+		}
+		// v0.4.0: filter short-lived ephemeral chatter and generic HR/nameless noise from durable person cards
+		// (structured commitments, pinned entries, and user-edited lines are kept).
+		if e.Commitment == nil && !e.Pinned && e.User == nil {
+			if entry.IsEphemeral(e) {
+				continue
+			}
+			if entry.IsGenericPeopleNoise(e, c.Name) {
+				continue
+			}
 		}
 		if !Shows(e, in.Switches) {
 			c.Hidden++
@@ -364,10 +424,11 @@ type Summary struct {
 
 // List is the cards in the order of the intersection list (merged groups once, at their best rank).
 func List(in Input) []Summary {
+	merges := allMerges(in)
 	var out []Summary
 	seen := map[string]bool{}
 	for _, ct := range Ranked(in.Contacts) {
-		key := Key(in.Merges, ct.Person)
+		key := Key(merges, ct.Person)
 		if seen[key] {
 			continue
 		}

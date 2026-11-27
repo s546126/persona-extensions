@@ -176,6 +176,25 @@ type DayStats struct {
 
 const sideFile = "signals.json"
 
+// AsksInRange returns the total non-private ask/decision cards (Cards: main-chat ask_user plus supervisor decision
+// cards), total asks (Asks: cards plus conversational questions), and counted days within [from, to] (YYYY-MM-DD,
+// inclusive) from signals.json. Missing side files return zeros without error.
+func AsksInRange(dir, from, to string) (cards, asks, days int, err error) {
+	sd, err := loadSide(dir)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	for d, s := range sd.Days {
+		if (from != "" && d < from) || (to != "" && d > to) {
+			continue
+		}
+		cards += s.Cards
+		asks += s.Asks
+		days++
+	}
+	return cards, asks, days, nil
+}
+
 func loadSide(dir string) (*side, error) {
 	sd := &side{}
 	if dir != "" {

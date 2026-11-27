@@ -24,9 +24,18 @@ type pageState struct {
 	Body    string `json:"b,omitempty"`
 }
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "list", "detail", "comment", "review-comment":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Page < 0 || st.PRID < 0 || len(st.Owner) > 128 || len(st.Repo) > 128 || len(st.DraftID) > 128 || len([]rune(st.Body)) > maxCommentChars {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || st.Page < 0 || st.PRID < 0 || len(st.Owner) > 128 || len(st.Repo) > 128 || len(st.DraftID) > 128 || len([]rune(st.Body)) > maxCommentChars {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -80,7 +89,11 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "comment":
-		st.Mode, st.DraftID, st.Body = "comment", randomID(), ""
+		if st.Mode == "review-comment" {
+			st.Mode = "comment"
+		} else {
+			st.Mode, st.DraftID, st.Body = "comment", randomID(), ""
+		}
 	case "review-comment":
 		if err := validComment(r.Values["body"]); err != nil {
 			return nil, err
@@ -90,6 +103,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, errors.New("comment draft exceeds page state limit")
 		}
 	case "confirm-comment":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		raw, _ := json.Marshal(reviewArgs{Owner: st.Owner, Repo: st.Repo, Number: st.PRID, Body: st.Body})
 		out, err := a.doAction(ctx, "ui-comment:"+st.DraftID, "gitea_comment", raw)
 		if err != nil {
@@ -117,7 +133,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return commentView(r, st), nil
 		}
 		if st.Mode == "review-comment" {
-			return reviewCommentView(r, st), nil
+			return reviewCommentView(r, st)
 		}
 		item, err := a.client.pullRequest(ctx, st.Owner, st.Repo, st.PRID)
 		a.record(err)
@@ -152,9 +168,14 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	v := &wire.View{Title: t.reviews, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: "owner/repo", Value: st.Owner + "/" + st.Repo, Action: wire.Action{ID: "scope"}}}
 	section := wire.Section{Title: t.open}
+	seen := map[int64]bool{}
 	for _, item := range items {
-		if item.Number <= 0 || item.Title == "" {
+		if item.Number <= 0 || item.Title == "" || seen[item.Number] {
 			continue
+		}
+		seen[item.Number] = true
+		if len(section.Items) >= maxViewRecords {
+			break
 		}
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "pr-" + strconv.FormatInt(item.Number, 10), Title: fmt.Sprintf("#%d %s", item.Number, clipText(item.Title, 1800)), Subtitle: clipText(item.User.FullName+" · "+item.Head.Ref, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": strconv.FormatInt(item.Number, 10)}}})
 	}
@@ -194,15 +215,16 @@ func (a *app) collectPullRequests(ctx context.Context, owner, repo string, curre
 
 func detailView(r *ext.UIRequest, st pageState, item pullRequest, comments []comment) *wire.View {
 	t := textsFor(r.Locale)
-	items := []wire.Component{
-		{Type: wire.ComponentText, Text: clipText(item.Title, 1800)},
-		{Type: wire.ComponentText, Text: clipText(t.author+": "+item.User.FullName+" · "+item.Head.Ref+" → "+item.Base.Ref, 1800)},
+	var items []wire.Component
+	if title := clipText(strings.TrimSpace(item.Title), 1800); title != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: title})
 	}
+	items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(t.author+": "+item.User.FullName+" · "+item.Head.Ref+" → "+item.Base.Ref, 1800)})
 	if link := safePRLink(item.HTMLURL); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.openPR, URL: link})
 	}
 	items = append(items,
-		wire.Component{Type: wire.ComponentButton, Title: t.approve, Action: &wire.Action{ID: "approve", Confirm: t.approve + "\n" + item.Title}},
+		wire.Component{Type: wire.ComponentButton, Title: t.approve, Action: &wire.Action{ID: "approve", Confirm: clipText(t.approve+"\n"+item.Title, wire.StringMost)}},
 		wire.Component{Type: wire.ComponentButton, Title: t.comment, Action: &wire.Action{ID: "comment", Push: &wire.Push{Title: t.comment, State: ext.EncodeState(pageState{Owner: st.Owner, Repo: st.Repo, Page: st.Page, PRID: st.PRID, Mode: "comment", DraftID: randomID()})}}},
 		wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	)
@@ -255,17 +277,20 @@ func viewItemCount(v *wire.View) int {
 func commentView(r *ext.UIRequest, st pageState) *wire.View {
 	t := textsFor(r.Locale)
 	return &wire.View{Title: t.comment, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "body", Label: t.body, Value: st.Body},
+		{Type: wire.ComponentField, Kind: "text", Name: "body", Label: t.body, Value: clipText(st.Body, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-comment", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}
 }
 
-func reviewCommentView(r *ext.UIRequest, st pageState) *wire.View {
+func reviewCommentView(r *ext.UIRequest, st pageState) (*wire.View, error) {
+	if err := validComment(st.Body); err != nil {
+		return nil, err
+	}
 	t := textsFor(r.Locale)
 	items := textComponents(st.Body)
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "confirm-comment", Confirm: t.save + "\n" + fmt.Sprintf("PR #%d", st.PRID)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "comment"}})
-	return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.review, Items: items}}}
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "confirm-comment", Confirm: clipText(t.save+"\n"+fmt.Sprintf("PR #%d", st.PRID), wire.StringMost)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "comment"}})
+	return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.review, Items: items}}}, nil
 }
 
 func textComponents(text string) []wire.Component {

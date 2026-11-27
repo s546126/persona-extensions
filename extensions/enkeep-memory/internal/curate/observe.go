@@ -3,7 +3,6 @@ package curate
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/relay"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/schema"
 	srcs "github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/sources"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/speaker"
@@ -50,11 +50,12 @@ const (
 	obsEvalNotSelf     = "EVAL_NOT_SELF"         // ⑤′ user_eval without the user's own line
 	obsLanguage        = "LANGUAGE"              // the wording is not mainly in the target language, even rewritten
 	obsSelfWord        = "SELF_WORD"             // the wording calls the user "I", "我", "owner"… even rewritten
+	obsCronPrompt      = "CRON_PROMPT"           // automated cron/scheduled/batch-patrol prompt (T3 noise)
 )
 
 // ObsRejectCodes lists the codes of this file in report order.
 var ObsRejectCodes = []string{obsFacetNotAllowed, obsNotSelf, obsAgreementOnly, obsNotToAI, obsPersonUnknown, obsUnattributed,
-	obsEvalNotSelf, obsLanguage, obsSelfWord, verify.SecretFound, impactMoment, impactAction, impactObject}
+	obsEvalNotSelf, obsLanguage, obsSelfWord, obsCronPrompt, verify.SecretFound, impactMoment, impactAction, impactObject}
 
 // Flags an entry may carry from the daily pass.
 const (
@@ -135,16 +136,13 @@ func dailyParts(u *Unit, d triage.Decision) []struct {
 
 // factGate is the daily/8 checks of a fact past its citations: no credential in its words, a category label that is
 // one (or none), its wording in the target language (rewritten once already: fixWording). It returns the rejection
-// and the categories, which tag the entry.
+// and the categories, which tag the entry (Payload-First: only the fact's own words, never raw quotes).
 func (c *Curator) factGate(it schema.Item, ev []store.Evidence, owner []string) (string, []string) {
 	if slices.ContainsFunc([]string{it.Claim, it.Impact, it.About, it.ImpactObject}, verify.Secret) {
 		return verify.SecretFound, nil
 	}
 	texts := []string{it.Claim, it.Impact}
-	for _, e := range ev {
-		texts = append(texts, e.Quote)
-	}
-	cats, ok := categoriesOf(it.Sensitive, texts...)
+	cats, ok := categoriesForFacet(entry.World, it.Sensitive, texts...)
 	if !ok {
 		return verify.Schema, nil
 	}
@@ -164,13 +162,13 @@ const (
 	refMemoryPre = "memory/"
 )
 
-// unitOrigin is where a unit's entries come from.
+// unitOrigin is where a unit's entries come from. S6 memory files are T2 assistant notes, never UserOwned.
 func unitOrigin(ref string) entry.Origin {
 	switch {
 	case ref == refAboutMe || strings.HasPrefix(ref, "about/"):
 		return entry.SelfReport
 	case strings.HasPrefix(ref, refMemoryPre):
-		return entry.Handwritten
+		return entry.OriginAssistantNote
 	}
 	return entry.Behavior
 }
@@ -183,6 +181,8 @@ func unitCode(u *Unit) string {
 		return entry.SrcAssistant
 	case strings.HasPrefix(ref, "agents/"):
 		return entry.SrcAgent
+	case strings.HasPrefix(ref, "segments/") || u.Meta.Kind == "segments":
+		return entry.SrcTools
 	case strings.HasPrefix(ref, "asks/"):
 		return entry.SrcAsk
 	case strings.HasPrefix(ref, "todos/"):
@@ -193,6 +193,8 @@ func unitCode(u *Unit) string {
 		return entry.SrcMemory
 	case strings.HasPrefix(ref, "recordings/"):
 		return entry.SrcRecording
+	case strings.HasPrefix(ref, "ledger/"):
+		return entry.SrcLedger
 	}
 	return entry.SrcChat
 }
@@ -201,7 +203,7 @@ func unitCode(u *Unit) string {
 // and memory for the AI, a bot chat, or an assistant line in it.
 func aiUnit(u *Unit) bool {
 	switch unitCode(u) {
-	case entry.SrcAssistant, entry.SrcAgent, entry.SrcAsk, entry.SrcAbout, entry.SrcMemory, entry.SrcTools:
+	case entry.SrcAssistant, entry.SrcAgent, entry.SrcAsk, entry.SrcAbout, entry.SrcMemory, entry.SrcTools, entry.SrcLedger:
 		return true
 	}
 	if u.Meta.Kind == "bot" || u.Meta.Kind == "assistant" || u.Meta.Kind == "agent" {
@@ -449,36 +451,37 @@ func wordingCheck(fields map[string]*string, lang string, owner []string) string
 // dropped).
 type rewriter func(in schema.RewriteInput) (schema.RewriteOutput, bool)
 
-// categoriesOf are an observation's categories: the model's label (daily/16's sensitive field: emotion, finance,
-// health, family), finance when the words are a money matter (voice.Finance) and the model gave no label, legal_id
-// when they name identity papers or a legal matter (legalWords). ok is false for a label that is none of them. The
-// prompt is unchanged (daily/16): legal_id comes from words only until the hub tags (H1e).
-func categoriesOf(label string, texts ...string) (cats []string, ok bool) {
+// categoriesForFacet implements Payload-First sensitivity classification (0.4.0 §1.6).
+// For work-methodology facets (interaction, tools, workflow, judgement), a model label is accepted only when the
+// entry's own payload texts match entry.PayloadCategories, preventing tone- or topic-based false positives.
+// For world/people/persona, a valid model label is combined with entry.PayloadCategories.
+func categoriesForFacet(facet entry.Facet, label string, texts ...string) (cats []string, ok bool) {
 	label = strings.ToLower(strings.TrimSpace(label))
+	modelCat := ""
 	if label != "" {
-		n := entry.CategoryOf(label)
-		if n == "" {
+		modelCat = entry.CategoryOf(label)
+		if modelCat == "" {
 			return nil, false
 		}
-		cats = append(cats, n)
 	}
-	if label == "" && slices.ContainsFunc(texts, voice.Finance) {
-		cats = append(cats, entry.CatFinance)
+	payload := entry.PayloadCategories(facet, texts...)
+	if entry.IsWorkMethodFacet(facet) {
+		return payload, true
 	}
-	if slices.ContainsFunc(texts, legalWords.MatchString) && !slices.Contains(cats, entry.CatLegalID) {
-		cats = append(cats, entry.CatLegalID)
+	if modelCat != "" {
+		cats = append(cats, modelCat)
+	}
+	for _, n := range payload {
+		if !slices.Contains(cats, n) {
+			cats = append(cats, n)
+		}
 	}
 	return cats, true
 }
 
-// legalWords are the marks of identity papers, their numbers, and a person's legal matters (legal_id). Contracts at
-// work are left out: they are work, not the person's papers.
-var legalWords = regexp.MustCompile(`(?i)身份证|护照|签证|驾驶证|驾照|户口|户籍|居住证|绿卡|社保号|诉讼|起诉|被告|原告|官司|律师函|仲裁|判决书|` +
-	`\bpassport\b|\bvisa\b|green card|driver'?s licen[cs]e|social security number|\bssn\b|lawsuit|\bsued\b|arbitration`)
-
-// CategoriesOf is categoriesOf for the memory source's tagging of entries read before these rules (memsrc.Tags).
+// CategoriesOf is Payload-First category tagging for callers (such as memsrc.Tags) reading entries tagged before 0.4.0.
 func CategoriesOf(label string, texts ...string) ([]string, bool) {
-	return categoriesOf(label, texts...)
+	return categoriesForFacet("", label, texts...)
 }
 
 // tagCategories adds categories to an entry, as tagged by the plugin's model reading and rules.
@@ -547,9 +550,20 @@ func (c *Curator) checkObservation(w *verify.Window, u *Unit, k *known, tier str
 		}
 	}
 	origin := unitOrigin(u.Ref)
+	src := unitCode(u)
+	isS3S4 := src == entry.SrcAgent || src == entry.SrcTools || u.Meta.Kind == "agent" || u.Meta.Kind == "segments"
+	if IsScheduledUnit(*u) && (f == entry.Workflow || f == entry.Persona || f == entry.Judgement || f == entry.Interaction) {
+		return bad(obsCronPrompt)
+	}
 	switch {
 	case origin == entry.SelfReport && f != entry.Interaction && f != entry.Tools && f != entry.Persona:
 		return bad(obsFacetNotAllowed) // what the user says about how they choose is not how they choose (4.1, 4.3)
+	case entry.IsAssistantNote(origin) && (f == entry.Persona || f == entry.Judgement):
+		// S6 assistant notes are T2 clues for tools/workflow/interaction only, never persona or judgement (0.4.0 §1.2).
+		return bad(obsFacetNotAllowed)
+	case isS3S4 && (f == entry.Persona || f == entry.Workflow || f == entry.People):
+		// Hard gate (0.4.0 §1.2): S3/S4 agent and tool sessions may never write persona, workflow, or people cards.
+		return bad(obsFacetNotAllowed)
 	case tier == triage.TierBackground && f != entry.People && f != entry.Persona:
 		return bad(verify.TierNotAllowed)
 	}
@@ -567,6 +581,19 @@ func (c *Curator) checkObservation(w *verify.Window, u *Unit, k *known, tier str
 	cited, rej, flags := w.Evidence(o.Evidence)
 	if rej != "" {
 		return bad(rej)
+	}
+	if (f == entry.Workflow || f == entry.Persona || f == entry.Judgement || f == entry.Interaction) && len(cited) > 0 {
+		allCron := true
+		for _, x := range cited {
+			lineBody := strings.TrimPrefix(w.All[x.N].Body, relay.RelayedMark)
+			if !IsCronOrScheduledPrompt(x.Quote) && !IsCronOrScheduledPrompt(lineBody) {
+				allCron = false
+				break
+			}
+		}
+		if allCron {
+			return bad(obsCronPrompt)
+		}
 	}
 	if p := personOf(u, k, o.Person); f == entry.People && p != "" {
 		// A person card's names, numbers and times are in the lines it cites (F1, 9.5). Whom it is about is checked
@@ -590,12 +617,31 @@ func (c *Curator) checkObservation(w *verify.Window, u *Unit, k *known, tier str
 		if f == entry.Interaction && !aiUnit(u) {
 			return bad(obsNotToAI) // an instruction to a person is not how the user works with the AI
 		}
-		if origin == entry.Handwritten {
-			kept = ev // the assistant's memory of the user: kept as written, compared and counted (S6)
+		if entry.IsAssistantNote(origin) {
+			kept = ev // S6 assistant memory note: kept as T2 assistant_note clue (never UserOwned)
 			break
 		}
 		if kept, rej = selfCheck(u, ev); rej != "" {
 			return bad(rej)
+		}
+		if isS3S4 && f == entry.Judgement {
+			// Hard gate (0.4.0 §1.2): S3/S4 may only write judgement when the user directly typed a correction.
+			directCorrection := false
+			for _, x := range kept {
+				if x.who != entry.WhoSelf || x.Role != voice.RoleUser {
+					continue
+				}
+				if strings.HasPrefix(w.All[x.N].Body, relay.RelayedMark) {
+					continue
+				}
+				if strings.EqualFold(o.Type, "correction") || strings.TrimSpace(o.Rejected) != "" || fastCue.MatchString(x.Quote) {
+					directCorrection = true
+					break
+				}
+			}
+			if !directCorrection {
+				return bad(obsFacetNotAllowed)
+			}
 		}
 		if f != entry.Persona {
 			if (f == entry.Judgement || f == entry.Workflow || f == entry.Interaction) && e.Choice == "" {
@@ -690,17 +736,17 @@ func (c *Curator) checkObservation(w *verify.Window, u *Unit, k *known, tier str
 	if rej := impactCheck(f, e.Part, o.Impact, e.Text); rej != "" {
 		return bad(rej)
 	}
-	var quotes []string
-	for _, x := range kept {
-		quotes = append(quotes, x.Quote)
-	}
-	cats, ok := categoriesOf(o.Sensitive, append(slices.Clone(all), quotes...)...)
+	// Payload-First (0.4.0 §1.6): inspect only the entry's own payload fields, never raw Evidence quotes.
+	cats, ok := categoriesForFacet(f, o.Sensitive, e.PayloadTexts()...)
 	if !ok {
 		return bad(verify.Schema)
 	}
 	tagCategories(e, cats) // kept and tagged; the exits decide by category and scene
 	e.TagSpace(u.Meta.Space)
 	e.Evidence = c.entryEvidence(u, kept, reportedOf)
+	if entry.ClassifyOpsRunbook(e) {
+		e.MemoryClass = entry.ClassOpsRunbook
+	}
 	if o.Durable {
 		e.Flags = append(e.Flags, flagDurable)
 	}

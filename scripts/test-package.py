@@ -19,6 +19,12 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location('manifest', pathlib.Path(__file__).with_name('manifest.py'))
 manifest = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(manifest)
+_cf_spec = importlib.util.spec_from_file_location('config_form', pathlib.Path(__file__).with_name('config_form.py'))
+config_form = importlib.util.module_from_spec(_cf_spec)
+_cf_spec.loader.exec_module(config_form)
+_cat_spec = importlib.util.spec_from_file_location('catalog', pathlib.Path(__file__).with_name('catalog.py'))
+catalog = importlib.util.module_from_spec(_cat_spec)
+_cat_spec.loader.exec_module(catalog)
 
 EXT_ID = 'starter-kit'
 # Junk planted in the source tree: every basename here must be filtered out by scripts/package.sh.
@@ -31,11 +37,13 @@ JUNK = [
     'assistant/._answer-style.md',
     'assets/.DS_Store',
     'assets/._icon.png',
+    'l10n/._en.json',
 ]
 # Real files that must still ship despite the exclusions.
 KEEP = [
     'skills/weekly-review/SKILL.md',
     'assistant/answer-style.md',
+    'l10n/en.json',
 ]
 # Names that look like junk but must NOT be matched by the basename patterns (no prefix/glob over-reach).
 NEAR_MISS = [
@@ -61,6 +69,8 @@ class PackageJunkTests(unittest.TestCase):
             shutil.copy2(REPO / 'scripts' / name, self.tmp / 'scripts' / name)
         shutil.copytree(REPO / 'extensions' / EXT_ID, self.tmp / 'extensions' / EXT_ID)
         ext = self.tmp / 'extensions' / EXT_ID
+        (ext / 'l10n').mkdir()
+        (ext / 'l10n/en.json').write_text(json.dumps({'name': 'Starter kit'}))
         for rel in JUNK + NEAR_MISS:
             p = ext / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +86,8 @@ class PackageJunkTests(unittest.TestCase):
         self.assertTrue(tarball.is_file())
         with tarfile.open(tarball, 'r:gz') as t:
             names = t.getnames()
+            with t.extractfile(f'{EXT_ID}/l10n/en.json') as translation:
+                self.assertEqual(json.load(translation), {'name': 'Starter kit'})
         # No path component is a junk name: catches files and excluded directories at every depth.
         for n in names:
             for part in n.split('/'):
@@ -107,6 +119,87 @@ class LooksPackageTests(unittest.TestCase):
             files = {n.name.split('/', 1)[1] for n in t.getmembers() if n.isfile()}
         self.assertLessEqual(wanted, files)
         self.assertFalse([f for f in files if not f.startswith(('looks/', 'assets/')) and f not in (manifest.NEW, manifest.OLD)])
+
+
+def _assert_pre_section_strict_schema(schema):
+    """Independent pre-section strict form check matching Persona Hub before nwverse/persona#14833."""
+    if not schema:
+        return
+    allowed_describing = {'type', 'title', 'description', 'default', 'x-confirm'}
+    allowed_by_type = {
+        'string': {'enum', 'oneOf', 'format', 'x-os', 'pattern', 'minLength', 'maxLength'},
+        'integer': {'enum', 'oneOf', 'minimum', 'maximum'},
+        'number': {'enum', 'oneOf', 'minimum', 'maximum'},
+        'boolean': set(),
+        'array': {'items', 'minItems', 'maxItems', 'uniqueItems'},
+        'object': {'properties', 'required'},
+    }
+
+    def walk(node, path):
+        props = node.get('properties') or {}
+        for name, spec in props.items():
+            t = spec.get('type')
+            if t not in allowed_by_type:
+                raise ValueError('%s%s: unsupported type %r' % (path, name, t))
+            unknown = set(spec) - allowed_describing - allowed_by_type[t]
+            if unknown:
+                raise ValueError('%s%s: unknown pre-section keys %r' % (path, name, sorted(unknown)))
+            if t == 'object':
+                walk(spec, path + name + '.')
+            elif t == 'array' and isinstance(spec.get('items'), dict):
+                item = spec['items']
+                item_unknown = set(item) - allowed_describing - allowed_by_type.get(item.get('type'), set())
+                if item_unknown:
+                    raise ValueError('%s%s.items: unknown pre-section keys %r' % (path, name, sorted(item_unknown)))
+
+    walk(schema, '')
+
+
+class PreSectionHubCompatibilityTests(unittest.TestCase):
+    """Packaged larkx manifests and its catalog entry must pass the pre-#14833 strict configuration schema so
+    hubs built before section support can still list, install, and upgrade larkx."""
+
+    def test_larkx_package_and_catalog_entry_pass_pre_section_strict_schema(self):
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / 'scripts').mkdir()
+        for name in ('package.sh', 'manifest.py', 'catalog.py', 'config_form.py', 'icons.py'):
+            shutil.copy2(REPO / 'scripts' / name, tmp / 'scripts' / name)
+        shutil.copytree(REPO / 'extensions' / 'larkx', tmp / 'extensions' / 'larkx')
+        r = subprocess.run(['bash', 'scripts/package.sh', 'larkx'], cwd=tmp, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+        source = json.loads((tmp / 'extensions' / 'larkx' / manifest.NEW).read_text())
+        catalog_manifest = catalog.source_entry(source)['manifest']
+        tarball = tmp / 'dist' / ('larkx-%s.tar.gz' % source['version'])
+        with tarfile.open(tarball, 'r:gz') as t:
+            ext_manifest = json.loads(t.extractfile('larkx/persona-extension.json').read().decode('utf-8'))
+            legacy_manifest = json.loads(t.extractfile('larkx/persona-plugin.json').read().decode('utf-8'))
+
+        # Packaged manifests and catalog entry stay identical and do not raise engines.persona.
+        self.assertEqual(ext_manifest, catalog_manifest)
+        self.assertEqual(legacy_manifest, ext_manifest)
+        self.assertNotIn('persona', ext_manifest.get('engines', {}))
+
+        # Every published manifest copy must pass the pre-#14833 strict schema (allow_section=False).
+        for label, item in (
+            ('persona-extension.json', ext_manifest),
+            ('persona-plugin.json', legacy_manifest),
+            ('catalog entry', catalog_manifest),
+        ):
+            config_form.check(item, allow_section=False)
+            _assert_pre_section_strict_schema(item['configuration'])
+            for prop_name, prop in item['configuration']['properties'].items():
+                self.assertNotIn('section', prop, '%s: %s' % (label, prop_name))
+
+        # Sanity check: injecting section into a copy is caught by both pre-section checks.
+        with_section = json.loads(json.dumps(ext_manifest))
+        with_section['configuration']['properties']['region']['section'] = 'connection'
+        config_form.check(with_section)
+        with self.assertRaises(config_form.Refused):
+            config_form.check(with_section, allow_section=False)
+        with self.assertRaises(ValueError):
+            _assert_pre_section_strict_schema(with_section['configuration'])
 
 
 if __name__ == '__main__':

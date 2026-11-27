@@ -29,6 +29,14 @@ type fakeKarakeep struct {
 	patches []map[string]any
 }
 
+// Synthetic bodies shaped like Karakeep's OpenAPI spec: a crawled link bookmark
+// whose own title is null, and a text bookmark that keeps its text in content.
+const (
+	linkBookmarkJSON = `{"id":"bookmark-1","createdAt":"2026-01-02T03:04:05.000Z","modifiedAt":"2026-01-02T03:04:05.000Z","title":null,"archived":false,"favourited":false,"taggingStatus":"success","summarizationStatus":null,"embeddingStatus":"success","note":"Why this matters","summary":null,"source":"api","userId":"user-1","tags":[{"id":"tag-1","name":"reading","attachedBy":"human"}],"content":{"type":"link","url":"https://example.com/article","title":"Reading with context","description":"A saved article","imageUrl":null,"favicon":null,"htmlContent":null,"crawledAt":"2026-01-02T03:05:00.000Z","crawlStatus":"success","author":null,"publisher":null,"datePublished":null,"dateModified":null},"assets":[]}`
+	textBookmarkJSON = `{"id":"bookmark-text","createdAt":"2026-01-03T03:04:05.000Z","modifiedAt":null,"title":null,"archived":false,"favourited":true,"taggingStatus":"pending","summarizationStatus":null,"embeddingStatus":null,"note":null,"summary":null,"source":"web","userId":"user-1","tags":[],"content":{"type":"text","text":"A quoted paragraph worth keeping","sourceUrl":"https://example.com/source"},"assets":[]}`
+	highlightJSON    = `{"bookmarkId":%q,"startOffset":0,"endOffset":21,"color":"yellow","text":%q,"prefix":null,"suffix":null,"note":%q,"id":%q,"userId":"user-1","createdAt":"2026-01-02T04:00:00.000Z"}`
+)
+
 func newFakeKarakeep(t *testing.T) *fakeKarakeep {
 	f := &fakeKarakeep{}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,44 +49,67 @@ func newFakeKarakeep(t *testing.T) *fakeKarakeep {
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/bookmarks/search":
-			fmt.Fprint(w, `{"bookmarks":[{"id":"bookmark-1","title":"Reading with context","type":"link","url":"https://example.com/article","description":"A saved article","note":"Why this matters","favourited":false,"archived":false}],"nextCursor":"next-page"}`)
-		case "/bookmarks":
+		case "/api/v1/bookmarks/search":
+			fmt.Fprintf(w, `{"bookmarks":[%s],"nextCursor":"next-page"}`, linkBookmarkJSON)
+		case "/api/v1/bookmarks":
 			if r.Method == http.MethodPost {
 				var in map[string]any
 				_ = json.NewDecoder(io.LimitReader(r.Body, 65536)).Decode(&in)
 				f.mu.Lock()
 				f.posts = append(f.posts, in)
 				f.mu.Unlock()
-				fmt.Fprint(w, `{"id":"new-bookmark","title":"Saved article","type":"link","url":"https://example.com/new"}`)
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprint(w, strings.Replace(linkBookmarkJSON, `"bookmark-1"`, `"new-bookmark"`, 1))
 				return
 			}
-			fmt.Fprint(w, `{"bookmarks":[{"id":"bookmark-1","title":"Reading with context","type":"link","url":"https://example.com/article","description":"A saved article","note":"Why this matters","favourited":false,"archived":false}],"nextCursor":null}`)
-		case "/bookmarks/bookmark-1":
+			if r.URL.Query().Get("limit") == "1" {
+				fmt.Fprintf(w, `{"bookmarks":[%s],"nextCursor":"after-first"}`, linkBookmarkJSON)
+				return
+			}
+			fmt.Fprintf(w, `{"bookmarks":[%s,%s],"nextCursor":null}`, linkBookmarkJSON, textBookmarkJSON)
+		case "/api/v1/bookmarks/bookmark-1":
 			if r.Method == http.MethodPatch {
 				var in map[string]any
 				_ = json.NewDecoder(io.LimitReader(r.Body, 65536)).Decode(&in)
 				f.mu.Lock()
 				f.patches = append(f.patches, in)
 				f.mu.Unlock()
-				fmt.Fprint(w, `{"id":"bookmark-1","title":"Reading with context"}`)
+				fmt.Fprint(w, `{"id":"bookmark-1","createdAt":"2026-01-02T03:04:05.000Z","modifiedAt":"2026-01-04T03:04:05.000Z","title":null,"archived":false,"favourited":true,"taggingStatus":"success","summarizationStatus":null,"embeddingStatus":"success","note":"Why this matters","summary":null,"source":"api","userId":"user-1"}`)
 				return
 			}
-			fmt.Fprint(w, `{"id":"bookmark-1","title":"Reading with context","type":"link","url":"https://example.com/article","description":"A saved article","note":"Why this matters","content":"The reading context"}`)
-		case "/highlights":
-			fmt.Fprint(w, `{"bookmarks":[{"id":"highlight-1","bookmarkId":"bookmark-1","text":"A highlighted passage","note":"A note"},{"id":"highlight-other","bookmarkId":"other","text":"Another bookmark"}],"nextCursor":null}`)
-		case "/lists":
-			fmt.Fprint(w, `[{"id":"list-1","name":"Research","type":"manual"}]`)
+			fmt.Fprint(w, linkBookmarkJSON)
+		case "/api/v1/bookmarks/bookmark-text":
+			fmt.Fprint(w, textBookmarkJSON)
+		case "/api/v1/bookmarks/bookmark-1/highlights":
+			fmt.Fprintf(w, `{"highlights":[`+highlightJSON+`]}`, "bookmark-1", "A highlighted passage", "A note", "highlight-1")
+		case "/api/v1/bookmarks/bookmark-text/highlights":
+			fmt.Fprint(w, `{"highlights":[]}`)
+		case "/api/v1/highlights":
+			fmt.Fprintf(w, `{"highlights":[`+highlightJSON+`],"nextCursor":null}`, "other", "Another bookmark", "", "highlight-other")
+		case "/api/v1/lists":
+			fmt.Fprint(w, `{"lists":[{"id":"list-1","name":"Research","description":null,"icon":"book","parentId":null,"type":"manual","query":null,"public":false,"hasCollaborators":false,"userRole":"owner"}]}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"code":"NOT_FOUND","message":"Not found"}`)
 		}
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
 }
 
+// app configures the client through instanceURL, as init does for a real instance.
 func (f *fakeKarakeep) app() *app {
-	return &app{client: newClient(f.srv.URL, testKey), receipts: newWriteStore("")}
+	base, err := instanceURL(f.srv.URL)
+	if err != nil {
+		panic(err)
+	}
+	return &app{client: newClient(base, testKey), receipts: newWriteStore("")}
+}
+
+func (f *fakeKarakeep) requested(want string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Contains(f.paths, want)
 }
 
 func TestConformance(t *testing.T) {
@@ -106,9 +137,14 @@ func TestManifest(t *testing.T) {
 
 func TestInstanceURLValidation(t *testing.T) {
 	for raw, want := range map[string]string{
-		"https://karakeep.example.com":     "https://karakeep.example.com/api",
-		"http://127.0.0.1:3000":            "http://127.0.0.1:3000/api",
-		"https://karakeep.example.com/api": "https://karakeep.example.com/api",
+		"https://karakeep.example.com":         "https://karakeep.example.com/api/v1",
+		"https://karakeep.example.com/":        "https://karakeep.example.com/api/v1",
+		"http://127.0.0.1:3000":                "http://127.0.0.1:3000/api/v1",
+		"https://karakeep.example.com/api":     "https://karakeep.example.com/api/v1",
+		"https://karakeep.example.com/api/v1/": "https://karakeep.example.com/api/v1",
+		"https://example.com/karakeep":         "https://example.com/karakeep/api/v1",
+		"https://example.com/karakeep/api":     "https://example.com/karakeep/api/v1",
+		"https://example.com/karakeep/api/v1":  "https://example.com/karakeep/api/v1",
 	} {
 		got, err := instanceURL(raw)
 		if err != nil || got != want {
@@ -122,15 +158,68 @@ func TestInstanceURLValidation(t *testing.T) {
 	}
 }
 
-func TestSearchAndAssociatedHighlights(t *testing.T) {
+func TestSearchAndListShowCrawledTitleAndURL(t *testing.T) {
 	f := newFakeKarakeep(t)
-	text, err := f.app().callTool(t.Context(), "karakeep_bookmarks", json.RawMessage(`{"query":"context","cursor":"old"}`))
-	if err != nil || !strings.Contains(text, "bookmark-1") || !strings.Contains(text, "next-page") {
+	for _, args := range []string{`{"query":"context","cursor":"old"}`, `{}`} {
+		text, err := f.app().callTool(t.Context(), "karakeep_bookmarks", json.RawMessage(args))
+		if err != nil || !strings.Contains(text, "- Reading with context\n  ID: bookmark-1 | type: link") || !strings.Contains(text, "https://example.com/article") || !strings.Contains(text, "A saved article") {
+			t.Fatalf("%s: %v %s", args, err, text)
+		}
+	}
+	if !f.requested("/api/v1/bookmarks/search?cursor=old&limit=20&q=context") {
+		t.Fatal(f.paths)
+	}
+	text, _ := f.app().callTool(t.Context(), "karakeep_bookmarks", json.RawMessage(`{}`))
+	if !strings.Contains(text, "- A quoted paragraph worth keeping\n  ID: bookmark-text | type: text") || !strings.Contains(text, "https://example.com/source") {
+		t.Fatal(text)
+	}
+}
+
+func TestReadShowsNoteTextAndOwnHighlights(t *testing.T) {
+	f := newFakeKarakeep(t)
+	text, err := f.app().callTool(t.Context(), "karakeep_read", json.RawMessage(`{"id":"bookmark-1"}`))
+	if err != nil || !strings.Contains(text, "Reading with context") || !strings.Contains(text, "Why this matters") || !strings.Contains(text, "A highlighted passage") || !strings.Contains(text, "A note") || strings.Contains(text, "Another bookmark") {
 		t.Fatalf("%v %s", err, text)
 	}
-	text, err = f.app().callTool(t.Context(), "karakeep_read", json.RawMessage(`{"id":"bookmark-1"}`))
-	if err != nil || !strings.Contains(text, "Why this matters") || !strings.Contains(text, "A highlighted passage") || strings.Contains(text, "Another bookmark") {
+	if !f.requested("/api/v1/bookmarks/bookmark-1/highlights") {
+		t.Fatal(f.paths)
+	}
+	text, err = f.app().callTool(t.Context(), "karakeep_read", json.RawMessage(`{"id":"bookmark-text"}`))
+	if err != nil || !strings.Contains(text, "Text:\nA quoted paragraph worth keeping") || strings.Contains(text, "Highlight") {
 		t.Fatalf("%v %s", err, text)
+	}
+}
+
+func TestListsDecodeWrappedResponse(t *testing.T) {
+	text, err := newFakeKarakeep(t).app().callTool(t.Context(), "karakeep_lists", nil)
+	if err != nil || text != "- Research (manual, id list-1)\n" {
+		t.Fatalf("%v %q", err, text)
+	}
+}
+
+func TestLimitIsSentAndServerCursorContinues(t *testing.T) {
+	f := newFakeKarakeep(t)
+	text, err := f.app().callTool(t.Context(), "karakeep_bookmarks", json.RawMessage(`{"limit":1}`))
+	if err != nil || !strings.Contains(text, "bookmark-1") || strings.Contains(text, "bookmark-text") || !strings.Contains(text, "Next cursor: after-first") {
+		t.Fatalf("%v %s", err, text)
+	}
+	if !f.requested("/api/v1/bookmarks?limit=1") {
+		t.Fatal(f.paths)
+	}
+}
+
+func TestDisplayTitleFallbacks(t *testing.T) {
+	for want, item := range map[string]bookmark{
+		"Own title":                {Title: "Own title", Content: bookmarkContent{Type: "link", URL: "https://example.com/a", Title: "Crawled"}},
+		"https://example.com/b":    {Content: bookmarkContent{Type: "link", URL: "https://example.com/b"}},
+		"scan.pdf":                 {Content: bookmarkContent{Type: "asset", FileName: "scan.pdf", SourceURL: "https://example.com/scan"}},
+		"First line":               {Content: bookmarkContent{Type: "text", Text: "First line\nSecond line"}},
+		"Untitled":                 {Content: bookmarkContent{Type: "unknown"}},
+		"https://example.com/text": {Content: bookmarkContent{Type: "text", Text: "  ", SourceURL: "https://example.com/text"}},
+	} {
+		if got := item.displayTitle(); got != want {
+			t.Fatalf("%+v: %q", item, got)
+		}
 	}
 }
 
@@ -246,8 +335,32 @@ func TestMoreKeepsExistingBookmarksAndUsesCursor(t *testing.T) {
 	}
 }
 
+func TestDetailPageShowsBookmarkContentAndOwnHighlights(t *testing.T) {
+	f := newFakeKarakeep(t)
+	for id, want := range map[string]string{"bookmark-1": "A highlighted passage", "bookmark-text": "A quoted paragraph worth keeping"} {
+		st := ext.EncodeState(pageState{Mode: "detail", BookmarkID: id})
+		v, err := f.app().render(t.Context(), &ext.UIRequest{UIParams: wire.UIParams{Locale: "en", UIVersion: 6, State: st}})
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if err := wire.CheckView(v); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		raw, _ := json.Marshal(v)
+		if !strings.Contains(string(raw), want) || strings.Contains(string(raw), "Another bookmark") {
+			t.Fatalf("%s: %s", id, raw)
+		}
+		if id == "bookmark-1" && (v.Title != "Reading with context" || !strings.Contains(string(raw), "https://example.com/article")) {
+			t.Fatalf("%s: %s", id, raw)
+		}
+	}
+	if !f.requested("/api/v1/bookmarks/bookmark-1/highlights") {
+		t.Fatal(f.paths)
+	}
+}
+
 func TestDetailBoundsAndNoConfig(t *testing.T) {
-	v := detailView(&ext.UIRequest{UIParams: wire.UIParams{Locale: "en", UIVersion: 6}}, pageState{BookmarkID: "bookmark-1", Mode: "detail"}, bookmark{ID: "bookmark-1", Title: "Article", URL: "https://example.com", Text: strings.Repeat("text ", 3000)}, nil)
+	v := detailView(&ext.UIRequest{UIParams: wire.UIParams{Locale: "en", UIVersion: 6}}, pageState{BookmarkID: "bookmark-1", Mode: "detail"}, bookmark{ID: "bookmark-1", Title: "Article", Content: bookmarkContent{Type: "text", Text: strings.Repeat("text ", 3000), SourceURL: "https://example.com"}}, nil)
 	if err := wire.CheckView(v); err != nil {
 		t.Fatal(err)
 	}

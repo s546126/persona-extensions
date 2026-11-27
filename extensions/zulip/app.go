@@ -25,6 +25,12 @@ type app struct {
 
 func newApp() *app { return &app{client: newClient("", "", "")} }
 
+func (a *app) currentClient() *client {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.client
+}
+
 func (a *app) init(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any, error) {
 	var cfg struct {
 		InstanceURL string `json:"instance_url"`

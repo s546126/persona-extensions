@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -275,11 +276,40 @@ func readOptions(data string) options {
 	return o
 }
 
+func lockAudit(lockPath string, exclusive bool) func() {
+	flag := os.O_RDONLY
+	how := syscall.LOCK_SH
+	if exclusive {
+		flag = os.O_CREATE | os.O_RDWR
+		how = syscall.LOCK_EX
+	}
+	lf, err := os.OpenFile(lockPath, flag, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	for {
+		err = syscall.Flock(int(lf.Fd()), how)
+		if err != syscall.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		_ = lf.Close()
+		return func() {}
+	}
+	return func() {
+		_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+		_ = lf.Close()
+	}
+}
+
 func appendAudit(path string, e auditEntry) {
 	b, err := marshalPlain(e) // && and > as they are, for whoever reads the file
 	if err != nil {
 		return
 	}
+	unlock := lockAudit(path+".lock", true)
+	defer unlock()
 	if st, err := os.Stat(path); err == nil && st.Size() > auditKeep {
 		_ = os.Rename(path, path+".1")
 	}
@@ -293,6 +323,8 @@ func appendAudit(path string, e auditEntry) {
 
 // readAudit is the newest n entries, newest first.
 func readAudit(dir string, n int) []auditEntry {
+	unlock := lockAudit(filepath.Join(dir, auditFile+".lock"), false)
+	defer unlock()
 	var all []auditEntry
 	for _, name := range []string{auditFile + ".1", auditFile} {
 		b, err := os.ReadFile(filepath.Join(dir, name))
@@ -302,6 +334,9 @@ func readAudit(dir string, n int) []auditEntry {
 		for _, line := range strings.Split(string(b), "\n") {
 			var e auditEntry
 			if json.Unmarshal([]byte(line), &e) == nil && e.At != "" {
+				if strings.TrimSpace(e.Command) == "" {
+					e.Command = cmp.Or(strings.TrimSpace(e.Tool), "-")
+				}
 				all = append(all, e)
 			}
 		}

@@ -3,15 +3,41 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
+
+const maxViewRecords = 250
+
+func boundedKey(prefix, raw string) string {
+	key := prefix + raw
+	if len(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return prefix + hex.EncodeToString(sum[:])
+}
+
+func fileTitle(displayName, relPath string) string {
+	if s := strings.TrimSpace(displayName); s != "" {
+		return s
+	}
+	if base := strings.TrimSpace(path.Base(relPath)); base != "" && base != "." && base != "/" {
+		return base
+	}
+	if s := strings.TrimSpace(relPath); s != "" {
+		return s
+	}
+	return "File"
+}
 
 type pageState struct {
 	Mode    string `json:"m,omitempty"`
@@ -24,6 +50,11 @@ type pageState struct {
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
 	if err := r.DecodeState(&st); err != nil || len([]rune(st.Query)) > maxQueryChars || len(st.Path) > 550 || len(st.DraftID) > 128 || len(st.Text) > 11000 || len(st.Mode) > 30 {
+		return pageState{}, errors.New("invalid page state")
+	}
+	switch st.Mode {
+	case "", "detail", "create", "review-create":
+	default:
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -64,6 +95,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, errors.New("the Web note must have a new .md path and at most 10000 UTF-8 bytes")
 		}
 		st.Path, st.Text, st.Mode = in.Path, in.Text, "review-create"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("note draft exceeds page state limit; use the nextcloud_create_note action")
+		}
 	case "confirm-create":
 		in := createArgs{Path: st.Path, Text: st.Text}
 		if err := in.validate(); err != nil || st.Mode != "review-create" || st.DraftID == "" || len(st.Text) > 10000 {
@@ -88,6 +122,11 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "create" || st.Mode == "review-create" {
+		if st.Mode == "review-create" {
+			if err := (createArgs{Path: st.Path, Text: st.Text}).validate(); err != nil || len(st.Text) > 10000 {
+				return nil, errors.New("a valid reviewed note draft is required")
+			}
+		}
 		return createView(r, st), nil
 	}
 	if st.Mode == "detail" {
@@ -111,8 +150,18 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if err != nil {
 			return nil, err
 		}
+		seen := map[string]bool{}
+		prefix := "/remote.php/dav/files/" + a.client.username + "/"
 		for _, item := range items {
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "file-" + item.Href, Title: clipText(item.DisplayName, 1800), Subtitle: clipText(fmt.Sprintf("%s · %d bytes · %s", item.ContentType, item.ContentLength, item.LastModified), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"path": strings.TrimPrefix(item.Href, "/remote.php/dav/files/"+a.client.username+"/")}}})
+			if item.Href == "" || seen[item.Href] {
+				continue
+			}
+			seen[item.Href] = true
+			relPath := strings.TrimPrefix(item.Href, prefix)
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: boundedKey("file-", item.Href), Title: clipText(fileTitle(item.DisplayName, relPath), 1800), Subtitle: clipText(fmt.Sprintf("%s · %d bytes · %s", item.ContentType, item.ContentLength, item.LastModified), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"path": relPath}}})
+			if len(section.Items) >= maxViewRecords {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noFiles})
@@ -131,8 +180,8 @@ func createView(r *ext.UIRequest, st pageState) *wire.View {
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}
 	}
 	return &wire.View{Title: t.create, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.noOverwrite, Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "path", Label: t.path, Value: st.Path},
-		{Type: wire.ComponentField, Kind: "text", Name: "text", Label: t.text, Value: st.Text},
+		{Type: wire.ComponentField, Kind: "text", Name: "path", Label: t.path, Value: clipText(st.Path, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "text", Label: t.text, Value: clipText(st.Text, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}
@@ -140,7 +189,7 @@ func createView(r *ext.UIRequest, st pageState) *wire.View {
 
 func detailView(r *ext.UIRequest, st pageState, item fileEntry, text []byte) *wire.View {
 	t := textsFor(r.Locale)
-	v := &wire.View{Title: clipText(item.DisplayName, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.files, Items: []wire.Component{
+	v := &wire.View{Title: clipText(fileTitle(item.DisplayName, st.Path), 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.files, Items: []wire.Component{
 		{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %d bytes · %s", item.ContentType, item.ContentLength, item.LastModified), 1800)},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}

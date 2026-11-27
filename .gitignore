@@ -11,6 +11,7 @@ __pycache__/
 /extensions/*/spaces
 /extensions/*/v2ex
 /extensions/*/termwise
+/extensions/*/relingo
 /extensions/*/weather
 # personad extension test / dev build the program where the manifest says (bin/…).
 /extensions/*/bin/

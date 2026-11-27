@@ -52,6 +52,15 @@ type LedgerScopeOf struct {
 	Personal bool     `json:"personal,omitempty"`
 }
 
+// LedgerDecision is the structured choice on a decision ledger entry.
+type LedgerDecision struct {
+	Options    []string        `json:"options,omitempty"`
+	Selected   []string        `json:"selected,omitempty"`
+	Rejected   []string        `json:"rejected,omitempty"`
+	Reason     string          `json:"reason,omitempty"`
+	Reversible json.RawMessage `json:"reversible,omitempty"`
+}
+
 // LedgerEntry is one ledger entry as assistant.entries.list returns it.
 type LedgerEntry struct {
 	ID    string `json:"id"`
@@ -64,13 +73,16 @@ type LedgerEntry struct {
 	At         time.Time    `json:"at"`
 	ExpiresAt  *time.Time   `json:"expires_at"`
 	// Supersedes is set on the newer entry ("" when none); the older one reads status superseded.
-	Supersedes string        `json:"supersedes"`
-	Trust      string        `json:"trust"`  // user_verbatim | user_relayed | repo | agent | inferred
-	Status     string        `json:"status"` // active | superseded | expired | wrong
-	By         string        `json:"by"`     // user | agent | enkeep | import
-	Tags       []string      `json:"tag"`    // reserved: seed, import, probe
-	Scope      LedgerScopeOf `json:"scope"`
-	ExtID      string        `json:"ext_id,omitempty"`
+	Supersedes  string          `json:"supersedes"`
+	Trust       string          `json:"trust"`  // user_verbatim | user_relayed | repo | agent | inferred
+	Status      string          `json:"status"` // active | superseded | expired | wrong
+	By          string          `json:"by"`     // user | agent | enkeep | import
+	Tags        []string        `json:"tag"`    // reserved: seed, import, probe
+	Scope       LedgerScopeOf   `json:"scope"`
+	Decision    *LedgerDecision `json:"decision,omitempty"`
+	ExtID       string          `json:"ext_id,omitempty"`
+	OriginSpace string          `json:"origin_space,omitempty"`
+	Category    []string        `json:"category,omitempty"`
 	// replaced is set by ledgerClean when the list holds a newer entry superseding this one.
 	replaced bool
 }

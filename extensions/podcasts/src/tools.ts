@@ -1,7 +1,7 @@
 import { ExtError, noContribution, unknownMethod, withExactParams, type ExactJSON, type Handler } from "@persona/extension";
-import { clip, podcastID, ReadError, type Episode, type Show } from "./model.ts";
+import { clip, podcastID, queryText, ReadError, type Episode, type Show } from "./model.ts";
 import { errorText, fmt, readTime, textsFor } from "./i18n.ts";
-import { budget, Podcasts } from "./service.ts";
+import { budget, checkSignal, Podcasts } from "./service.ts";
 export function toolsFor(locale = "en") {
   const t = textsFor(locale);
   return [
@@ -18,18 +18,24 @@ function episodeLine(episode: Episode, index: number): string {
 }
 function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
     for (const token of exact.fieldValues("query")) {
+      if (token.raw === "null") { delete args.query; continue; }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args.query = value;
     }
-    const parsed = exact.int64Fields(["limit", "show"]);
-    if (parsed.limit !== 0n) {
-      if (parsed.limit < 1n || parsed.limit > 30n) throw new ReadError("invalid");
-      args.limit = Number(parsed.limit);
-    }
-    if (parsed.show !== 0n) {
-      if (parsed.show < 1n || parsed.show > 2_000_000_000_000n) throw new ReadError("invalid");
-      args.show = Number(parsed.show);
+    for (const field of ["limit", "show"] as const) {
+      let has = false;
+      let parsed = 0n;
+      for (const token of exact.fieldValues(field)) {
+        if (token.raw === "null") { has = false; parsed = 0n; continue; }
+        try { parsed = token.int64(parsed); } catch { throw new ReadError("invalid"); }
+        has = true;
+      }
+      if (has) args[field] = parsed;
     }
     return args;
   }
@@ -41,25 +47,32 @@ function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   return value;
 }
 function limit(value: unknown): number {
-  const result = value == null ? 10 : Number(value);
-  if (!Number.isSafeInteger(result) || result < 1 || result > 30) throw new ReadError("invalid");
-  return result;
+  if (value == null) return 10;
+  if (typeof value === "bigint") {
+    if (value < 1n || value > 30n) throw new ReadError("invalid");
+    return Number(value);
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 30) throw new ReadError("invalid");
+  return value;
 }
 export async function callTool(service: Podcasts, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
+  if (name !== "podcasts_search" && name !== "podcasts_episodes") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "podcasts_search") {
-      if (typeof args.query !== "string") throw new ReadError("invalid");
-      const result = await service.search(args.query, limit(args.limit), false, request.signal);
+      const query = queryText(args.query);
+      const result = await service.search(query, limit(args.limit), false, request.signal);
       const stale = result.stale ? `\n${errorText(result.stale, service.locale)} · ${fmt(t.readAt, { at: readTime(result.at, "Local", service.locale) })}` : "";
-      return clip((result.shows.length ? result.shows.map(showLine).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty) + stale, 29_999);
+      return clip((result.shows.length ? result.shows.map(showLine).join("\n").trim() : fmt(t.results, { query }) + "\n" + t.empty) + stale, 29_999);
     }
-    if (name === "podcasts_episodes") {
-      const show = podcastID(args.show), result = await service.episodes(show, limit(args.limit), false, request.signal);
-      const prefix = `${result.show.title}\n${result.show.publisher}\n${result.show.url}\n\n`;
-      return clip(prefix + (result.episodes.length ? result.episodes.map(episodeLine).join("\n") : t.noEpisodes) + (result.stale ? `\n${errorText(result.stale, service.locale)} · ${fmt(t.readAt, { at: readTime(result.at, "Local", service.locale) })}` : ""), 29_999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    const rawShow = typeof args.show === "bigint" ? (args.show >= 1n && args.show <= 2_000_000_000_000n ? Number(args.show) : 0) : args.show;
+    const show = podcastID(rawShow), result = await service.episodes(show, limit(args.limit), false, request.signal);
+    const prefix = `${result.show.title}\n${result.show.publisher}\n${result.show.url}\n\n`;
+    return clip(prefix + (result.episodes.length ? result.episodes.map(episodeLine).join("\n") : t.noEpisodes) + (result.stale ? `\n${errorText(result.stale, service.locale)} · ${fmt(t.readAt, { at: readTime(result.at, "Local", service.locale) })}` : ""), 29_999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally { request.dispose(); }
 }
 export function connector(getService: () => Podcasts): Handler { return withExactParams(async (method, params: unknown, call) => {

@@ -6,14 +6,21 @@ rounded list-page value, a release asset count, or zero on an HTTP/parser failur
 """
 import concurrent.futures
 import datetime
+import email.utils
 import html.parser
 import re
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 MAX_PAGE_BYTES = 4 * 1024 * 1024
+MAX_ATTEMPTS = 6
+MAX_WORKERS = 2
+MIN_REQUEST_INTERVAL = 0.45
+MAX_RETRY_AFTER = 120.0
 
 
 class DownloadParser(html.parser.HTMLParser):
@@ -56,14 +63,76 @@ def parse_downloads(text):
 def package_url(extension_id):
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", extension_id):
         raise ValueError("unsafe extension id for downloads")
-    return "https://github.com/orgs/nwverse/packages/container/package/" + urllib.parse.quote(
+    return "https://github.com/nwverse/persona-extensions/pkgs/container/" + urllib.parse.quote(
         "persona-extensions/" + extension_id, safe="")
 
 
-def read_downloads(extension_id):
+def parse_retry_after(value, now=None):
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            dt = email.utils.parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        ref = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+        seconds = (dt - ref).total_seconds()
+    if seconds != seconds:
+        return None
+    return min(MAX_RETRY_AFTER, max(1.0, seconds))
+
+
+def retry_delay(error, attempt):
+    if isinstance(error, urllib.error.HTTPError) and error.code == 429:
+        header = error.headers.get("Retry-After") if error.headers else None
+        parsed = parse_retry_after(header)
+        if parsed is not None:
+            return parsed
+        return min(60.0, 15.0 * (2 ** attempt))
+    return min(30.0, float(2 ** attempt))
+
+
+class Pacer:
+    """Coordinate request cadence and 429 cooldown across download worker threads."""
+
+    def __init__(self, min_interval=MIN_REQUEST_INTERVAL, clock=time.monotonic, sleeper=time.sleep):
+        self.min_interval = min_interval
+        self.clock = clock
+        self.sleeper = sleeper
+        self.lock = threading.Lock()
+        self.next_at = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = self.clock()
+            target = max(now, self.next_at)
+            delay = target - now
+            self.next_at = target + self.min_interval
+        if delay > 0:
+            self.sleeper(delay)
+
+    def backoff(self, delay):
+        if delay <= 0:
+            return
+        with self.lock:
+            deadline = self.clock() + delay
+            if deadline > self.next_at:
+                self.next_at = deadline
+
+
+def read_downloads(extension_id, pacer=None, sleeper=time.sleep):
     url = package_url(extension_id)
     request = urllib.request.Request(url, headers={"User-Agent": "Persona-Extensions-Catalog/1.0"})
-    for attempt in range(3):
+    for attempt in range(MAX_ATTEMPTS):
+        if pacer is not None:
+            pacer.wait()
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
                 final = urllib.parse.urlsplit(response.url)
@@ -74,12 +143,28 @@ def read_downloads(extension_id):
                     raise ValueError("GitHub package statistics page exceeds size limit")
                 return parse_downloads(data.decode("utf-8"))
         except urllib.error.HTTPError as error:
-            if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+            if error.code not in (429, 500, 502, 503, 504) or attempt == MAX_ATTEMPTS - 1:
                 raise ValueError("GitHub package downloads unavailable for " + extension_id) from None
+            delay = retry_delay(error, attempt)
+            print(
+                f"downloads: retrying {extension_id} after HTTP {error.code} in {delay:.1f}s "
+                f"(attempt {attempt + 1}/{MAX_ATTEMPTS})",
+                file=sys.stderr,
+            )
+            if pacer is not None and error.code == 429:
+                pacer.backoff(delay)
+            else:
+                sleeper(delay)
         except (urllib.error.URLError, TimeoutError, OSError):
-            if attempt == 2:
+            if attempt == MAX_ATTEMPTS - 1:
                 raise ValueError("GitHub package downloads unavailable for " + extension_id) from None
-        time.sleep(2 ** attempt)
+            delay = retry_delay(None, attempt)
+            print(
+                f"downloads: retrying {extension_id} after transport error in {delay:.1f}s "
+                f"(attempt {attempt + 1}/{MAX_ATTEMPTS})",
+                file=sys.stderr,
+            )
+            sleeper(delay)
     raise ValueError("GitHub package downloads unavailable for " + extension_id)
 
 
@@ -87,8 +172,13 @@ def snapshot(extension_ids, reader=read_downloads):
     ids = sorted(extension_ids)
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate extension ids in downloads snapshot")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        counts = dict(zip(ids, pool.map(reader, ids)))
+    if reader is read_downloads:
+        pacer = Pacer(min_interval=MIN_REQUEST_INTERVAL)
+        worker = lambda ext_id: read_downloads(ext_id, pacer=pacer)
+    else:
+        worker = reader
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        counts = dict(zip(ids, pool.map(worker, ids)))
     if any(type(value) is not int or value < 0 for value in counts.values()):
         raise ValueError("downloads must be nonnegative integers")
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")

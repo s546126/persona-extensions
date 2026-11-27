@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/nwverse/persona/sdk/go/ext"
@@ -21,7 +22,26 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Page < 0 || len(st.TeamID) > 64 || len(st.ChannelID) > 64 || len(st.Before) > 64 || len(st.Pages) >= maxViewPages || len(st.Mode) > 30 {
+	if err := r.DecodeState(&st); err != nil || st.Page < 0 || len(st.Pages) >= maxViewPages {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode != "" && st.Mode != "channels" && st.Mode != "posts" {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if (st.TeamID != "" && !validID(st.TeamID)) || (st.ChannelID != "" && !validID(st.ChannelID)) || (st.Before != "" && !validID(st.Before)) {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if (st.Mode == "channels" && st.TeamID == "") || (st.Mode == "posts" && st.ChannelID == "") {
+		return pageState{}, errors.New("invalid page state")
+	}
+	seen := make(map[string]bool, len(st.Pages))
+	for _, id := range st.Pages {
+		if !validID(id) || seen[id] {
+			return pageState{}, errors.New("invalid page state")
+		}
+		seen[id] = true
+	}
+	if len(ext.EncodeState(st)) > wire.StateMost {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -52,12 +72,12 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		st.Mode, st.ChannelID, st.Before, st.Pages, st.Page = "posts", r.Values["channel_id"], "", nil, 0
 	case "more":
-		if !validID(r.Values["before"]) || r.Values["before"] != st.Before {
+		if st.Mode != "posts" || !validID(r.Values["before"]) || r.Values["before"] != st.Before || slices.Contains(st.Pages, st.Before) || len(st.Pages)+1 >= maxViewPages {
 			return nil, errors.New("invalid previous post ID")
 		}
 		st.Pages = append(st.Pages, st.Before)
 	case "back":
-		st.Mode, st.ChannelID, st.Before = "", "", ""
+		st = pageState{}
 	default:
 		return nil, fmt.Errorf("unknown page action %q", r.Action)
 	}
@@ -75,21 +95,27 @@ const (
 
 func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
-	if a.client.base == "" || a.client.token == "" {
+	c := a.currentClient()
+	if c.base == "" || c.token == "" {
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "channels" {
-		items, err := a.client.channels(ctx, st.TeamID)
+		items, err := c.channels(ctx, st.TeamID)
 		a.record(err)
 		if err != nil {
 			return nil, err
 		}
 		section := wire.Section{Title: t.channels}
+		seen := map[string]bool{}
 		for _, item := range items {
-			if !validID(item.ID) || item.DeleteAt != 0 {
+			if !validID(item.ID) || item.DeleteAt != 0 || seen[item.ID] {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "channel-" + item.ID, Title: clipText(channelName(item), 1800), Subtitle: item.Type, Action: &wire.Action{ID: "channel", Values: map[string]string{"channel_id": item.ID}}})
+			if len(section.Items) >= maxViewItems {
+				break
+			}
+			seen[item.ID] = true
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "channel-" + item.ID, Title: clipText(channelName(item), 1800), Subtitle: clipText(item.Type, 1800), Action: &wire.Action{ID: "channel", Values: map[string]string{"channel_id": item.ID}}})
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noChannels})
@@ -98,20 +124,29 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	if st.Mode == "posts" {
 		users := map[string]user{}
+		seenPosts := map[string]bool{}
+		seenCursors := make(map[string]bool, len(st.Pages))
+		for _, id := range st.Pages {
+			seenCursors[id] = true
+		}
 		section := wire.Section{Title: t.messages}
 		prev, full := "", false
 		for _, before := range append([]string{""}, st.Pages...) {
-			page, err := a.client.posts(ctx, st.ChannelID, before, st.Page)
+			page, err := c.posts(ctx, st.ChannelID, before, st.Page)
 			a.record(err)
 			if err != nil {
 				return nil, err
 			}
 			for _, id := range page.Order {
+				if seenPosts[id] {
+					continue
+				}
 				post, ok := page.Posts[id]
 				if !ok || post.DeleteAt != 0 {
 					continue
 				}
-				author, err := a.postAuthor(ctx, users, post.UserID)
+				seenPosts[id] = true
+				author, err := a.postAuthor(ctx, c, users, post.UserID)
 				if err != nil {
 					return nil, err
 				}
@@ -130,7 +165,8 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noMessages})
 		}
-		if prev != "" && !full && len(st.Pages)+1 < maxViewPages {
+		st.Before = ""
+		if validID(prev) && !seenCursors[prev] && !full && len(st.Pages)+1 < maxViewPages {
 			st.Before = prev
 			section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more", Values: map[string]string{"before": st.Before}}}
 		}
@@ -145,8 +181,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return nil, err
 	}
 	section := wire.Section{Title: t.inbox}
+	seen := map[string]bool{}
 	for _, item := range items {
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "channel-" + item.Channel.ID, Title: clipText(channelName(item.Channel), 1800), Subtitle: fmt.Sprintf(t.unread, item.Unread.MessageCount, item.Unread.MentionCount), Action: &wire.Action{ID: "channel", Values: map[string]string{"channel_id": item.Channel.ID}}})
+		if !validID(item.Channel.ID) || seen[item.Channel.ID] {
+			continue
+		}
+		if len(section.Items) >= maxViewItems {
+			break
+		}
+		seen[item.Channel.ID] = true
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "channel-" + item.Channel.ID, Title: clipText(channelName(item.Channel), 1800), Subtitle: clipText(fmt.Sprintf(t.unread, item.Unread.MessageCount, item.Unread.MentionCount), 1800), Action: &wire.Action{ID: "channel", Values: map[string]string{"channel_id": item.Channel.ID}}})
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noUnread})

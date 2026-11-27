@@ -21,13 +21,18 @@ type pageState struct {
 
 // readState reads the page's state, keeping the chosen city among the configured ones.
 func (a *app) readState(r *ext.UIRequest) pageState {
+	_, cities, _ := a.snapshotConfig()
+	return readStateFor(r, cities)
+}
+
+func readStateFor(r *ext.UIRequest, cities []City) pageState {
 	var st pageState
 	if r.DecodeState(&st) != nil {
 		st = pageState{}
 	}
 	st.City = strings.TrimSpace(st.City)
 	if st.City != "" {
-		if c, ok := cityByName(a.cities, st.City); ok {
+		if c, ok := cityByName(cities, st.City); ok {
 			st.City = c.Name
 		} else {
 			st.City = ""
@@ -38,40 +43,43 @@ func (a *app) readState(r *ext.UIRequest) pageState {
 
 // selected is the city to draw.
 func (a *app) selected(st pageState) City {
-	c, _ := cityByName(a.cities, st.City)
+	_, cities, _ := a.snapshotConfig()
+	c, _ := cityByName(cities, st.City)
 	return c
 }
 
 func (a *app) render(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {
 	ctx, cancel := context.WithTimeout(ctx, renderBudget)
 	defer cancel()
-	return a.page(ctx, r, a.readState(r), false), nil
+	cfg, cities, badCities := a.snapshotConfig()
+	return a.pageWith(ctx, r, cfg, cities, badCities, readStateFor(r, cities), false), nil
 }
 
 func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, renderBudget)
 	defer cancel()
-	st := a.readState(r)
+	cfg, cities, badCities := a.snapshotConfig()
+	st := readStateFor(r, cities)
 	refresh := false
 	switch {
 	case r.Action == "city":
 		if name := strings.TrimSpace(r.Values["city"]); name != "" {
-			if c, ok := cityByName(a.cities, name); ok {
+			if c, ok := cityByName(cities, name); ok {
 				st.City = c.Name
 			}
 		}
 	case strings.HasPrefix(r.Action, "city:"):
 		if name := strings.TrimSpace(r.Values["city"]); name != "" {
-			if c, ok := cityByName(a.cities, name); ok {
+			if c, ok := cityByName(cities, name); ok {
 				st.City = c.Name
 			}
-		} else if idx, err := strconv.Atoi(strings.TrimPrefix(r.Action, "city:")); err == nil && idx >= 0 && idx < len(a.cities) {
-			st.City = a.cities[idx].Name
+		} else if idx, err := strconv.Atoi(strings.TrimPrefix(r.Action, "city:")); err == nil && idx >= 0 && idx < len(cities) {
+			st.City = cities[idx].Name
 		}
 	case r.Action == "refresh":
 		refresh = true
 	}
-	return &wire.ActionResult{View: a.page(ctx, r, st, refresh)}, nil
+	return &wire.ActionResult{View: a.pageWith(ctx, r, cfg, cities, badCities, st, refresh)}, nil
 }
 
 func text(s, style string) wire.Component {
@@ -102,25 +110,29 @@ func segmentedFits(cities []City) bool {
 
 // picker chooses the city when there are several: a segmented control when UI version >= 2 and every city fits
 // segmented limits, or a row each otherwise.
-func (a *app) picker(r *ext.UIRequest, st pageState) wire.Section {
-	if len(a.cities) <= 1 {
+func pickerFor(r *ext.UIRequest, cities []City, selected City) wire.Section {
+	if len(cities) <= 1 {
 		return wire.Section{}
 	}
-	if r.UIVersion >= 2 && segmentedFits(a.cities) {
-		seg := wire.Component{Type: wire.ComponentSegmented, Name: "city", Value: a.selected(st).Name, Action: &wire.Action{ID: "city"}}
-		for _, c := range a.cities {
+	if r.UIVersion >= 2 && segmentedFits(cities) {
+		seg := wire.Component{Type: wire.ComponentSegmented, Name: "city", Value: selected.Name, Action: &wire.Action{ID: "city"}}
+		for _, c := range cities {
 			seg.Choices = append(seg.Choices, wire.Choice{Value: c.Name, Title: c.Name})
 		}
 		return wire.Section{Items: []wire.Component{seg}}
 	}
 	sec := wire.Section{Title: "城市"}
-	for i, c := range a.cities {
+	for i, c := range cities {
+		act := &wire.Action{ID: fmt.Sprintf("city:%d", i)}
+		if utf8.RuneCountInString(c.Name) <= 1800 {
+			act.Values = map[string]string{"city": c.Name}
+		}
 		it := wire.Component{
 			Type:   wire.ComponentRow,
-			Title:  c.Name,
-			Action: &wire.Action{ID: fmt.Sprintf("city:%d", i), Values: map[string]string{"city": c.Name}},
+			Title:  clip(c.Name, 1800),
+			Action: act,
 		}
-		if c.Name == a.selected(st).Name {
+		if c.Name == selected.Name {
 			it.Badge = &wire.Badge{Text: "正在看", Tone: wire.TonePositive}
 		}
 		sec.Items = append(sec.Items, it)
@@ -128,22 +140,30 @@ func (a *app) picker(r *ext.UIRequest, st pageState) wire.Section {
 	return sec
 }
 
+func encodeBoundedState(st pageState) string {
+	raw := ext.EncodeState(st)
+	if len(raw) <= wire.StateMost {
+		return raw
+	}
+	return ext.EncodeState(pageState{})
+}
+
 // page is the weather for one city; what went wrong is drawn, with a way to try again, never as a page of zeros.
-func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState, refresh bool) *wire.View {
-	c := a.selected(st)
-	v := &wire.View{Title: "天气", State: ext.EncodeState(st), RefreshAfter: 600}
-	if p := a.picker(r, st); len(p.Items) > 0 {
+func (a *app) pageWith(ctx context.Context, r *ext.UIRequest, cfg Config, cities, badCities []City, st pageState, refresh bool) *wire.View {
+	c, _ := cityByName(cities, st.City)
+	v := &wire.View{Title: "天气", State: encodeBoundedState(st), RefreshAfter: 600}
+	if p := pickerFor(r, cities, c); len(p.Items) > 0 {
 		v.Sections = append(v.Sections, p)
 	}
-	if len(a.badCities) > 0 {
+	if len(badCities) > 0 {
 		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{
-			text(clip("这些城市没填对，没有读："+badCityNames(a.badCities)+"。每项写一个城市名；重名的在后面写上「纬度,经度」，纬度 -90 到 90、经度 -180 到 180", 1900), wire.TextStyleSecondary)}})
+			text(clip("这些城市没填对，没有读："+badCityNames(badCities)+"。每项写一个城市名；重名的在后面写上「纬度,经度」，纬度 -90 到 90、经度 -180 到 180", 1900), wire.TextStyleSecondary)}})
 	}
 
-	u, w := a.cfg.tempUnit(), a.cfg.windUnit()
+	u, w := cfg.tempUnit(), cfg.windUnit()
 	located, err := a.locate(ctx, c)
 	if err != nil {
-		v.Sections = append(v.Sections, wire.Section{Title: c.Name, Items: []wire.Component{
+		v.Sections = append(v.Sections, wire.Section{Title: clip(c.Name, 1800), Items: []wire.Component{
 			text(clip(oneLine(err.Error())+"。换个写法，或在名字后写上「纬度,经度」", 1900), wire.TextStyleSecondary), button("重试", "refresh")}})
 		return v
 	}
@@ -151,7 +171,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState, refresh 
 	loc := locFor(c)
 	f, rd, err := a.readForecast(ctx, c, freshness(refresh))
 	if err != nil {
-		v.Sections = append(v.Sections, wire.Section{Title: c.Name, Items: []wire.Component{
+		v.Sections = append(v.Sections, wire.Section{Title: clip(c.Name, 1800), Items: []wire.Component{
 			text(clip(oneLine(err.Error()), 1900), wire.TextStyleSecondary), button("重试", "refresh")}})
 		return v
 	}
@@ -204,7 +224,7 @@ func (a *app) nowSection(c City, f forecast, u temperatureUnit, w windUnit) wire
 		stats = append(stats, wire.Stat{Label: "今天", Value: fmtTemp(lo, u) + " / " + fmtTemp(hi, u)})
 	}
 
-	sec := wire.Section{Title: c.Name, Items: []wire.Component{big}}
+	sec := wire.Section{Title: clip(c.Name, 1800), Items: []wire.Component{big}}
 	sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentStatGrid, Stats: stats})
 	return sec
 }
@@ -227,7 +247,11 @@ func (a *app) forecastSection(ds []day, u temperatureUnit) wire.Section {
 		desc, icon := wmoOptional(d.code)
 		title := d.weekday()
 		if title == "" {
-			title = d.date.Format("01-02")
+			if !d.date.IsZero() {
+				title = d.date.Format("01-02")
+			} else {
+				title = "未知日期"
+			}
 		}
 		row := wire.Component{Type: wire.ComponentRow,
 			Title:    fmt.Sprintf("%s %s %s / %s", title, icon, tempText(d.max, u), tempText(d.min, u)),

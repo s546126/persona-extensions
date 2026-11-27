@@ -1,10 +1,12 @@
-# Search as Code
+# Search as Code (AI 聊天记录搜索)
+
+Shown to users as **AI 聊天记录搜索**: find things in your earlier Claude Code and Codex chats. The page and settings speak plain Chinese; the pipeline below is on the page's advanced tab.
 
 Executable Search-as-Code pipelines over local coding-agent session transcripts (`~/.claude/projects`, `~/.codex/sessions`, and configured directories) and local repositories, inspired by Perplexity's *Rethinking Search as Code Generation* and CASS session search.
 
 Instead of a single flat keyword lookup, complex investigative queries compile into a multi-step pipeline (`scan_sessions` / `scan_files` `|>` `exclude_tools` `|>` `match_regex` `|>` `correlate` `|>` `group_by` `|>` `rank` `|>` `limit`) with full step-by-step execution traces (`StepTraces`), role-attributed evidence snippets (`User`, `Assistant`, `Error`, `File`), cross-session file/project correlation, and reusable search recipes. A local MCP server (`search-as-code mcp`) exposes the same engine to the assistant on stdio.
 
-Sessions that the disklessly CLI moved to the cloud stay searchable through the plain-text index it keeps on this computer (`<stateDir>/sessions/text/<entryId>.jsonl`): such hits are marked `已上云` and can be restored to their original path with one click (or `sac_session_restore`), which runs the local `disklessly` CLI. The restore runs in the background and its outcome appears in a `会话恢复` section on the page. An index whose upload never completed (empty `segment`/`archivedAt`) is marked `未确认上云` and is not offered for restore.
+Sessions that the disklessly CLI moved to the cloud stay searchable through the plain-text index it keeps on this computer (`<stateDir>/sessions/text/<entryId>.jsonl`): such hits are marked `已上云` in the data (`已移到云端` on the page) and can be restored to their original path with one click (or `sac_session_restore`), which runs the local `disklessly` CLI. The restore runs in the background and its outcome appears in a `会话恢复` section on the page. An index whose upload never completed (empty `segment`/`archivedAt`) is marked `未确认上云` (`可能没传完` on the page) and is not offered for restore.
 
 Optionally, it searches the other computers picked in its settings too: the hub fans each search out over Persona's node connection, each computer runs the pipeline over its own transcripts and returns only the ranked evidence (labelled with the computer), and an offline computer is searched in a compact conversational index synced to the hub. The assistant reads other computers and projects through the gated `sac` command: the first read of a computer, project and scope shows an approval card, remembered per that target for the conversation.
 

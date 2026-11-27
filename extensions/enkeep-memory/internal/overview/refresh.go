@@ -69,7 +69,10 @@ func gone(st *store.State, p *Pattern) bool {
 // samePattern compares what Refresh may change.
 func samePattern(a, b *Pattern) bool {
 	return a.Lifecycle == b.Lifecycle && a.Gate == b.Gate && a.ScenesCount == b.ScenesCount && a.SourcesCount == b.SourcesCount &&
-		slices.Equal(a.EvidenceIDs, b.EvidenceIDs) && slices.Equal(a.CounterIDs, b.CounterIDs) && slices.Equal(a.Categories, b.Categories) &&
+		a.UniqueQuotes == b.UniqueQuotes && a.Kind == b.Kind && a.Dimension == b.Dimension && a.Polarity == b.Polarity &&
+		a.Hard == b.Hard && a.ViolationCount == b.ViolationCount && a.Rooted == b.Rooted &&
+		slices.Equal(a.EvidenceIDs, b.EvidenceIDs) && slices.Equal(a.CounterIDs, b.CounterIDs) &&
+		slices.Equal(a.CoveredIDs, b.CoveredIDs) && slices.Equal(a.Categories, b.Categories) &&
 		a.OriginSpace == b.OriginSpace && slices.Equal(a.ActiveWeeks, b.ActiveWeeks) && a.Withdrawn == b.Withdrawn &&
 		slices.Equal(a.Subjects, b.Subjects) && a.LastEvidence == b.LastEvidence && a.Perspective == b.Perspective
 }

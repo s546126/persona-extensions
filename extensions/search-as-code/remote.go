@@ -309,6 +309,16 @@ func (f *fleet) hasRemote() bool {
 	return len(f.selected) > 0
 }
 
+// selectedCount is how many computers are picked in the setting (the hub's own among them, when picked).
+func (f *fleet) selectedCount() int {
+	if f == nil {
+		return 0
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.selected)
+}
+
 // targets are the hub's computer and the picked ones, with names and online state from the hub (kept for
 // machinesTTL; the last list stands when the hub cannot be asked), each with a key unique among them.
 func (f *fleet) targets(ctx context.Context) []target {
@@ -546,7 +556,7 @@ func (f *fleet) searchOne(ctx context.Context, st *State, prog SearchProgram, no
 		}
 		return p
 	}
-	note := "离线"
+	note := "不在线"
 	if t.Online && f.nodes != nil {
 		cctx, cancel := context.WithTimeout(ctx, nodeSearchTimeout)
 		var res ExecutionResult
@@ -557,11 +567,11 @@ func (f *fleet) searchOne(ctx context.Context, st *State, prog SearchProgram, no
 			p.res, p.run.Status = &res, machineOnline
 			return p
 		}
-		note = "未响应（" + clipRunes(err.Error(), 80) + "）"
+		note = "没有回应（详情：" + clipRunes(err.Error(), 80) + "）"
 	}
 	c := f.loadCache(t.ID)
 	if c == nil || len(c.Sessions) == 0 {
-		p.run.Status, p.run.Note = machineUnavailable, note+"，还没有同步过它的索引"
+		p.run.Status, p.run.Note = machineUnavailable, note+"，也还没同步过它的聊天"
 		return p
 	}
 	sessions := make([]*SessionRecord, len(c.Sessions))
@@ -573,7 +583,7 @@ func (f *fleet) searchOne(ctx context.Context, st *State, prog SearchProgram, no
 	res := executeSessions(&State{}, sessions, statsOf(sessions), prog, now)
 	tagHits(res.Hits, t, true)
 	p.res, p.run.Status, p.run.SyncedAt = res, machineCached, c.SyncedAt
-	p.run.Note = note + "，检索已同步的索引"
+	p.run.Note = note + "，搜的是同步过的副本"
 	return p
 }
 
@@ -678,7 +688,7 @@ func mergeParts(prog SearchProgram, parts []part, now time.Time) *ExecutionResul
 	}
 	for j := range traces {
 		if traces[j].Op == "scan_sessions" {
-			traces[j].Note = fmt.Sprintf("在 %d 台电脑上扫描 %d 个会话", len(parts), out.ScannedSessions)
+			traces[j].Note = fmt.Sprintf("在 %d 台电脑上读了 %d 段聊天", len(parts), out.ScannedSessions)
 		}
 	}
 
@@ -725,7 +735,7 @@ func mergeParts(prog SearchProgram, parts []part, now time.Time) *ExecutionResul
 		InputCount:  merged,
 		OutputCount: len(hits),
 		DurationUs:  1,
-		Note:        "合并各电脑的证据，按分数重排并截取",
+		Note:        "把各台电脑找到的合在一起，重新排序",
 	}
 	out.StepTraces = append(append([]StepTrace{fan}, traces...), merge)
 	for i := range out.StepTraces {
@@ -738,16 +748,16 @@ func mergeParts(prog SearchProgram, parts []part, now time.Time) *ExecutionResul
 func fanOutNote(local, live, cached, missing int) string {
 	var parts []string
 	if local > 0 {
-		parts = append(parts, "hub 本机直接检索")
+		parts = append(parts, "本机直接搜")
 	}
 	if live > 0 {
-		parts = append(parts, fmt.Sprintf("%d 台经 nodes.call 实时检索", live))
+		parts = append(parts, fmt.Sprintf("%d 台在线、当场搜", live))
 	}
 	if cached > 0 {
-		parts = append(parts, fmt.Sprintf("%d 台离线、检索已同步的索引", cached))
+		parts = append(parts, fmt.Sprintf("%d 台不在线、搜同步过的副本", cached))
 	}
 	if missing > 0 {
-		parts = append(parts, fmt.Sprintf("%d 台不可用（离线且没有同步过索引）", missing))
+		parts = append(parts, fmt.Sprintf("%d 台没搜到（不在线，也没同步过）", missing))
 	}
 	return strings.Join(parts, "，")
 }

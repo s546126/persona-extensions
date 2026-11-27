@@ -1,0 +1,28 @@
+{
+  "manifest_version": 1,
+  "id": "wecom",
+  "name": "企业微信",
+  "version": "0.1.0",
+  "description": "企业微信机器人：用你自己组织的智能机器人（API 模式长连接，hub 无需公网地址），在企业微信单聊里和 Persona 对话；填入机器人凭证后发配对码绑定，只转发配对人的消息，支持图片、文件、语音转写和引用。凭证加密保存在 hub。",
+  "icon": "assets/icon.png",
+  "publisher": "nwverse",
+  "tags": ["聊天", "企业微信"],
+  "engines": {"persona": ">=202611041602", "plugin_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/wecom-linux-amd64",
+      "linux-arm64": "bin/wecom-linux-arm64",
+      "darwin-arm64": "bin/wecom-darwin-arm64",
+      "darwin-amd64": "bin/wecom-darwin-amd64"
+    }
+  },
+  "contributes": {
+    "connectors": [{"id": "wecom", "name": "企业微信", "capabilities": ["status", "login"]}],
+    "channel": [{
+      "id": "wecom", "name": "企业微信", "kind": "im", "connector": "wecom", "bind": "fields",
+      "description": "在企业微信里私聊智能机器人：填入机器人凭证并配对，消息进主对话，回答以 Markdown 发回",
+      "capabilities": {"images_in": true, "files_in": true, "voice_in": true, "format": "markdown", "max_text": 4000, "asks": "text", "push": true}
+    }]
+  },
+  "permissions": {"network": ["*.qq.com", "*.myqcloud.com", "*.qpic.cn"]}
+}

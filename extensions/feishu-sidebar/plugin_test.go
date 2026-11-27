@@ -162,7 +162,7 @@ func TestConnector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := res["text"].(string); !strings.Contains(text, "applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url=https%3A%2F%2Fpersona.example.com%2Fj%2Fabc") {
+	if text := res["text"].(string); !strings.Contains(text, "applink.feishu.cn/client/web_url/open?mode=appCenter&url=https%3A%2F%2Fpersona.example.com%2Fj%2Fabc") {
 		t.Fatalf("tools.call: %v", text)
 	}
 	for _, params := range []string{`{"name": "nope"}`, `{"name": "feishu_sidebar_link", "args": "x"}`} {

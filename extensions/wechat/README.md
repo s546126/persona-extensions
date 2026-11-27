@@ -29,7 +29,7 @@ A hub with the built-in must support registry handoff before installing this sam
 
 ## Privacy and network
 
-The only network grant is `*.weixin.qq.com`, matching the previous iLink/media-CDN allowlist. API and redirect origins are restricted to HTTPS Tencent hosts. Tokens and message contents are not logged. Polling, outbound retries, message deduplication and stable send refs retain the built-in implementation.
+The network grants are `*.weixin.qq.com` and `*.wechat.com`, matching Tencent's iLink and media-CDN allowlist for mainland Weixin and international WeChat accounts. API and redirect origins are restricted to HTTPS Tencent hosts. Tokens and message contents are not logged. Polling, outbound retries, message deduplication and stable send refs retain the built-in implementation.
 
 The quote index contains message text and media metadata in plaintext on local disk, but no tokens, CDN URLs, decryption keys or downloaded media. Entries are scoped to the bound account; logging out or changing accounts clears the index.
 

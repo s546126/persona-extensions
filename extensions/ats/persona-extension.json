@@ -1,10 +1,10 @@
 {
   "manifest_version": 1,
   "id": "ats",
-  "name": "ATS 任务调度",
-  "version": "0.6.1",
+  "name": "ATS 自动做待办",
+  "version": "0.7.8",
   "icon": "assets/icon.png",
-  "description": "把待办交给 Agent 排队去做的任务队列。助手替你给待办派任务（每次派之前都问你），队列按优先级、难度和剩余额度挑时机，在你选的电脑上为每个任务开一个独立的 git 工作目录和一个 Agent 会话；做完后在那台电脑上跑验收命令，把结论和证据写回待办。任务默认只读，只能在你允许的仓库目录里跑。",
+  "description": "ATS 帮你把待办自动做掉：跟助手说「把这个待办交给 ATS 做」，助手每次都会先问你；你同意后，它在你选好的电脑上把事情做完，再把结果写回待办；交给它时说了怎么检查的，它做完还会自己检查一遍。默认只看不改，而且只会动你允许的文件夹里的项目。",
   "publisher": "nwverse",
   "homepage": "https://github.com/nwverse/persona-extensions/tree/main/extensions/ats",
   "tags": ["agents", "assistant", "todos", "scheduler"],
@@ -36,7 +36,8 @@
       {"id": "queue", "skills": ["skills/ats-todo"], "gate": "assistant/gate.json"}
     ],
     "ui": [
-      {"id": "queue", "title": "ATS 队列", "placement": "nav_page", "icon": "list"}
+      {"id": "queue", "title": "ATS 自动做待办", "placement": "nav_page", "icon": "list"},
+      {"id": "queue-card", "title": "ATS 自动做待办 · 概况", "placement": "overview_card", "opens": "queue"}
     ]
   },
   "permissions": {
@@ -48,95 +49,114 @@
     "properties": {
       "machines": {
         "type": "array",
-        "title": "在哪些电脑上跑任务",
-        "description": "打开的电脑上会装这个扩展的程序：给每个任务开一个 git 工作目录、跑验收命令。一台都不选时任务只排队、不会跑。",
+        "title": "在哪台电脑上干活（必须选）",
+        "description": "事情会在选中的电脑上做，这台电脑要开着并登录 Persona。一台都不选，交给它的事只会排着，不会开始。列表里只会出现苹果电脑和 Linux 电脑。",
         "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]},
-        "x-confirm": "这台电脑上会由 Agent 无人值守地执行排队的任务，并运行任务带的验收命令（shell 命令）。只读任务用计划模式；可写任务用下面选的权限模式。只会在「允许的仓库目录」里的仓库上进行。"
+        "x-confirm": "选中后，ATS 会在这台电脑上自己动手做交给它的事，没人在旁边看着，还会运行检查用的命令。它只会动你允许的文件夹里的项目，只看不改的事不会改文件。确定要选这台电脑吗？"
       },
       "repos": {
         "type": "array",
-        "title": "允许的仓库目录",
-        "description": "任务只能在这些目录里的 git 仓库上跑，写绝对路径或 ~/ 开头的路径（~ 是那台电脑的家目录）。空着时不能派任务。",
+        "title": "允许它动哪些文件夹（必须填）",
+        "description": "写项目所在的文件夹，比如 ~/code（~ 指那台电脑上你自己的文件夹）。只有这些文件夹里的项目能交给它；一个都不填，就没法交给它任何事。",
         "items": {"type": "string", "minLength": 1, "maxLength": 512},
         "maxItems": 32,
         "default": []
       },
+      "readonly_permission_mode": {
+        "type": "string",
+        "title": "只看不改的事，运行命令要不要问你",
+        "description": "默认用计划模式。有些本地网关会在运行命令时卡在等你同意。如果启用了「Bypass 自动允许」，并确认任务在独立的工作目录里做，可以选自动放行。它会跳过权限确认，ATS 仍会要求只看不改，并检查文件有没有改动。",
+        "oneOf": [
+          {"const": "plan", "title": "计划模式（默认）"},
+          {"const": "bypassPermissions", "title": "自动放行，跳过权限确认（有风险）"}
+        ],
+        "default": "plan"
+      },
       "write_permission_mode": {
         "type": "string",
-        "title": "可写任务的权限模式",
-        "description": "只读任务总是用计划模式。可写任务没有人在旁边批准，所以默认自动接受文件修改；其他命令仍会停下来等你，在队列页显示「等你处理」。",
+        "title": "要改文件的事，它能自己做主到什么程度",
+        "description": "只看不改的事永远不会改文件。要改文件的事没人在旁边看着，所以默认让它直接改文件；要运行别的命令时，它还是会停下来等你同意，首页会显示「等你处理」。",
         "oneOf": [
-          {"const": "acceptEdits", "title": "自动接受文件修改"},
-          {"const": "default", "title": "每一步都问"},
-          {"const": "auto", "title": "自动判断"},
-          {"const": "bypassPermissions", "title": "全部放行"}
+          {"const": "acceptEdits", "title": "可以直接改文件，别的要问我（推荐）"},
+          {"const": "default", "title": "每一步都先问我"},
+          {"const": "auto", "title": "让它自己判断要不要问我"},
+          {"const": "bypassPermissions", "title": "什么都不问，直接做（有风险）"}
         ],
         "default": "acceptEdits"
       },
       "parallel_per_machine": {
         "type": "integer",
-        "title": "每台电脑同时跑几个任务",
+        "title": "一台电脑同时做几件事",
+        "description": "同时做得多会快一些，但那台电脑会更忙。一般 1 件就够。",
         "minimum": 1,
         "maximum": 4,
         "default": 1
       },
       "task_timeout_minutes": {
         "type": "integer",
-        "title": "单个任务最长跑多久（分钟）",
-        "description": "Agent 超过这个时间还没做完就打断，按超时失败处理。",
+        "title": "一件事最多做多久（分钟）",
+        "description": "超过这个时间还没做完就停下，算没做成。事情比较大的话可以调长。",
         "minimum": 5,
         "maximum": 1440,
         "default": 120
       },
       "acceptance_timeout_minutes": {
         "type": "integer",
-        "title": "验收命令最长跑多久（分钟）",
+        "title": "检查最多等多久（分钟）",
+        "description": "做完以后会运行检查用的命令，超过这个时间还没跑完，就算检查没通过。",
         "minimum": 1,
         "maximum": 60,
         "default": 10
       },
       "max_queued": {
         "type": "integer",
-        "title": "最多排队多少个任务",
-        "description": "排队的任务到这个数以后，新任务会被拒绝（too_many_queued）。",
+        "title": "最多排多少件事",
+        "description": "排着的事到了这个数，新的事就交不进来了，要等前面的做完一些。一般不用改。",
         "minimum": 1,
         "maximum": 10000,
         "default": 100
       },
       "max_retries": {
         "type": "integer",
-        "title": "失败后自动重试几次",
-        "description": "每次重试前等待的时间逐次加长。",
+        "title": "没做成时自动再试几次",
+        "description": "电脑临时出问题、检查没通过这类情况会自动再试，每次隔得越来越久。像「选的模型用不了」这种再试也没用的情况，不会再试。",
         "minimum": 0,
         "maximum": 10,
         "default": 2
       },
       "reserve_headroom_pct": {
         "type": "integer",
-        "title": "额度保留线（%）",
-        "description": "剩余额度低于这条线时只放行 P0、P1 的任务，其余的等额度恢复。额度读的是 Hub 里网关账号的用量窗口。",
+        "title": "额度剩多少时只做急事（%）",
+        "description": "额度低于这条线时，只做紧急和重要的事，其余的等额度恢复再做。只有在 Persona 里接了额度账号才起作用；没接就不限额度。",
         "minimum": 5,
         "maximum": 90,
         "default": 30
       },
+      "launcher": {
+        "type": "string",
+        "title": "Claude Code 用哪个启动器（可以不填）",
+        "description": "填启动器名称，用 | 按顺序写备选，如 primary|backup,workstation=local|backup。留空用默认。",
+        "maxLength": 512,
+        "default": ""
+      },
       "model_fast": {
         "type": "string",
-        "title": "easy 任务用的模型",
-        "description": "空着用 Agent 自己的默认模型。",
+        "title": "简单的事用哪个模型（可以不填）",
+        "description": "填模型的名字。空着就用默认的模型。简单的事用又快又便宜的模型就够了。没单独指定模型时，Claude 才会用这里的设置，Codex 和 AGY 会用各自的默认模型。",
         "maxLength": 100,
         "default": ""
       },
       "model_standard": {
         "type": "string",
-        "title": "medium 任务用的模型",
-        "description": "空着用 Agent 自己的默认模型。",
+        "title": "一般的事用哪个模型（可以不填）",
+        "description": "填模型的名字。空着就用默认的模型。没单独指定模型时，Claude 才会用这里的设置，Codex 和 AGY 会用各自的默认模型。",
         "maxLength": 100,
         "default": ""
       },
       "model_strong": {
         "type": "string",
-        "title": "hard、extreme 任务用的模型",
-        "description": "空着用 Agent 自己的默认模型。",
+        "title": "难的事用哪个模型（可以不填）",
+        "description": "填模型的名字。空着就用默认的模型。难的事可以填一个更强的模型。没单独指定模型时，Claude 才会用这里的设置，Codex 和 AGY 会用各自的默认模型。",
         "maxLength": 100,
         "default": ""
       }

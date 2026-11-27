@@ -71,7 +71,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if err != nil {
 			return "", err
 		}
-		if in.Page < 0 || in.Page > 999 || in.Pages < 0 || in.Pages > 4 || in.Limit < 0 || in.Limit > 50 || len(in.Query) > 500 || len(in.Tags) > 12 {
+		if in.Page < 0 || in.Page > 999 || in.Pages < 0 || in.Pages > 4 || in.Limit < 0 || in.Limit > 50 || len([]rune(in.Query)) > 500 || len(in.Tags) > 12 {
 			return "", errors.New("search pagination, query or tag count exceeds its documented bounds")
 		}
 		query := strings.TrimSpace(in.Query)
@@ -103,7 +103,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 				break
 			}
 		}
-		return b.String(), nil
+		return clipText(b.String(), 90000), nil
 	case "raindrop_read":
 		var in struct {
 			ID json.RawMessage `json:"id"`
@@ -130,7 +130,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		for _, item := range items {
 			fmt.Fprintf(&b, "%d. %s\n", item.ID, clipText(item.Title, 300))
 		}
-		return b.String(), nil
+		return clipText(b.String(), 90000), nil
 	}
 	return "", fmt.Errorf("no tool %s", name)
 }

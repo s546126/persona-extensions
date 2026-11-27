@@ -80,9 +80,72 @@ test("cancellation and deadlines propagate through registry requests", async () 
   assert.equal(fixture.cancelled, 1);
   const timed = budget(undefined, 1), slow = make(fixture);
   const request = slow.search("Newtonsoft.Json", 12, false, timed.signal);
-  const rejected = assert.rejects(request, (error: unknown) => error instanceof Error && error.name === "AbortError" && timed.signal.reason instanceof ReadError && timed.signal.reason.code === "slow");
+  const rejected = assert.rejects(request, (error: unknown) => error instanceof ReadError && error.code === "slow");
   await until(async () => timed.signal.aborted, aborted => aborted);
   await rejected; timed.dispose();
+});
+
+test("cache TTL is not extended by hits or failed stale refreshes, and oversized refresh evicts old entry", async () => {
+  const fixture = new Fixture(), service = make(fixture);
+  await service.search("Newtonsoft.Json", 12);
+  assert.equal(fixture.hits.get("https://azuresearch-usnc.nuget.org" + searchPathFixture), 1);
+
+  // Hit at 10m should be fresh, but must NOT extend TTL to 25m.
+  fixture.clock += 10 * 60_000;
+  await service.search("Newtonsoft.Json", 12);
+  assert.equal(fixture.hits.get("https://azuresearch-usnc.nuget.org" + searchPathFixture), 1);
+
+  // At 16m (> 15m fresh TTL), it must refetch rather than serve as fresh.
+  fixture.clock += 6 * 60_000;
+  fixture.put(searchPathFixture, {}, { status: 503 });
+  const stale = await service.search("Newtonsoft.Json", 12);
+  assert.equal(stale.stale?.code, "http");
+  assert.equal(fixture.hits.get("https://azuresearch-usnc.nuget.org" + searchPathFixture), 2);
+  assert.equal(service.status().error, "NuGet returned HTTP 503.");
+
+  // Immediately retrying after a stale fallback must still attempt a refresh (stale must not be promoted to fresh).
+  const staleAgain = await service.search("Newtonsoft.Json", 12);
+  assert.equal(staleAgain.stale?.code, "http");
+  assert.equal(fixture.hits.get("https://azuresearch-usnc.nuget.org" + searchPathFixture), 3);
+
+  // Oversized refresh deletes the old cached entry instead of leaving stale data behind.
+  const tiny = make(fixture, { limits: { gap: 0, cacheBytes: 700 } });
+  const smallPayload = { totalHits: 1, data: [{ id: "Mini", version: "1.0.0", description: "ok", totalDownloads: 1 }] };
+  const bigPayload = { totalHits: 1, data: [{ id: "Mini", version: "2.0.0", description: "x".repeat(450), totalDownloads: 2 }, { id: "Mini2", version: "2.0.0", description: "y".repeat(450), totalDownloads: 2 }] };
+  fixture.put(searchPath("Mini", 12), smallPayload);
+  await tiny.search("Mini", 12);
+  assert.equal(tiny.cacheStats().entries, 1);
+  fixture.put(searchPath("Mini", 12), bigPayload);
+  fixture.clock += 16 * 60_000;
+  const refreshed = await tiny.search("Mini", 12);
+  assert.equal(refreshed.packages[0].version, "2.0.0");
+  assert.equal(tiny.cacheStats().entries, 0);
+});
+
+test("timeouts fall back to stale cache, HTTP errors classify before body decode, and 404 does not pollute status", async () => {
+  const fixture = new Fixture(), service = make(fixture, { limits: { gap: 0, request: 20 } });
+  await service.search("Newtonsoft.Json", 12);
+  fixture.put(searchPathFixture, { data: [], totalHits: 0 }, { delay: 200 });
+  fixture.clock += 16 * 60_000;
+  const fallback = await service.search("Newtonsoft.Json", 12);
+  assert.equal(fallback.stale?.code, "slow");
+  assert.equal(service.status().state, "error");
+  assert.equal(service.status().error, "NuGet took too long to respond.");
+
+  // Bodyless 404 and non-UTF-8 503 classify by HTTP status, and 404 does not mark service unhealthy.
+  const healthy = new Nuget(async () => new Response(null, { status: 404 }), {}, { limits: { gap: 0 }, locale: "en" });
+  await assert.rejects(healthy.search("Missing", 12), (error: unknown) => error instanceof ReadError && error.code === "not_found");
+  assert.equal(healthy.status().state, "ok");
+
+  const binary503 = new Nuget(async () => new Response(new Uint8Array([0xff, 0xfe]), { status: 503 }), {}, { limits: { gap: 0 }, locale: "en" });
+  await assert.rejects(binary503.search("Broken", 12), (error: unknown) => error instanceof ReadError && error.code === "http" && error.status === 503);
+  assert.equal(binary503.status().error, "NuGet returned HTTP 503.");
+
+  // Tool timeout normalizes to ReadError("slow").
+  const slowFixture = new Fixture();
+  slowFixture.put(searchPath("Newtonsoft.Json", 10), { data: [], totalHits: 0 }, { delay: 200 });
+  const slowToolService = make(slowFixture, { limits: { gap: 0, tool: 20, request: 500 } });
+  await assert.rejects(callTool(slowToolService, "nuget_search", { query: "Newtonsoft.Json" }), (error: unknown) => error instanceof ReadError && error.code === "slow");
 });
 
 test("assistant tools preserve exact stable versions, licenses and canonical links", async () => {

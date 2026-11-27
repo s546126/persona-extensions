@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -90,19 +91,33 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	return &wire.ActionResult{View: v}, err
 }
 
-const maxViewRecords = 250
+const (
+	maxViewRecords      = 250
+	maxViewItems        = 250
+	maxDescriptionItems = 80
+	maxIngredientItems  = 100
+)
 
 // collectRecipes reads page 1 through the current page so that Load more answers the whole list, longer. The page it
 // returns holds every recipe read and the paging fields of the last page. It stops at maxViewRecords to keep the view
 // within the SDK's component limit, and reports whether another page can be loaded.
 func (a *app) collectRecipes(ctx context.Context, query string, current int) (recipePage, bool, error) {
 	var out recipePage
+	seen := map[string]bool{}
 	for pageNumber := 1; pageNumber <= current && len(out.Items) < maxViewRecords; pageNumber++ {
 		batch, err := a.client.recipes(ctx, query, pageNumber)
 		if err != nil {
 			return recipePage{}, false, err
 		}
-		out.Items = append(out.Items, batch.Items...)
+		for _, item := range batch.Items {
+			if item.Slug != "" && seen[item.Slug] {
+				continue
+			}
+			if item.Slug != "" {
+				seen[item.Slug] = true
+			}
+			out.Items = append(out.Items, item)
+		}
 		out.Page, out.PerPage, out.Total, out.TotalPages = batch.Page, batch.PerPage, batch.Total, batch.TotalPages
 		if batch.Page >= batch.TotalPages {
 			break
@@ -143,11 +158,13 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	}
 	v := &wire.View{Title: t.recipes, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
 	section := wire.Section{Title: fmt.Sprintf(t.results, page.Total)}
+	seen := make(map[string]bool, len(page.Items))
 	for _, item := range page.Items {
-		if !validRecipeSlug(item.Slug) || item.Name == "" {
+		if !validRecipeSlug(item.Slug) || item.Name == "" || seen[item.Slug] {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "recipe-" + item.Slug, Title: clipText(item.Name, 1800), Subtitle: clipText(fmt.Sprintf("%s · %g %s", item.TotalTime, item.RecipeServings, t.servings), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"slug": item.Slug}}})
+		seen[item.Slug] = true
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: boundedKey("recipe-", item.Slug), Title: clipText(item.Name, 1800), Subtitle: clipText(fmt.Sprintf("%s · %g %s", item.TotalTime, item.RecipeServings, t.servings), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"slug": item.Slug}}})
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noRecipes})
@@ -159,13 +176,26 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	return v, nil
 }
 
+// boundedKey returns prefix+id when it fits the 128-character key limit, and a stable hashed key otherwise.
+func boundedKey(prefix, id string) string {
+	full := prefix + id
+	if len(full) <= 128 {
+		return full
+	}
+	sum := sha256.Sum256([]byte(id))
+	suffix := "-" + hex.EncodeToString(sum[:8])
+	keep := max(0, 128-len(prefix)-len(suffix))
+	return prefix + id[:keep] + suffix
+}
+
 func importView(r *ext.UIRequest, st pageState) *wire.View {
 	t := textsFor(r.Locale)
 	if st.Mode == "review-import" {
+		displayURL := clipText(st.URL, 1800)
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.importRecipe, Items: []wire.Component{
-			{Type: wire.ComponentText, Text: clipText(st.URL, 1800)},
+			{Type: wire.ComponentText, Text: displayURL},
 			{Type: wire.ComponentText, Text: t.importNotice},
-			{Type: wire.ComponentButton, Title: t.importRecipe, Action: &wire.Action{ID: "confirm-import", Confirm: t.importRecipe + "\n" + st.URL}},
+			{Type: wire.ComponentButton, Title: t.importRecipe, Action: &wire.Action{ID: "confirm-import", Confirm: t.importRecipe + "\n" + displayURL}},
 			{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "import"}},
 		}}}}
 	}
@@ -183,8 +213,11 @@ func detailView(r *ext.UIRequest, st pageState, item recipe) *wire.View {
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
 	v := &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.recipes, Items: items}}}
+	used := len(items)
 	if item.Description != "" {
-		v.Sections = append(v.Sections, wire.Section{Title: t.description, Items: textComponents(clipText(item.Description, 12000))})
+		desc := capComponents(textComponents(clipText(item.Description, 12000)), maxDescriptionItems)
+		used += len(desc)
+		v.Sections = append(v.Sections, wire.Section{Title: t.description, Items: desc})
 	}
 	ingredients := wire.Section{Title: t.ingredients}
 	for _, ingredient := range item.RecipeIngredient {
@@ -201,7 +234,10 @@ func detailView(r *ext.UIRequest, st pageState, item recipe) *wire.View {
 	}
 	if len(ingredients.Items) == 0 {
 		ingredients.Items = append(ingredients.Items, wire.Component{Type: wire.ComponentText, Text: t.noIngredients, Style: wire.TextStyleSecondary})
+	} else {
+		ingredients.Items = capComponents(ingredients.Items, maxIngredientItems)
 	}
+	used += len(ingredients.Items)
 	v.Sections = append(v.Sections, ingredients)
 	steps := wire.Section{Title: t.instructions}
 	for i, step := range item.RecipeInstructions {
@@ -211,14 +247,29 @@ func detailView(r *ext.UIRequest, st pageState, item recipe) *wire.View {
 	}
 	if len(steps.Items) == 0 {
 		steps.Items = append(steps.Items, wire.Component{Type: wire.ComponentText, Text: t.noInstructions, Style: wire.TextStyleSecondary})
+	} else {
+		steps.Items = capComponents(steps.Items, max(1, maxViewItems-used))
 	}
 	v.Sections = append(v.Sections, steps)
 	return v
 }
 
+// capComponents keeps the first n components and shows the cut on the last one.
+func capComponents(items []wire.Component, n int) []wire.Component {
+	if n <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) <= n {
+		return items
+	}
+	items = items[:n]
+	items[n-1].Text = clipText(items[n-1].Text, 1700) + " […]"
+	return items
+}
+
 func safeSource(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
 		return ""
 	}
 	return u.String()

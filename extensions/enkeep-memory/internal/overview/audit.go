@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/model"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 )
 
@@ -24,7 +25,7 @@ var auditSchema []byte
 const (
 	AuditMost     = 30
 	auditBatch    = 10
-	auditQuotes   = 6
+	auditQuotes   = 8
 	auditMaxTok   = 3000
 	auditQuoteLen = 160
 )
@@ -84,27 +85,66 @@ func Sample(s *State, n int) []*Pattern {
 	return out
 }
 
-// quotes are the user's lines a pattern rests on, one per independent unit·day, at most n.
+// quotes are the user's lines a pattern rests on, sampled round-robin across its EvidenceIDs (one per independent
+// unit·day and distinct normalised text), at most n. Round-robin keeps a single large class from filling every slot.
 func quotes(st *store.State, p *Pattern, n int) []string {
-	var out []string
-	seen := map[string]bool{}
+	type qline struct {
+		unit string
+		norm string
+		text string
+	}
+	var buckets [][]qline
 	for _, id := range p.EvidenceIDs {
 		e := st.Entries[id]
 		if e == nil {
 			continue
 		}
+		var b []qline
+		localSeen := map[string]bool{}
 		for _, ev := range evidenceOf(st, e, "") {
-			if !ev.quoted || seen[ev.key] || len(out) >= n {
+			if !ev.quoted || localSeen[ev.key] {
 				continue
 			}
 			x := st.Entries[ev.entry]
+			if x == nil {
+				continue
+			}
 			for _, line := range x.Evidence {
 				if line.Ref+"@"+line.Day == ev.key && strings.TrimSpace(line.Quote) != "" {
-					out = append(out, clip(line.Quote, auditQuoteLen))
-					seen[ev.key] = true
+					b = append(b, qline{unit: ev.key, norm: norm.Q(line.Quote), text: clip(line.Quote, auditQuoteLen)})
+					localSeen[ev.key] = true
 					break
 				}
 			}
+		}
+		if len(b) > 0 {
+			buckets = append(buckets, b)
+		}
+	}
+	var out []string
+	seenUnit := map[string]bool{}
+	seenText := map[string]bool{}
+	for len(out) < n {
+		progressed := false
+		for i := range buckets {
+			for len(buckets[i]) > 0 {
+				q := buckets[i][0]
+				buckets[i] = buckets[i][1:]
+				if seenUnit[q.unit] || seenText[q.norm] {
+					continue
+				}
+				out = append(out, q.text)
+				seenUnit[q.unit] = true
+				seenText[q.norm] = true
+				progressed = true
+				break
+			}
+			if len(out) >= n {
+				break
+			}
+		}
+		if !progressed {
+			break
 		}
 	}
 	return out

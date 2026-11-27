@@ -53,7 +53,7 @@ func articleText(item article) string {
 func articleLink(item article) string {
 	for _, link := range item.Alternate {
 		u, err := url.Parse(link.Href)
-		if err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil {
+		if err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil {
 			return u.String()
 		}
 	}

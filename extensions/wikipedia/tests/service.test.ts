@@ -64,3 +64,97 @@ test("language config chooses only registered origins", async () => {
   const fixture = new Fixture(), service = new Wikipedia(fixture.fetch, { language: "ja" }, { locale: "zh", limits: { gap: 0 }, now: () => fixture.clock });
   await service.today(); assert.equal(fixture.requests[0].url.hostname, "ja.wikipedia.org");
 });
+test("unvalidated HTTP 200 JSON does not poison cache or erase valid stale entries", async () => {
+  const fixture = new Fixture(), service = make(fixture);
+  fixture.answers.set("/api/rest_v1/feed/featured/2026/11/09", { body: "null" });
+  await assert.rejects(service.today(), (error: unknown) => error instanceof ReadError && error.code === "bad_answer");
+  assert.equal(service.cacheStats().entries, 0);
+  assert.equal(service.status().state, "error");
+
+  fixture.put("/api/rest_v1/feed/featured/2026/11/09", { tfa: syntheticArticle("Featured_article") });
+  assert.equal((await service.today()).featured?.title, "Featured_article");
+  assert.equal(service.status().state, "ok");
+
+  fixture.answers.set("/api/rest_v1/feed/featured/2026/11/09", { body: "{}" });
+  const stale = await service.today(undefined, true);
+  assert.equal(stale.featured?.title, "Featured_article");
+  assert.equal(stale.stale?.code, "bad_answer");
+  assert.equal(service.status().state, "error");
+});
+test("response body stream timeout classifies as slow, records lastError, and falls back to stale cache", async () => {
+  let stalled = false;
+  const fixture = new Fixture();
+  const service = new Wikipedia(async (input, init) => {
+    if (!stalled) return fixture.fetch(input, init);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const onAbort = () => controller.error(new DOMException("The operation was aborted.", "AbortError"));
+        if (init.signal.aborted) onAbort(); else init.signal.addEventListener("abort", onAbort, { once: true });
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }, {}, { now: () => fixture.clock, monotonic: () => fixture.clock, limits: { gap: 0, request: 25 }, locale: "en" });
+
+  stalled = true;
+  await assert.rejects(service.today(), (error: unknown) => error instanceof ReadError && error.code === "slow");
+  assert.equal(service.status().state, "error");
+
+  stalled = false;
+  assert.equal((await service.today()).featured?.title, "Featured_article");
+  assert.equal(service.status().state, "ok");
+
+  stalled = true;
+  const stale = await service.today(undefined, true);
+  assert.equal(stale.featured?.title, "Featured_article");
+  assert.equal(stale.stale?.code, "slow");
+  assert.equal(service.status().state, "error");
+});
+test("refreshing oldest cache entry with a larger body keeps the refreshed entry", async () => {
+  const fixture = new Fixture();
+  const smallA = syntheticArticle("Article_A", { extract: "a".repeat(200) });
+  const smallB = syntheticArticle("Article_B", { extract: "b".repeat(200) });
+  const largeA = syntheticArticle("Article_A", { extract: "A".repeat(700) });
+  fixture.put("/api/rest_v1/page/summary/Article_A", smallA);
+  fixture.put("/api/rest_v1/page/summary/Article_B", smallB);
+  const service = make(fixture, { limits: { gap: 0, cacheBytes: 1200 } });
+  await service.article("Article_A");
+  await service.article("Article_B");
+  fixture.put("/api/rest_v1/page/summary/Article_A", largeA);
+  await service.article("Article_A", true);
+  const hitsBefore = fixture.hits.get("/api/rest_v1/page/summary/Article_A");
+  assert.equal((await service.article("Article_A")).extract, "A".repeat(700));
+  assert.equal(fixture.hits.get("/api/rest_v1/page/summary/Article_A"), hitsBefore);
+});
+test("aborted queued waiter does not resolve from sibling cache hit and 404 does not set connector error", async () => {
+  const fixture = new Fixture();
+  fixture.put("/api/rest_v1/page/summary/Featured_article", syntheticArticle("Featured_article"), { delay: 40 });
+  const service = make(fixture);
+  const first = service.article("Featured_article");
+  const controller = new AbortController();
+  const second = service.article("Featured_article", false, controller.signal);
+  controller.abort();
+  await assert.rejects(second, (error: unknown) => error instanceof Error && error.name === "AbortError");
+  assert.equal((await first).title, "Featured_article");
+  await assert.rejects(service.article("Missing_article"), (error: unknown) => error instanceof ReadError && error.code === "not_found");
+  assert.equal(service.status().state, "ok");
+
+  // An already-expired slow signal rejects even when cached, and queued budget expiry does not clobber healthy status.
+  const expired = AbortSignal.abort(new ReadError("slow"));
+  await assert.rejects(service.article("Featured_article", false, expired), (error: unknown) => error instanceof ReadError && error.code === "slow");
+  assert.equal(service.status().state, "ok");
+
+  fixture.put("/api/rest_v1/page/summary/Slow_ok", syntheticArticle("Slow_ok"), { delay: 40 });
+  const healthy = service.article("Slow_ok", true);
+  const tight = budget(undefined, 5);
+  const queued = service.article("Featured_article", true, tight.signal);
+  assert.equal((await healthy).title, "Slow_ok");
+  // Waiter timed out in queue -> falls back to stale cache without clobbering status() to error.
+  assert.equal((await queued).title, "Featured_article");
+  assert.equal(service.status().state, "ok");
+  tight.dispose();
+
+  // HTTP status error formats its status code in status().error.
+  fixture.put("/api/rest_v1/page/summary/Broken", {}, { status: 503 });
+  await assert.rejects(service.article("Broken"), (error: unknown) => error instanceof ReadError && error.code === "http");
+  assert.equal(service.status().error, "Wikipedia returned HTTP 503.");
+});

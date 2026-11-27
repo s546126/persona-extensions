@@ -23,12 +23,18 @@ const cardRows = 5
 // pickSlot is the new space's state while its template is not chosen yet.
 const pickSlot = "?"
 
-// welcome is the screen with no space: a header and a row per template, which opens that template's form.
+// welcome is the screen with no space: what spaces are for with a few examples, the first step, and a row per
+// template, which opens that template's form.
 func (c *ctx) welcome() *wire.View {
-	items := []wire.Component{{
-		Type: wire.ComponentHeader, Title: "空间", Subtitle: "用类型、属性和关联，管理任何一类事情",
+	return &wire.View{Sections: []wire.Section{
+		{Items: []wire.Component{
+			{Type: wire.ComponentHeader, Title: "空间", Subtitle: "自己搭几个小本子，把想记的事分门别类记下来"},
+			{Type: wire.ComponentText, Style: wire.TextStyleBody, Text: "比如：读书清单（想读、在读、读完，读到第几页）；" +
+				"订阅和续费（每月花多少钱、哪天续费）；家里的东西（放在哪、还剩多少、想买什么）。"},
+			caption("还没有空间。第一步：从下面选一个模板，马上就能用；也可以直接跟助手说「帮我建一个读书清单」。"),
+		}},
+		{Title: "选一个模板开始", Items: templateRows()},
 	}}
-	return &wire.View{Sections: []wire.Section{{Items: append(items, templateRows()...)}}}
 }
 
 // newSpacePage is the screen of a new space the state names: the template list, or the form of its template. With no
@@ -54,28 +60,41 @@ func (c *ctx) newSpacePage() *wire.View {
 
 // picker is the template list of a new space, and the button that leaves it.
 func picker() *wire.View {
-	items := []wire.Component{{Type: wire.ComponentHeader, Title: "新建空间", Subtitle: "从一个模板开始"}}
+	items := []wire.Component{{Type: wire.ComponentHeader, Title: "新建空间", Subtitle: "选一个模板，之后里面的分类和填写项都还能改"}}
 	return &wire.View{Sections: []wire.Section{
 		{Items: append(items, templateRows()...)},
 		{Items: []wire.Component{button("取消", &wire.Action{ID: "cancel"}, wire.ButtonRoleNormal)}},
 	}}
 }
 
-// templateRows is a row per template: its icon, name and about, and the number of its types. A row opens the
+// templateRows is a row per template: its icon, name and about, and the names of its types. A row opens the
 // template's form.
 func templateRows() []wire.Component {
 	out := []wire.Component{}
 	for _, t := range templates.All() {
-		value := ""
-		if len(t.Types) > 0 {
-			value = fmt.Sprintf("%d 类", len(t.Types))
-		}
 		out = append(out, wire.Component{
 			Type: wire.ComponentRow, Icon: iconName(t.Icon), Title: t.Name, Subtitle: cut(t.About, maxText),
-			Value: value, Action: &wire.Action{ID: "new:" + t.Key},
+			Value: templateTypeNames(t), Action: &wire.Action{ID: "new:" + t.Key},
 		})
 	}
 	return out
+}
+
+// rowTypeNames is how many type names a template row shows; a template with more shows the first ones and how many
+// there are in all.
+const rowTypeNames = 4
+
+// templateTypeNames is the names of the template's types for its row, such as 「书 · 笔记 · 剪藏 · 主题」, or
+// 「a · b · c 等 6 个」 for a template with more than rowTypeNames types; "" for a template without types.
+func templateTypeNames(t templates.Template) string {
+	var names []string
+	for _, ty := range t.Types {
+		names = append(names, ty.Name)
+	}
+	if len(names) > rowTypeNames {
+		return strings.Join(names[:rowTypeNames-1], " · ") + fmt.Sprintf(" 等 %d 个", len(names))
+	}
+	return strings.Join(names, " · ")
 }
 
 // createForm is the form of a new space from a template: what the template brings, the name (a free default), the
@@ -88,16 +107,16 @@ func (c *ctx) createForm(t templates.Template) *wire.View {
 			names = append(names, ty.Name)
 		}
 		items = append(items, wire.Component{
-			Type: wire.ComponentText, Text: cut("包含："+strings.Join(names, "、"), maxText), Style: wire.TextStyleCaption,
+			Type: wire.ComponentText, Text: cut("里面有这几个分类："+strings.Join(names, "、"), maxText), Style: wire.TextStyleCaption,
 		})
 	}
 	items = append(items, wire.Component{
-		Type: wire.ComponentField, Name: "name", Label: "名称", Kind: wire.FieldKindText, Value: c.defaultName(t),
+		Type: wire.ComponentField, Name: "name", Label: "空间名称", Kind: wire.FieldKindText, Value: c.defaultName(t),
 	})
 	if len(t.Samples) > 0 {
-		items = append(items, toggleField("samples", "带示例记录", true))
+		items = append(items, toggleField("samples", "先放几条示例（之后可以删）", true))
 	}
-	items = append(items, button("创建", &wire.Action{ID: "create:" + t.Key, Submit: true}, wire.ButtonRoleNormal))
+	items = append(items, button("创建空间", &wire.Action{ID: "create:" + t.Key, Submit: true}, wire.ButtonRoleNormal))
 	return &wire.View{Sections: []wire.Section{
 		{Items: items},
 		{Items: []wire.Component{button("返回", &wire.Action{ID: "new"}, wire.ButtonRoleNormal)}},
@@ -135,8 +154,10 @@ func freeName(base string, taken map[string]bool) string {
 	return name
 }
 
-// overview is the space page with no type tab: the space's header and its totals, a row per type, the latest changes,
-// the settings fold when it is open, and the buttons that add a type, open the settings or start a new space.
+// overview is the space page with no type tab: the space's header and its totals with the buttons that open the
+// settings or start a new space, the settings fold right under them when it is open, a row per type ending with the
+// button that adds one, and the latest changes. Each button sits in the card it acts on: a section of buttons alone
+// is drawn as a card of its own, an empty frame around them.
 func (c *ctx) overview() (*wire.View, error) {
 	sp := c.sp
 	filter, tabs := c.chrome()
@@ -144,28 +165,30 @@ func (c *ctx) overview() (*wire.View, error) {
 	head := wire.Section{Items: []wire.Component{
 		c.spaceHeader(),
 		statGrid(spaceStats(tallyOf(c.w, sp.Entities))),
+		button("空间设置", &wire.Action{ID: "fold:space"}, wire.ButtonRoleNormal),
+		button("新建空间", &wire.Action{ID: "new"}, wire.ButtonRoleNormal),
 	}}
 	v.Sections = append(v.Sections, head)
-	if len(sp.Types) == 0 {
-		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{c.noTypes()}})
-	} else {
-		v.Sections = append(v.Sections, wire.Section{Title: "类型", Items: c.typeRows()})
-		recent, err := c.recent()
-		if err != nil {
-			return nil, err
-		}
-		if len(recent) > 0 {
-			v.Sections = append(v.Sections, wire.Section{Title: "最近更新", Items: c.rows(recent, true)})
-		}
-	}
 	if c.st.F == "space" {
 		v.Sections = append(v.Sections, c.spaceFold())
 	}
-	v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{
-		button("新建类型", ext.Open("schema:+", "", state{S: sp.ID, D: "+"}, "新建类型"), wire.ButtonRoleNormal),
-		button("空间设置", &wire.Action{ID: "fold:space"}, wire.ButtonRoleNormal),
-		button("新建空间", &wire.Action{ID: "new"}, wire.ButtonRoleNormal),
-	}})
+	if len(sp.Types) == 0 {
+		// the empty state's own button adds the first category
+		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{c.noTypes()}})
+		return v, nil
+	}
+	types := append(c.typeRows(), button("新建分类", ext.Open("schema:+", "", state{S: sp.ID, D: "+"}, "新建分类"), wire.ButtonRoleNormal))
+	v.Sections = append(v.Sections, wire.Section{
+		Title: "分类", Items: types,
+		Footer: cut("点一个分类，查看和添加条目；也可以直接跟助手说「在「"+sp.Name+"」里记一条……」。", maxText),
+	})
+	recent, err := c.recent()
+	if err != nil {
+		return nil, err
+	}
+	if len(recent) > 0 {
+		v.Sections = append(v.Sections, wire.Section{Title: "最近更新", Items: c.rows(recent, true)})
+	}
 	return v, nil
 }
 
@@ -198,7 +221,7 @@ func (c *ctx) chrome() (*wire.Filter, *wire.Tabs) {
 func (c *ctx) spaceHeader() wire.Component {
 	sp := c.sp
 	facts := []wire.Fact{
-		{Label: "类型", Value: fmt.Sprintf("%d 类", len(sp.Types))},
+		{Label: "分类", Value: fmt.Sprintf("%d 个", len(sp.Types))},
 		{Label: "条目", Value: fmt.Sprintf("%d 条", len(sp.Entities))},
 	}
 	if last := latest(sp.Entities); last != nil {
@@ -210,8 +233,9 @@ func (c *ctx) spaceHeader() wire.Component {
 // noTypes is the overview of a space with no types: one empty state, whose button adds the first type.
 func (c *ctx) noTypes() wire.Component {
 	return wire.Component{
-		Type: wire.ComponentEmpty, Title: "这个空间还没有类型", Detail: "先新建一个类型，例如「任务」或「书」",
-		Button: &wire.EmptyButton{Title: "新建类型", Action: *ext.Open("schema:+", "", state{S: c.sp.ID, D: "+"}, "新建类型")},
+		Type: wire.ComponentEmpty, Title: "这个空间还是空的",
+		Detail: "分类就是你要记的一种东西，例如「电影」「药品」。先建一个分类，再往里加条目。",
+		Button: &wire.EmptyButton{Title: "新建分类", Action: *ext.Open("schema:+", "", state{S: c.sp.ID, D: "+"}, "新建分类")},
 	}
 }
 
@@ -223,9 +247,9 @@ func (c *ctx) typeRows() []wire.Component {
 		set := c.entitiesOf(t.Key)
 		value := strconv.Itoa(len(set))
 		if pct, ok := tallyOf(c.w, set).percent(); ok && len(t.Flow) > 0 {
-			value = fmt.Sprintf("%d%%", pct)
+			value = fmt.Sprintf("完成 %d%%", pct)
 		}
-		subtitle := viewLabels[t.ViewsOrDefault()[0].Kind] + " · " + strconv.Itoa(len(set)) + " 条"
+		subtitle := strconv.Itoa(len(set)) + " 条 · 显示成" + viewLabels[t.ViewsOrDefault()[0].Kind]
 		out = append(out, wire.Component{
 			Type: wire.ComponentRow, Icon: iconName(t.Icon), Title: t.Name, Subtitle: subtitle, Value: value,
 			Action: &wire.Action{ID: "tab:" + t.Key},
@@ -254,10 +278,10 @@ func (c *ctx) spaceFold() wire.Section {
 	return wire.Section{Items: []wire.Component{
 		{Type: wire.ComponentField, Name: "name", Label: "名称", Kind: wire.FieldKindText, Value: sp.Name},
 		{Type: wire.ComponentField, Name: "about", Label: "简介", Kind: wire.FieldKindText, Value: sp.About,
-			Placeholder: "一句话说明这个空间"},
+			Placeholder: "一句话说明这个空间记什么，例如 家里每月的订阅"},
 		button("保存", &wire.Action{ID: "save", Submit: true}, wire.ButtonRoleNormal),
 		button("删除空间", &wire.Action{ID: "drop", Confirm: fmt.Sprintf(
-			"删除空间「%s」？会删除 %d 类、%d 条记录。", sp.Name, len(sp.Types), len(sp.Entities))}, wire.ButtonRoleDestructive),
+			"删除空间「%s」？里面的 %d 个分类和全部 %d 条会一起删除，不能撤销。", sp.Name, len(sp.Types), len(sp.Entities))}, wire.ButtonRoleDestructive),
 	}}
 }
 
@@ -265,12 +289,16 @@ func (c *ctx) spaceFold() wire.Section {
 func (c *ctx) card() *wire.View {
 	if len(c.b.Spaces) == 0 {
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{
-			Type: wire.ComponentEmpty, Title: "还没有空间", Detail: "从一个模板开始",
+			Type: wire.ComponentEmpty, Title: "还没有空间",
+			Detail: "选个模板就能开始记，比如读书清单、订阅续费、家里的东西",
+			Button: &wire.EmptyButton{Title: "选个模板", Action: *ext.Open("start", PageUI, state{}, "空间")},
 		}}}}}
 	}
 	var all tally
 	var doing []located
+	entries := 0
 	for _, sp := range c.b.Spaces {
+		entries += len(sp.Entities)
 		w := kernel.Open(sp)
 		all.add(tallyOf(w, sp.Entities))
 		for _, e := range sp.Entities {
@@ -288,7 +316,7 @@ func (c *ctx) card() *wire.View {
 		pct, detail, tone = fmt.Sprintf("%d%%", p), fmt.Sprintf("已完成 %d", all.done), wire.TonePositive
 	}
 	v := &wire.View{Sections: []wire.Section{{Items: []wire.Component{statGrid([]wire.Stat{
-		{Label: "进行中", Value: strconv.Itoa(all.doing), Detail: fmt.Sprintf("%d 个空间", len(c.b.Spaces))},
+		{Label: "进行中", Value: strconv.Itoa(all.doing), Detail: fmt.Sprintf("%d 个空间，共 %d 条", len(c.b.Spaces), entries)},
 		{Label: "待办", Value: strconv.Itoa(all.todo)},
 		{Label: "完成度", Value: pct, Detail: detail, Tone: tone},
 	})}}}}
@@ -297,7 +325,7 @@ func (c *ctx) card() *wire.View {
 		for _, l := range doing {
 			items = append(items, c.cardRow(l))
 		}
-		v.Sections = append(v.Sections, wire.Section{Title: "在办", Items: items})
+		v.Sections = append(v.Sections, wire.Section{Title: "正在进行", Items: items})
 	}
 	return v
 }

@@ -1,7 +1,7 @@
 import type { FetchAdapter } from "@persona/extension/ui";
 import { configFrom, dateAt, feedPath, languageFor, limits, parseArticle, parseFeed, parseSearch, ReadError, searchPath, summaryPath,
   type Article, type Config, type Feed, type Language, type LimitOptions } from "./model.ts";
-import { textsFor } from "./i18n.ts";
+import { errorText, textsFor } from "./i18n.ts";
 export { limits, ReadError } from "./model.ts";
 export interface ServiceOptions { now?: () => number; monotonic?: () => number; limits?: LimitOptions; locale?: string; timezone?: string }
 function cancellation(signal: AbortSignal): Error {
@@ -28,7 +28,7 @@ export class Wikipedia {
   private lastRequest = -Infinity;
   private queue: Promise<void> = Promise.resolve();
   private lastOK: number | undefined;
-  private lastError: { code: ReadError["code"]; at: number } | undefined;
+  private lastError: { code: ReadError["code"]; status?: number; at: number } | undefined;
   constructor(private readonly fetch: FetchAdapter, config: unknown = {}, options: ServiceOptions = {}) {
     this.config = configFrom(config); this.locale = options.locale ?? "en";
     this.language = languageFor(this.config, this.locale); this.timezone = options.timezone || "Local";
@@ -42,7 +42,7 @@ export class Wikipedia {
   private save(path: string, raw: unknown, at: number) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
     if (bytes > this.limits.cacheBytes) return;
-    const old = this.cache.get(path); if (old) this.bytes -= old.bytes;
+    const old = this.cache.get(path); if (old) { this.bytes -= old.bytes; this.cache.delete(path); }
     this.cache.set(path, { raw, at, used: this.monotonic(), bytes }); this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       const oldest = this.cache.keys().next().value as string | undefined;
@@ -62,7 +62,7 @@ export class Wikipedia {
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];
     let length = 0;
     const cancel = () => { void reader.cancel().catch(() => {}); };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel(); else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -72,6 +72,9 @@ export class Wikipedia {
         if (length > this.limits.response) { await reader.cancel(); throw new ReadError("bad_answer"); }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally { signal.removeEventListener("abort", cancel); reader.releaseLock(); }
     const data = new Uint8Array(length); let offset = 0;
     for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
@@ -82,10 +85,11 @@ export class Wikipedia {
     if (response.status !== 200) throw new ReadError("http", response.status);
     try { return JSON.parse(text); } catch { throw new ReadError("bad_answer"); }
   }
-  private async read(path: string, fresh: number, signal?: AbortSignal): Promise<{ raw: unknown; at: number; stale?: ReadError }> {
+  private async read(path: string, fresh: number, signal: AbortSignal | undefined, validate: (raw: unknown, at: number) => void): Promise<{ raw: unknown; at: number; stale?: ReadError }> {
     checkSignal(signal);
     const cached = this.cached(path, fresh); if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh); if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
       if (pause) await new Promise<void>((resolve, reject) => {
@@ -97,12 +101,17 @@ export class Wikipedia {
       const request = budget(signal, this.limits.request);
       try {
         const raw = await this.response(path, request.signal);
-        const at = this.now(); this.save(path, raw, at);
+        const at = this.now(); validate(raw, at); this.save(path, raw, at);
         this.lastOK = at; this.lastError = undefined;
         return { raw, at };
       } catch (error) {
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        const failure = error instanceof ReadError ? error
+          : signal?.aborted && signal.reason instanceof ReadError ? signal.reason
+          : request.signal.aborted ? (request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow"))
+          : error instanceof Error && error.name === "AbortError" ? error
+          : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally { this.lastRequest = this.monotonic(); request.dispose(); }
     });
@@ -119,18 +128,18 @@ export class Wikipedia {
     const t = textsFor(this.locale);
     return { state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok", account: t.account,
       ...(this.lastOK === undefined ? {} : { last_sync: new Date(this.lastOK).toISOString() }),
-      ...(this.lastError ? { error: t[this.lastError.code] } : {}) };
+      ...(this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}) };
   }
   async today(date = dateAt(this.now()), refresh = false, signal?: AbortSignal): Promise<Feed> {
-    const path = feedPath(date), rd = await this.read(path, refresh ? 0 : this.limits.feedFresh, signal);
+    const path = feedPath(date), rd = await this.read(path, refresh ? 0 : this.limits.feedFresh, signal, (raw, at) => { parseFeed(raw, this.language, date, at); });
     return { ...parseFeed(rd.raw, this.language, date, rd.at), stale: rd.stale };
   }
   async article(title: string, refresh = false, signal?: AbortSignal): Promise<Article> {
-    const rd = await this.read(summaryPath(title), refresh ? 0 : this.limits.articleFresh, signal);
+    const rd = await this.read(summaryPath(title), refresh ? 0 : this.limits.articleFresh, signal, raw => { parseArticle(raw, this.language); });
     return parseArticle(rd.raw, this.language);
   }
   async search(query: string, limit = 30, signal?: AbortSignal): Promise<Article[]> {
-    const rd = await this.read(searchPath(query, limit), this.limits.feedFresh, signal);
+    const rd = await this.read(searchPath(query, limit), this.limits.feedFresh, signal, raw => { parseSearch(raw, this.language); });
     return parseSearch(rd.raw, this.language);
   }
   cacheStats() { return { entries: this.cache.size, bytes: this.bytes }; }

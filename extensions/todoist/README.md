@@ -20,9 +20,10 @@ an `Authorization: Bearer` header. Redirects are not followed.
 ## What it does
 
 - **Today**, **Overdue**, **Next 7 days**, **All tasks** and search, using the user's current
-  time zone for date-only task boundaries. Today is not an alias for overdue.
-- Project, section, labels, priority and due date alongside each task. Todoist priority
-  **1 is highest and 4 is the default**, not the other way around.
+  time zone for day boundaries. A task with a time lands on the user's local day; a time fixed
+  to another zone is converted to the user's zone. Today is not an alias for overdue.
+- Project, section, labels, priority, due date and time, and the recurring flag alongside each
+  task. Todoist priority **1 is highest and 4 is the default**, not the other way around.
 - Full descriptions on the detail page and through `todoist_task`.
 - `todoist_projects` resolves opaque project and section IDs before creating or moving work.
 - Cursor pagination uses the current `results` / `next_cursor` contract, with a six-page

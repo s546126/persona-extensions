@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/entry"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/voice"
 )
 
 // The entry API every package writes through (internal/entry/CONTRACT.md). Every change is an event in events.jsonl
@@ -81,9 +83,46 @@ func overlapTwin(s *store.State, e *entry.Entry) *entry.Entry {
 // overlapSame: the bigram likeness above which two observations on the same line are one.
 const overlapSame = 0.6
 
+// blockedS3S4Authority enforces the 0.4.0 §1.2 hard gate at storage entry: pure S3/S4 (agent/tool) evidence may
+// never create persona or workflow entries, and may create judgement entries only when backed by direct user
+// (WhoSelf + RoleUser) correction evidence.
+func blockedS3S4Authority(e *entry.Entry) bool {
+	if e == nil || len(e.Evidence) == 0 || entry.IsTrueUserOwned(e) {
+		return false
+	}
+	if e.Facet != entry.Persona && e.Facet != entry.Workflow && e.Facet != entry.Judgement {
+		return false
+	}
+	allS3S4 := true
+	for _, ev := range e.Evidence {
+		if ev.Source != entry.SrcAgent && ev.Source != entry.SrcTools {
+			allS3S4 = false
+			break
+		}
+	}
+	if !allS3S4 {
+		return false
+	}
+	if e.Facet == entry.Persona || e.Facet == entry.Workflow {
+		return true
+	}
+	// Judgement from S3/S4 requires explicit direct WhoSelf correction evidence.
+	for _, ev := range e.Evidence {
+		if ev.Who == entry.WhoSelf && (ev.Role == "" || ev.Role == voice.RoleUser) {
+			if strings.EqualFold(e.Type, "correction") || strings.TrimSpace(e.Rejected) != "" || fastCue.MatchString(ev.Quote) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (c *Curator) Observe(e *entry.Entry, run string) string {
 	s := c.St.S
 	if tombstoned(s, e.Facet, e.Text, e.Person) {
+		return ""
+	}
+	if blockedS3S4Authority(e) {
 		return ""
 	}
 	if e.Grain == "" {
@@ -91,6 +130,9 @@ func (c *Curator) Observe(e *entry.Entry, run string) string {
 	}
 	if e.Origin == "" {
 		e.Origin = entry.Behavior
+	}
+	if e.MemoryClass == "" && entry.ClassifyOpsRunbook(e) {
+		e.MemoryClass = entry.ClassOpsRunbook
 	}
 	id := EntryID(e.Facet, e.Grain, e.Text, e.Person)
 	now := c.stamp()
@@ -118,8 +160,9 @@ func (c *Curator) Observe(e *entry.Entry, run string) string {
 	e.ID = id
 	if e.Status == "" {
 		e.Status = entry.Candidate
-		if e.Origin != entry.Behavior {
-			e.Status = entry.Stable // the user's own words about themself, and the hand-written memory
+		// Only T0 user-sovereign origins (SelfReport / FromOnboarding) start Stable; S6 assistant_note starts Candidate.
+		if e.Origin == entry.SelfReport || e.Origin == entry.FromOnboarding {
+			e.Status = entry.Stable
 		}
 	}
 	if e.First == "" {
@@ -525,8 +568,89 @@ func (c *Curator) setStatus(e *entry.Entry, to entry.Status, why, run string) {
 	c.event(entry.Event{At: c.stamp(), Run: run, Kind: entry.EvStatus, Entry: e.ID, From: string(from), To: string(to), Detail: why, Data: data})
 }
 
-// File puts an action under a class (or a hand-written or self-reported entry, which is only counted: its text is
-// never touched). Undo with Unfile.
+// reconcileMemberCategories recomputes a class/abstract entry's non-user categories without unconditional union
+// contagion (0.4.0 §1.6): a category applies only when (a) the user tagged it (ByUser), (b) k's own payload
+// matches entry.PayloadCategories, or (c) at least 50% of live members carry that category in their own payload
+// (or ByUser / space default for non-work facets). Work-methodology facets do not inherit OriginSpace from members.
+func reconcileMemberCategories(s *store.State, k *entry.Entry) {
+	if k == nil {
+		return
+	}
+	userCats := map[string]bool{}
+	for _, c := range k.Categories {
+		if c.By == entry.ByUser {
+			if n := entry.CategoryOf(c.Name); n != "" {
+				userCats[n] = true
+			}
+		}
+	}
+	ownCats := map[string]bool{}
+	for _, n := range entry.PayloadCategories(k.Facet, k.PayloadTexts()...) {
+		ownCats[n] = true
+	}
+	var liveMembers []*entry.Entry
+	for _, id := range k.Members {
+		if m := s.Entries[id]; m != nil && m.Live() {
+			liveMembers = append(liveMembers, m)
+		}
+	}
+	memberCatCounts := map[string]int{}
+	memberSpaceCounts := map[string]int{}
+	for _, m := range liveMembers {
+		seen := map[string]bool{}
+		for _, n := range entry.PayloadCategories(m.Facet, m.PayloadTexts()...) {
+			seen[n] = true
+		}
+		for _, c := range m.Categories {
+			n := entry.CategoryOf(c.Name)
+			if n == "" || slices.Contains(m.CatsRemoved, n) {
+				continue
+			}
+			if c.By == entry.ByUser || (!entry.IsWorkMethodFacet(k.Facet) && c.By == entry.BySpaceDefault) {
+				seen[n] = true
+			}
+		}
+		for n := range seen {
+			memberCatCounts[n]++
+		}
+		if m.OriginSpace != "" {
+			memberSpaceCounts[m.OriginSpace]++
+		}
+	}
+	majority := func(count int) bool {
+		return len(liveMembers) > 0 && count*2 >= len(liveMembers)
+	}
+	var next []entry.Category
+	for _, name := range entry.CategoryNames {
+		if userCats[name] {
+			next = append(next, entry.Category{Name: name, By: entry.ByUser})
+			continue
+		}
+		if slices.Contains(k.CatsRemoved, name) {
+			continue
+		}
+		if ownCats[name] || majority(memberCatCounts[name]) {
+			next = append(next, entry.Category{Name: name, By: entry.ByModel})
+		}
+	}
+	k.Categories = next
+	if k.Sensitive != "" {
+		if n := entry.CategoryOf(k.Sensitive); n != "" && !userCats[n] && !ownCats[n] && !majority(memberCatCounts[n]) {
+			k.Sensitive = ""
+		}
+	}
+	if !entry.IsWorkMethodFacet(k.Facet) && k.OriginSpace == "" {
+		for sp, cnt := range memberSpaceCounts {
+			if majority(cnt) {
+				k.OriginSpace = sp
+				break
+			}
+		}
+	}
+}
+
+// File puts an action under a class (or a self-reported entry, which is only counted: its text is never touched).
+// Undo with Unfile.
 func (c *Curator) File(actionID, classID, run string) error {
 	s := c.St.S
 	a, k := s.Entries[actionID], s.Entries[classID]
@@ -543,7 +667,7 @@ func (c *Curator) File(actionID, classID, run string) error {
 		k.Members = append(k.Members, actionID)
 	}
 	k.Counters = slices.DeleteFunc(k.Counters, func(x string) bool { return x == actionID })
-	k.MergeCategories(a) // a class carries its members' categories (the strict side of the scenes)
+	reconcileMemberCategories(s, k)
 	recount(s, k)
 	k.Updated = c.stamp()
 	c.commit(entry.EvFile, a, classID, "", run)
@@ -646,7 +770,11 @@ func (c *Curator) Merge(fromID, intoID, why, run string) error {
 		into.Count = max(into.Count, len(occurrences(into)))
 	}
 	into.Scopes = unionScopes(into.Scopes, from.Scopes)
-	into.MergeCategories(from)
+	if len(into.Members) > 0 {
+		reconcileMemberCategories(s, into)
+	} else {
+		into.MergeCategories(from)
+	}
 	for _, id := range sortedKeys(s.Entries) { // an abstract entry resting on the merged class rests on the kept one
 		if x := s.Entries[id]; x.Grain == entry.Abstract && slices.Contains(x.Members, fromID) {
 			x.Members = slices.DeleteFunc(x.Members, func(m string) bool { return m == fromID || m == intoID })
@@ -744,9 +872,10 @@ func (c *Curator) create(e *entry.Entry, run string) *entry.Entry {
 	return e
 }
 
-// userTouched: the user wrote, pinned, deleted or confirmed it: consolidation never overwrites it (5.0).
+// userTouched: the user genuinely authored, edited, pinned, deleted or confirmed it (T0), or imported it as a Seed.
+// S6 assistant notes (OriginAssistantNote / legacy Handwritten) no longer hold userTouched privilege (0.4.0 §1.2, §2).
 func userTouched(e *entry.Entry) bool {
-	return e.User != nil || e.Pinned || e.Deleted || userConfirmed(e) || e.Origin == entry.Handwritten || e.Origin == entry.Seed
+	return entry.IsTrueUserOwned(e) || e.Deleted || userConfirmed(e) || e.Origin == entry.Seed
 }
 
 // Flags consolidation sets.
@@ -803,9 +932,6 @@ func (c *Curator) UserAct(id, act, value string) error {
 	now := c.stamp()
 	switch act {
 	case ActEdit:
-		if e.Origin == entry.Handwritten {
-			return fmt.Errorf("%s is the assistant's hand-written memory: edit it there", id)
-		}
 		e.User = &entry.UserEdit{Text: value, At: now}
 	case ActPin:
 		e.Pinned = true

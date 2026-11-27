@@ -12,7 +12,8 @@ export function Root(options: RootOptions): Node {
     if (!signal.aborted) setResult(previous => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded)
       ? previous : { service: options.service, identity, loaded });
   }, [options.service, identity]);
-  return page({ ...options, state, loaded: result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" },
+  const loaded = result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" } as const;
+  return page({ ...options, state, loaded,
     action: (id, next, title) => {
       if (next && (options.uiVersion ?? 0) >= 3) {
         const push = { ui: "openlibrary", state: encodeState(next), ...(title ? { title } : {}) };
@@ -22,9 +23,15 @@ export function Root(options: RootOptions): Node {
         if (id === "refresh") setRefresh(previous => previous + 1);
         else if (id.startsWith("work:")) {
           const key = id.slice("work:".length);
-          const base = result?.loaded.kind === "search" ? result.loaded.result.books.find(book => book.key === key) : undefined;
-          if (base) setState({ v: "work", q: state.q, k: key, b: base });
-        } else setState(previous => transition(previous, id, values));
+          const base = loaded.kind === "search" ? loaded.result.books.find(book => book.key === key) : undefined;
+          if (base) {
+            setRefresh(0);
+            setState({ v: "work", q: state.q, k: key, b: base });
+          }
+        } else {
+          setRefresh(0);
+          setState(previous => transition(previous, id, values));
+        }
       }, { submit: true });
     } });
 }

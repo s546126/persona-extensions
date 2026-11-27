@@ -5,8 +5,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { connect, type Program } from "@persona/extension";
-import type { Snapshot } from "@persona/extension/ui";
-import { Fixture, interaction, until } from "./fixtures.ts";
+import { Renderer, type Snapshot } from "@persona/extension/ui";
+import { DockerHub } from "../src/service.ts";
+import { page } from "../src/page.tsx";
+import { repositoryPath, searchPath, tagsPath } from "../src/model.ts";
+import { detailResponse, Fixture, ingress, interaction, tag, until } from "./fixtures.ts";
 async function setup(initialize = true) {
   const bundle = await import(pathToFileURL(resolve("build/dockerhub.mjs")).href);
   const fixture = new Fixture(), frames: any[] = [];
@@ -134,5 +137,136 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     const pure = h.bundle.snapshotPage(local);
     const view = await pure.render({ contribution: "dockerhub", locale: "en", ui_version: 1, hub: {}, state: h.bundle.encodeState({ q: "nginx", found: true }) });
     assert.ok(JSON.stringify(view).includes("library/nginx"));
+  } finally { h.p.close(); }
+});
+
+test("long repository and tag names, duplicate items, and large direct renders stay within CheckView budgets", async () => {
+  const h = await setup();
+  try {
+    const longNs = "n".repeat(64);
+    const longName = "r".repeat(100);
+    const longRepo = `${longNs}/${longName}`;
+    const longTag = "t".repeat(128);
+    h.fixture.put(searchPath("longrepo", 12), { count: 1, results: [{ ...ingress, repo_name: longRepo, short_description: "Long repo desc" }] });
+    h.fixture.put(repositoryPath(longRepo), { ...detailResponse, namespace: longNs, name: longName, description: "Long detail desc" });
+    h.fixture.put(tagsPath(longRepo), { count: 1, results: [{ ...tag, name: longTag }] });
+
+    await h.call("ui.page.mount", { session: "long-v1", params: { contribution: "dockerhub", locale: "en", ui_version: 1, state: h.bundle.encodeState({ q: "longrepo", found: true }) } });
+    const listSnap = await settled(h, "long-v1", "Long repo desc");
+    const openBtn = listSnap.view.sections.flatMap(s => s.items).find(item => item.key?.startsWith("open-"));
+    assert.ok(openBtn && openBtn.key);
+    assert.ok(Array.from(openBtn.key).length <= 128, `open key too long: ${Array.from(openBtn.key).length}`);
+    for (const section of listSnap.view.sections) {
+      if (section.key) assert.ok(Array.from(section.key).length <= 128, `section key too long: ${Array.from(section.key).length}`);
+      for (const item of section.items) {
+        if (item.key) assert.ok(Array.from(item.key).length <= 128, `item key too long: ${Array.from(item.key).length}`);
+        if ("action" in item && item.action?.id) assert.ok(Array.from(item.action.id).length <= 128, `action id too long: ${Array.from(item.action.id).length}`);
+      }
+    }
+    await h.call("ui.page.event", { session: "long-v1", ticket: "host-ticket", interaction: interaction(listSnap, openBtn.key) });
+    const detailSnap = await settled(h, "long-v1", `docker pull ${longRepo}`);
+    const detailKeys = new Set<string>();
+    for (const section of detailSnap.view.sections) {
+      if (section.key) {
+        assert.ok(Array.from(section.key).length <= 128, `detail section key too long: ${Array.from(section.key).length}`);
+        assert.ok(!detailKeys.has(section.key), `duplicate detail section key ${section.key}`);
+        detailKeys.add(section.key);
+      }
+      for (const item of section.items) {
+        if (item.key) {
+          assert.ok(Array.from(item.key).length <= 128, `detail item key too long: ${Array.from(item.key).length}`);
+          assert.ok(!detailKeys.has(item.key), `duplicate detail item key ${item.key}`);
+          detailKeys.add(item.key);
+        }
+      }
+    }
+
+    // Direct page() renders with > 120 images and > 120 tags (with duplicates, > 2000-rune descriptions, invalid dates, oversized state.q) stay within CheckView budgets.
+    const local = new DockerHub(h.fixture.fetch, {}, { locale: "en", now: () => h.fixture.clock, limits: { gap: 0 } });
+    const manyImages = Array.from({ length: 120 }, (_, i) => ({
+      name: i < 2 ? longRepo : `${"a".repeat(60)}/repo-${i}-${"b".repeat(80)}`,
+      description: "D".repeat(2500),
+      pulls: i,
+      stars: i,
+      official: false,
+      url: `https://hub.docker.com/r/org/repo-${i}`,
+    }));
+    const manyTags = Array.from({ length: 120 }, (_, i) => ({
+      name: i < 2 ? longTag : `tag-${i}-${"x".repeat(120)}`,
+      digest: "sha256:" + "a".repeat(64),
+      updated: "not-a-valid-date",
+      platforms: ["linux/amd64"],
+    }));
+    for (const loaded of [
+      { kind: "results" as const, result: { images: manyImages, total: manyImages.length, at: h.fixture.clock } },
+      { kind: "detail" as const, result: { image: { name: longRepo, namespace: longNs, description: "D".repeat(2500), pulls: 1, stars: 1, official: false, url: `https://hub.docker.com/r/${longRepo}`, updated: "not-a-valid-date", pull: `docker pull ${longRepo}`, tags: manyTags }, at: h.fixture.clock } },
+    ]) {
+      const renderer = new Renderer({ authorize: () => false });
+      try {
+        const rendered = renderer.mount(page({
+          service: local,
+          state: { q: "q".repeat(17000), found: true },
+          loaded,
+          locale: "en",
+          uiVersion: 7,
+        })).view;
+        const totalItems = rendered.sections.reduce((sum, s) => sum + s.items.length, 0);
+        assert.ok(totalItems <= 300, `expected <= 300 items, got ${totalItems}`);
+        assert.ok(new TextEncoder().encode(rendered.state ?? "").byteLength <= 16384);
+        const keys = new Set<string>();
+        for (const section of rendered.sections) {
+          if (section.key) {
+            assert.ok(Array.from(section.key).length <= 128);
+            assert.ok(!keys.has(section.key), `duplicate section key ${section.key}`);
+            keys.add(section.key);
+          }
+          if (section.title) assert.ok(Array.from(section.title).length <= 2000);
+          if (section.footer) assert.ok(Array.from(section.footer).length <= 2000);
+          for (const item of section.items) {
+            if (item.key) {
+              assert.ok(Array.from(item.key).length <= 128);
+              assert.ok(!keys.has(item.key), `duplicate item key ${item.key}`);
+              keys.add(item.key);
+            }
+            if (item.type === "text") assert.ok(Array.from(item.text).length >= 1 && Array.from(item.text).length <= 2000);
+            if (item.type === "field" && item.value) assert.ok(Array.from(item.value).length <= 2000);
+            if ("action" in item && item.action?.id) assert.ok(Array.from(item.action.id).length <= 128);
+            if ("action" in item && item.action?.push?.state) assert.ok(new TextEncoder().encode(item.action.push.state).byteLength <= 16384);
+          }
+        }
+      } finally { renderer.dispose(); }
+    }
+  } finally { h.p.close(); }
+});
+
+test("manual refresh resets after navigating to a new search and RPC rejects explicit limit: 0", async () => {
+  const h = await setup();
+  try {
+    const nginxPath = searchPath("nginx", 12);
+    const redisPath = searchPath("redis", 12);
+    h.fixture.put(redisPath, { count: 1, results: [{ ...ingress, repo_name: "redis", short_description: "Redis in-memory store", is_official: true }] });
+    await h.call("ui.page.mount", { session: "nav", params: { contribution: "dockerhub", locale: "en", ui_version: 5 } });
+    let snapshot = await settled(h, "nav", "dockerhub-welcome-text");
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "dockerhub-submit", { query: "nginx" }) });
+    snapshot = await settled(h, "nav", "library/nginx");
+    assert.equal(h.fixture.hits.get(nginxPath), 1);
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "dockerhub-submit", { query: "redis" }) });
+    snapshot = await settled(h, "nav", "library/redis");
+    assert.equal(h.fixture.hits.get(redisPath), 1);
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "dockerhub-refresh") });
+    await until(async () => h.fixture.hits.get(redisPath) ?? 0, count => count === 2);
+    snapshot = await settled(h, "nav", "library/redis");
+
+    // Navigating back to cached "nginx" must reuse cache (still hit 1).
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "dockerhub-submit", { query: "nginx" }) });
+    snapshot = await settled(h, "nav", "library/nginx");
+    assert.equal(h.fixture.hits.get(nginxPath), 1);
+
+    // End-to-end RPC ExactJSON: explicit limit: 0 must be rejected as invalid.
+    const zeroLimit = await h.call("connector.tools.call", { name: "dockerhub_search", args: { query: "nginx", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
   } finally { h.p.close(); }
 });

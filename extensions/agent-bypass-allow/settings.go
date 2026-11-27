@@ -18,6 +18,21 @@ import (
 
 // Hook ownership is stable across public extension ID changes (compat.go).
 
+var (
+	errSettingsRead   = errors.New("cannot read settings file")
+	errSettingsJSON   = errors.New("settings file is not a JSON object")
+	errSettingsFormat = errors.New("settings file has invalid hook structure")
+	errSettingsBackup = errors.New("cannot write settings backup")
+	errSettingsWrite  = errors.New("cannot write settings file")
+)
+
+func settingsIOError(base, err error) error {
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("%w: permission denied", base)
+	}
+	return base
+}
+
 // hookTimeout is how long Claude Code lets the hook run (seconds); it answers in milliseconds.
 const hookTimeout = 10
 
@@ -100,13 +115,13 @@ func permissionGroups(top *jsonObject) (jsonObject, []json.RawMessage, error) {
 	var hooks jsonObject
 	if raw, ok := top.get("hooks"); ok {
 		if err := json.Unmarshal(raw, &hooks); err != nil {
-			return nil, nil, fmt.Errorf("hooks is not an object: %w", err)
+			return nil, nil, fmt.Errorf("%w: hooks is not an object", errSettingsFormat)
 		}
 	}
 	var groups []json.RawMessage
 	if raw, ok := hooks.get("PermissionRequest"); ok {
 		if err := json.Unmarshal(raw, &groups); err != nil {
-			return nil, nil, fmt.Errorf("hooks.PermissionRequest is not a list: %w", err)
+			return nil, nil, fmt.Errorf("%w: hooks.PermissionRequest is not a list", errSettingsFormat)
 		}
 	}
 	return hooks, groups, nil
@@ -189,8 +204,8 @@ func sameJSON(a, b []byte) bool {
 }
 
 // editSettings reads the settings file at path, lets edit change its top-level object, and writes it back when edit
-// says it changed: a copy of the old file first, then a temporary file in the same directory renamed over it.
-// create: a missing file starts as {}.
+// says it changed: an atomic 0600 backup of the old file first, then a temporary file in the same directory synced
+// and renamed over it. create: a missing file starts as {}.
 func editSettings(path string, create bool, edit func(top *jsonObject) (bool, error)) (bool, error) {
 	orig, err := os.ReadFile(path)
 	switch {
@@ -199,12 +214,12 @@ func editSettings(path string, create bool, edit func(top *jsonObject) (bool, er
 			return false, nil
 		}
 	case err != nil:
-		return false, err
+		return false, settingsIOError(errSettingsRead, err)
 	}
 	var top jsonObject
 	if len(bytes.TrimSpace(orig)) > 0 {
 		if err := json.Unmarshal(orig, &top); err != nil {
-			return false, fmt.Errorf("%s is not a JSON object, left alone: %w", path, err)
+			return false, fmt.Errorf("%w (left unchanged)", errSettingsJSON)
 		}
 	}
 	changed, err := edit(&top)
@@ -213,11 +228,11 @@ func editSettings(path string, create bool, edit func(top *jsonObject) (bool, er
 	}
 	body, err := marshalPlain(top)
 	if err != nil {
-		return false, err
+		return false, errSettingsWrite
 	}
 	var out bytes.Buffer
 	if err := json.Indent(&out, body, "", indentOf(orig)); err != nil {
-		return false, err
+		return false, errSettingsWrite
 	}
 	out.WriteByte('\n')
 	mode := os.FileMode(0o600)
@@ -225,30 +240,44 @@ func editSettings(path string, create bool, edit func(top *jsonObject) (bool, er
 		mode = st.Mode().Perm()
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return false, err
+		return false, settingsIOError(errSettingsWrite, err)
 	}
 	if len(orig) > 0 {
-		if err := os.WriteFile(path+settingsBackupSuffix, orig, mode); err != nil {
-			return false, fmt.Errorf("backup: %w", err)
+		if err := writeFileAtomicMode(path+settingsBackupSuffix, orig, 0o600, settingsTempPattern); err != nil {
+			return false, settingsIOError(errSettingsBackup, err)
 		}
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), settingsTempPattern)
+	if err := writeFileAtomicMode(path, out.Bytes(), mode, settingsTempPattern); err != nil {
+		return false, settingsIOError(errSettingsWrite, err)
+	}
+	return true, nil
+}
+
+// writeFileAtomicMode replaces path with b using a same-directory temporary file with explicit permissions and Sync.
+// Renaming over path replaces any pre-existing symlink rather than following it.
+func writeFileAtomicMode(path string, b []byte, mode os.FileMode, pattern string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
-		return false, err
+		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(out.Bytes()); err != nil {
-		tmp.Close()
-		return false, err
-	}
+	name := tmp.Name()
+	defer os.Remove(name)
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return false, err
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return false, err
+		return err
 	}
-	return true, os.Rename(tmp.Name(), path)
+	return os.Rename(name, path)
 }
 
 // indentOf is the file's own indent unit (its first indented line), two spaces when it has none.

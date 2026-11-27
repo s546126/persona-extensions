@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "wikipedia", name: "Wikipedia \u6BCF\u65E5\u9605\u8BFB", version: "0.1.5", icon: "assets/icon.png", description: "\u5728 Persona \u4E2D\u8BFB Wikipedia \u4ECA\u65E5\u7CBE\u9009\u3001\u70ED\u95E8\u6761\u76EE\u548C\u5386\u53F2\u4E0A\u7684\u4ECA\u5929\uFF0C\u641C\u7D22\u5E76\u9605\u8BFB\u6761\u76EE\u6458\u8981\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/wikipedia/README.md", tags: ["Wikipedia", "\u9605\u8BFB", "\u77E5\u8BC6", "\u6BCF\u65E5\u7CBE\u9009"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/wikipedia.mjs", sha256: "" } }, contributes: { connectors: [{ id: "wikipedia", name: "Wikipedia", capabilities: ["status", "tools"], hosts: ["en.wikipedia.org", "zh.wikipedia.org", "ja.wikipedia.org"], agent_tools: ["wikipedia_*"] }], ui: [{ id: "today", title: "\u6BCF\u65E5\u9605\u8BFB", placement: "nav_page", icon: "doc" }] }, configuration: { type: "object", properties: { language: { type: "string", title: "Wikipedia \u8BED\u8A00", default: "auto", description: "auto \u8DDF\u968F Persona \u754C\u9762\u8BED\u8A00\uFF1B\u82F1\u6587\u9009 en\uFF0C\u4E2D\u6587\u9009 zh\uFF0C\u65E5\u6587\u9009 ja", oneOf: [{ const: "auto", title: "\u8DDF\u968F\u754C\u9762\u8BED\u8A00" }, { const: "en", title: "English" }, { const: "zh", title: "\u4E2D\u6587" }, { const: "ja", title: "\u65E5\u672C\u8A9E" }] } } }, permissions: { network: ["en.wikipedia.org", "zh.wikipedia.org", "ja.wikipedia.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "wikipedia", name: "Wikipedia \u6BCF\u65E5\u9605\u8BFB", version: "0.1.6", icon: "assets/icon.png", description: "\u5728 Persona \u4E2D\u8BFB Wikipedia \u4ECA\u65E5\u7CBE\u9009\u3001\u70ED\u95E8\u6761\u76EE\u548C\u5386\u53F2\u4E0A\u7684\u4ECA\u5929\uFF0C\u641C\u7D22\u5E76\u9605\u8BFB\u6761\u76EE\u6458\u8981\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/wikipedia/README.md", tags: ["Wikipedia", "\u9605\u8BFB", "\u77E5\u8BC6", "\u6BCF\u65E5\u7CBE\u9009"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/wikipedia.mjs", sha256: "" } }, contributes: { connectors: [{ id: "wikipedia", name: "Wikipedia", capabilities: ["status", "tools"], hosts: ["en.wikipedia.org", "zh.wikipedia.org", "ja.wikipedia.org"], agent_tools: ["wikipedia_*"] }], ui: [{ id: "today", title: "\u6BCF\u65E5\u9605\u8BFB", placement: "nav_page", icon: "doc" }] }, configuration: { type: "object", properties: { language: { type: "string", title: "Wikipedia \u8BED\u8A00", default: "auto", description: "auto \u8DDF\u968F Persona \u754C\u9762\u8BED\u8A00\uFF1B\u82F1\u6587\u9009 en\uFF0C\u4E2D\u6587\u9009 zh\uFF0C\u65E5\u6587\u9009 ja", oneOf: [{ const: "auto", title: "\u8DDF\u968F\u754C\u9762\u8BED\u8A00" }, { const: "en", title: "English" }, { const: "zh", title: "\u4E2D\u6587" }, { const: "ja", title: "\u65E5\u672C\u8A9E" }] } } }, permissions: { network: ["en.wikipedia.org", "zh.wikipedia.org", "ja.wikipedia.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 2e4, page: 25e3, tool: 25e3, response: 4 << 20, feedFresh: 15 * 6e4, articleFresh: 60 * 6e4, cache: 60, cacheBytes: 4 << 20, gap: 100 });
@@ -791,7 +791,14 @@ function languageFor(config, locale = "") {
   if (config.language && config.language !== "auto") return config.language;
   return locale.toLowerCase().startsWith("ja") ? "ja" : locale.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
-var clip = (text, most) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
 function plain(text) {
   let out = "";
@@ -825,7 +832,7 @@ function titleKey(value) {
   if (typeof value !== "string") throw new ReadError("invalid");
   const title = plain(value).trim();
   if (/[<>]|&(#[0-9]+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/.test(value)) throw new ReadError("invalid");
-  if (!title || title.length > 255 || /[\u0000-\u001f\u007f#<>[\]{}|]/.test(title) || Array.from(title).length > 255) throw new ReadError("invalid");
+  if (!title || title.length > 255 || /[\u0000-\u001f\u007f#<>[\]{}|]/.test(title) || new TextEncoder().encode(title).byteLength > 255) throw new ReadError("invalid");
   return title.replaceAll(" ", "_");
 }
 function articleURL(language, title) {
@@ -849,7 +856,13 @@ function integer(value) {
   return value;
 }
 function parseArticle(raw, language) {
-  const value = object(raw), canonical = titleKey(value.titles && typeof value.titles === "object" && !Array.isArray(value.titles) ? value.titles.canonical : value.title);
+  const value = object(raw);
+  let canonical;
+  try {
+    canonical = titleKey(value.titles && typeof value.titles === "object" && !Array.isArray(value.titles) ? value.titles.canonical : value.title);
+  } catch {
+    throw new ReadError("bad_answer");
+  }
   const title = plain(string(value.normalizedtitle || value.title));
   return {
     title: canonical,
@@ -987,7 +1000,10 @@ var Wikipedia = class {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
     if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
     this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
@@ -1017,7 +1033,8 @@ var Wikipedia = class {
       void reader.cancel().catch(() => {
       });
     };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -1031,6 +1048,9 @@ var Wikipedia = class {
         }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally {
       signal.removeEventListener("abort", cancel);
       reader.releaseLock();
@@ -1056,11 +1076,12 @@ var Wikipedia = class {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal) {
+  async read(path, fresh, signal, validate) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1081,13 +1102,15 @@ var Wikipedia = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
+        validate(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        const failure = error instanceof ReadError ? error : signal?.aborted && signal.reason instanceof ReadError ? signal.reason : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1112,19 +1135,25 @@ var Wikipedia = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async today(date = dateAt(this.now()), refresh = false, signal) {
-    const path = feedPath(date), rd = await this.read(path, refresh ? 0 : this.limits.feedFresh, signal);
+    const path = feedPath(date), rd = await this.read(path, refresh ? 0 : this.limits.feedFresh, signal, (raw, at) => {
+      parseFeed(raw, this.language, date, at);
+    });
     return { ...parseFeed(rd.raw, this.language, date, rd.at), stale: rd.stale };
   }
   async article(title, refresh = false, signal) {
-    const rd = await this.read(summaryPath(title), refresh ? 0 : this.limits.articleFresh, signal);
+    const rd = await this.read(summaryPath(title), refresh ? 0 : this.limits.articleFresh, signal, (raw) => {
+      parseArticle(raw, this.language);
+    });
     return parseArticle(rd.raw, this.language);
   }
   async search(query, limit = 30, signal) {
-    const rd = await this.read(searchPath(query, limit), this.limits.feedFresh, signal);
+    const rd = await this.read(searchPath(query, limit), this.limits.feedFresh, signal, (raw) => {
+      parseSearch(raw, this.language);
+    });
     return parseSearch(rd.raw, this.language);
   }
   cacheStats() {
@@ -1148,26 +1177,45 @@ function line(article, index) {
    ${article.url}
 ${article.extract ? "   " + clip(article.extract, 600) + "\n" : ""}`;
 }
-function argsFrom(raw, exact) {
+function argsFrom(raw, exact, stringFields, allowLimit) {
   if (exact) {
+    if (exact.raw === "null") return {};
+    if (!exact.raw.startsWith("{")) throw new ReadError("invalid");
     const args = {};
-    for (const key of ["query", "title"]) for (const token of exact.fieldValues(key)) {
+    for (const key of stringFields) for (const token of exact.fieldValues(key)) {
+      if (token.raw === "null") continue;
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args[key] = value2;
     }
-    args.limit = exact.int64Fields(["limit"]).limit;
+    if (allowLimit) {
+      let hasLimit = false;
+      let limit = 0n;
+      for (const token of exact.fieldValues("limit")) {
+        if (token.raw === "null") continue;
+        try {
+          limit = token.int64(limit);
+        } catch {
+          throw new ReadError("invalid");
+        }
+        hasLimit = true;
+      }
+      if (hasLimit) args.limit = limit;
+    }
     return args;
   }
   if (raw == null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) throw new ReadError("invalid");
   const value = raw;
-  if (value.query != null && typeof value.query !== "string" || value.title != null && typeof value.title !== "string") throw new ReadError("invalid");
-  if (value.limit != null && (typeof value.limit !== "number" || !Number.isSafeInteger(value.limit))) throw new ReadError("invalid");
+  for (const key of stringFields) if (value[key] != null && typeof value[key] !== "string") throw new ReadError("invalid");
+  if (allowLimit && value.limit != null && (typeof value.limit !== "number" || !Number.isSafeInteger(value.limit))) throw new ReadError("invalid");
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
-  const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
+  if (name !== "wikipedia_today" && name !== "wikipedia_search" && name !== "wikipedia_article") throw unknownMethod(`connector.tools.${name}`);
+  const stringFields = name === "wikipedia_search" ? ["query"] : name === "wikipedia_article" ? ["title"] : [];
+  const args = argsFrom(raw, exact, stringFields, name === "wikipedia_search"), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "wikipedia_today") {
       const feed = await service.today(dateAt(service.now()), false, request.signal);
@@ -1184,21 +1232,29 @@ ${t.history}
     }
     if (name === "wikipedia_search") {
       if (typeof args.query !== "string" || !args.query.trim() || Array.from(args.query).length > 200) throw new ReadError("invalid");
-      const limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 30) throw new ReadError("invalid");
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 30n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 30) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
       const articles = await service.search(args.query, limit, request.signal);
       return clip(articles.length ? articles.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29999);
     }
-    if (name === "wikipedia_article") {
-      if (typeof args.title !== "string") throw new ReadError("invalid");
-      const article = await service.article(args.title, false, request.signal);
-      return clip(`${article.heading}
+    if (typeof args.title !== "string") throw new ReadError("invalid");
+    const article = await service.article(args.title, false, request.signal);
+    return clip(`${article.heading}
 ${article.description}
 ${article.url}
 
 ${article.extract}`.trim(), 29999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    if (!(error instanceof ReadError) && !signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1250,8 +1306,29 @@ function readState(raw) {
   }
 }
 var encodeState = (state) => JSON.stringify(state);
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "-" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
+function articleActionID(title) {
+  const direct = `article:${title}`;
+  return Array.from(direct).length <= 128 ? direct : boundedID("open-article:", title);
+}
 function transition(state, id, values = {}) {
-  const [kind, argument] = id.split(":", 2);
+  const sep = id.indexOf(":");
+  const kind = sep < 0 ? id : id.slice(0, sep);
+  const argument = sep < 0 ? "" : id.slice(sep + 1);
   let fields2;
   if (typeof values === "string") {
     try {
@@ -1271,6 +1348,7 @@ function transition(state, id, values = {}) {
       return query ? { ...state, v: "search", q: query, a: "" } : state;
     }
     if (kind === "article" && argument) return { ...state, v: "article", a: titleKey(argument) };
+    if (kind === "open-article" && string2("article")) return { ...state, v: "article", a: titleKey(string2("article")) };
     if (kind === "back") return { ...state, v: state.q ? "search" : "today", a: "" };
     if (kind === "home") return { ...initialState, d: state.d };
   } catch {
@@ -1285,14 +1363,14 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "today", feed: await service.today(state.d || dateAt(service.now()), refresh, request.signal) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
   const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? service.timezone;
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "today", state: encodeState(next), ...title ? { title } : {} } } : { id });
+  const act = (id, next, title, values) => props.action?.(id, next, title, values) ?? (next && uiVersion >= 3 ? { id, push: { ui: "today", state: encodeState(next), ...title ? { title } : {} }, ...values && uiVersion >= 4 ? { values } : {} } : values && uiVersion >= 4 ? { id, values } : { id });
   const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 1900), style }, key);
   const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
     /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "query-field"),
@@ -1328,7 +1406,11 @@ function page(props) {
       /* @__PURE__ */ jsx(Section, { children: text("license", t.attribution, "caption") }, "attribution")
     ] }, "wikipedia");
   }
-  const articleRow = (article, index) => /* @__PURE__ */ jsx(Row, { title: article.heading, subtitle: [article.description, article.views !== void 0 ? fmt(t.views, { views: article.views.toLocaleString("en-US") }) : ""].filter(Boolean).join(" \xB7 "), action: act(`article:${article.title}`, { ...state, v: "article", a: article.title }, article.heading) }, `article-${index}-${article.title}`);
+  const articleRow = (article, index) => {
+    const id = articleActionID(article.title);
+    const values = id.startsWith("open-article:") ? { article: article.title } : void 0;
+    return /* @__PURE__ */ jsx(Row, { title: article.heading, subtitle: [article.description, article.views !== void 0 ? fmt(t.views, { views: article.views.toLocaleString("en-US") }) : ""].filter(Boolean).join(" \xB7 "), action: act(id, { ...state, v: "article", a: article.title }, article.heading, values) }, boundedID(`article-${index}-`, article.title));
+  };
   if (state.v === "search") {
     if (loaded.kind !== "search") throw new ReadError("invalid");
     return /* @__PURE__ */ jsxs(View, { title: fmt(t.results, { query: clip(state.q, 100) }), state: encodeState(state), children: [
@@ -1361,7 +1443,7 @@ function Root(options) {
   const [state, setState] = useState(() => readState(options.state));
   const [refresh, setRefresh] = useState(0);
   const [result, setResult] = useState(void 0);
-  const identity = `${state.v}:${state.t}:${state.a}:${state.q}:${state.d}:${refresh}`;
+  const identity = JSON.stringify([state.v, state.t, state.a, state.q, state.d, refresh]);
   useLoadEffect(async (signal) => {
     const loaded = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded) ? previous : { service: options.service, identity, loaded });
@@ -1375,6 +1457,7 @@ function Root(options) {
         const push = { ui: "today", state: encodeState(next), ...title ? { title } : {} };
         return callback(() => ({ push }), { push });
       }
+      if (next) return callback(() => setState(next));
       return callback((values) => {
         if (id === "refresh") setRefresh((previous) => previous + 1);
         else setState((previous) => transition(previous, id, values));

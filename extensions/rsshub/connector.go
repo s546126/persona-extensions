@@ -163,8 +163,8 @@ func (a *app) status() map[string]any {
 	h := a.health()
 	if h.Config != nil {
 		return map[string]any{"state": "not_configured", "error": h.Config.Error(), "guide": []string{
-			"在扩展设置里把「RSSHub 实例地址」改成 https:// 网址，或者本机的 http://127.0.0.1:端口",
-			"清空它就用公共实例 https://rsshub.app"}}
+			"在这个扩展的设置里把「RSSHub 服务地址」改成以 https:// 开头的地址；装在本机的 RSSHub 可以写 http://127.0.0.1:端口",
+			"清空它就用默认的免费公共服务 https://rsshub.app"}}
 	}
 	st := map[string]any{"state": "ok", "account": h.Host}
 	if !h.OK.IsZero() {

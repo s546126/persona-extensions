@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { gemName, gemPath, parseGem, parseSearch, queryText, ReadError, searchPath } from "../src/model.ts";
-import { gemTransition, encodeState, initialState, readState, transition } from "../src/page.tsx";
-import { detailResponse, rack, rails } from "./fixtures.ts";
+import { Renderer } from "@persona/extension/ui";
+import { clip, gemName, gemPath, httpsURL, parseGem, parseSearch, queryText, ReadError, searchPath } from "../src/model.ts";
+import { dateText } from "../src/i18n.ts";
+import { gemTransition, encodeState, initialState, page, readState, transition } from "../src/page.tsx";
+import { RubyGems } from "../src/service.ts";
+import { detailResponse, Fixture, rack, rails } from "./fixtures.ts";
 
 test("official JSON requests bound queries and gem names", () => {
   const url = new URL("https://rubygems.org" + searchPath("ruby rails"));
@@ -55,4 +58,101 @@ test("page state accepts only validated search results and HTTPS metadata", () =
   assert.deepEqual(readState(encodeState(detail)), detail);
   assert.deepEqual(readState(encodeState({ ...detail, gem: { ...detail.gem!, repository: "javascript:alert(1)" } })), initialState);
   assert.equal(transition(state, "search", { query: "rails" }).found, true);
+});
+
+test("clip, dateText, URL length, lone surrogates and duplicate runtime dependencies are hardened", () => {
+  assert.equal(clip("abcdef", 4), "abc…");
+  assert.equal(Array.from(clip("abcdef", 4)).length, 4);
+  assert.equal(clip("😀😀😀😀", 3), "😀😀…");
+  assert.equal(clip("abcdef", 0), "");
+  assert.equal(clip("abcdef", -5), "");
+  assert.equal(clip("abcdef", Number.NaN), "");
+  assert.equal(dateText("not-a-date"), "");
+  assert.throws(() => queryText("bad\ud800query"), ReadError);
+  assert.equal(httpsURL("https://example.com/" + "a".repeat(4100)), undefined);
+
+  // Duplicate runtime dependency names must be rejected by parseGem so view keys never collide.
+  assert.throws(() => parseGem({
+    ...detailResponse,
+    dependencies: {
+      development: [],
+      runtime: [
+        { name: "actionpack", requirements: ">= 7.0" },
+        { name: "actionpack", requirements: "< 9.0" },
+      ],
+    },
+  }, 0), ReadError);
+});
+
+test("page enforces CheckView text (<=2000), item, key, state and frame budgets", () => {
+  const service = new RubyGems(new Fixture().fetch, {}, { locale: "en", limits: { gap: 0 } });
+  const render = (node: ReturnType<typeof page>) => {
+    const renderer = new Renderer({ authorize: () => false });
+    try { return renderer.mount(node).view; }
+    finally { renderer.dispose(); }
+  };
+
+  // Detail with oversized description and duplicate dependencies passed directly to page() must stay valid.
+  const baseDetail = parseGem(detailResponse, 0);
+  const detailView = render(page({
+    service,
+    state: { q: "rails", found: true, gem: parseSearch([rails], 0).gems[0] },
+    loaded: {
+      kind: "detail",
+      result: {
+        gem: {
+          ...baseDetail,
+          description: "D".repeat(3000),
+          dependencies: [
+            { name: "actionpack", requirements: ">= 7.0" },
+            { name: "actionpack", requirements: "< 9.0" },
+          ],
+        },
+        at: 0,
+      },
+    },
+    uiVersion: 5,
+  }));
+  const detailKeys = new Set<string>();
+  for (const section of detailView.sections) {
+    assert.ok(Array.from(section.key).length <= 128);
+    assert.equal(detailKeys.has(section.key), false);
+    detailKeys.add(section.key);
+    for (const item of section.items) {
+      assert.ok(typeof item.key === "string" && Array.from(item.key).length <= 128);
+      assert.equal(detailKeys.has(item.key), false);
+      detailKeys.add(item.key);
+      if (item.type === "text") assert.ok(Array.from(item.text).length <= 2000, `text exceeds 2000 runes: ${Array.from(item.text).length}`);
+    }
+  }
+
+  // Duplicate and many gems passed directly to page() must respect ItemsMost = 300 and 512 KiB frame budget.
+  const oneGem = parseSearch([rails], 0).gems[0];
+  const dupView = render(page({
+    service,
+    state: { q: "rails", found: true },
+    loaded: { kind: "results", result: { gems: [oneGem, { ...oneGem }], at: 0 } },
+    uiVersion: 5,
+  }));
+  assert.ok(dupView.sections.length > 0);
+
+  const manyGems = Array.from({ length: 120 }, (_, i) => ({
+    ...oneGem,
+    name: `gem-${i}`,
+    url: `https://rubygems.org/gems/gem-${i}`,
+    description: "d".repeat(500),
+  }));
+  const largeView = render(page({
+    service,
+    state: { q: "gem", found: true },
+    loaded: { kind: "results", result: { gems: manyGems, at: 0 } },
+    uiVersion: 5,
+  }));
+  const totalItems = largeView.sections.reduce((sum, s) => sum + s.items.length, 0);
+  assert.ok(totalItems <= 300, `items exceeded 300: ${totalItems}`);
+  assert.ok(new TextEncoder().encode(JSON.stringify(largeView)).byteLength <= 512 * 1024);
+
+  // Invalid state passed directly to page() must be normalized.
+  const badStateView = render(page({ service, state: { q: "bad\nquery", found: true }, loaded: { kind: "empty" }, uiVersion: 5 }));
+  assert.equal(badStateView.state, encodeState(initialState));
 });

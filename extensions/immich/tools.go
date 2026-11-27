@@ -51,11 +51,11 @@ func decode(raw json.RawMessage, out any) error {
 func formatAsset(item asset) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Asset %s: %s\n  Type: %s | captured: %s | favorite: %v | visibility: %s\n", item.ID, clipText(item.OriginalFileName, 500), item.Type, item.FileCreatedAt, item.IsFavorite, item.Visibility)
-	if item.Exif.City != "" || item.Exif.Country != "" {
-		b.WriteString("  Location: " + clipText(item.Exif.City+", "+item.Exif.Country, 500) + "\n")
+	if loc := joinNonEmpty(", ", item.Exif.City, item.Exif.Country); loc != "" {
+		b.WriteString("  Location: " + clipText(loc, 500) + "\n")
 	}
-	if item.Exif.Make != "" || item.Exif.Model != "" {
-		b.WriteString("  Camera: " + clipText(item.Exif.Make+" "+item.Exif.Model, 500) + "\n")
+	if cam := joinNonEmpty(" ", item.Exif.Make, item.Exif.Model); cam != "" {
+		b.WriteString("  Camera: " + clipText(cam, 500) + "\n")
 	}
 	if item.Exif.Description != "" {
 		b.WriteString("  Description: " + clipText(item.Exif.Description, 3000) + "\n")
@@ -97,12 +97,14 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 			return "", err
 		}
 		var b strings.Builder
+		shown := 0
 		for _, item := range page.Assets.Items {
 			if !item.IsTrashed {
 				b.WriteString(formatAsset(item))
+				shown++
 			}
 		}
-		if len(page.Assets.Items) == 0 {
+		if shown == 0 {
 			b.WriteString("No assets matched.\n")
 		}
 		if page.Assets.NextCursor != nil && *page.Assets.NextCursor != "" {

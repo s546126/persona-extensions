@@ -19,7 +19,19 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Start < 0 || len(st.PaperID) > 100 || len([]rune(st.Query)) > maxQueryChars {
+	if err := r.DecodeState(&st); err != nil || st.Start < 0 || st.Start > maxViewPapers || len(st.PaperID) > 100 || len([]rune(st.Query)) > maxQueryChars || strings.ContainsRune(st.Query, 0) {
+		return pageState{}, errors.New("invalid page state")
+	}
+	switch st.Mode {
+	case "", "recent":
+		if st.PaperID != "" && !validID(st.PaperID) {
+			return pageState{}, errors.New("invalid page state")
+		}
+	case "detail":
+		if !validID(st.PaperID) {
+			return pageState{}, errors.New("invalid page state")
+		}
+	default:
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -40,12 +52,19 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Start, st.Mode = clipText(r.Values["q"], maxQueryChars), 0, ""
+		q := strings.ReplaceAll(r.Values["q"], "\x00", "")
+		st.Query, st.Start, st.Mode = clipText(q, maxQueryChars), 0, ""
 	case "recent":
 		st.Query, st.Start, st.Mode = "", 0, "recent"
 	case "more":
+		if st.Start+20 >= maxViewPapers {
+			return nil, errors.New("no more papers available")
+		}
 		st.Start += 20
 	case "detail":
+		if !validID(r.Values["id"]) {
+			return nil, errors.New("invalid arXiv ID")
+		}
 		st.Mode, st.PaperID = "detail", r.Values["id"]
 	case "back":
 		st.Mode, st.PaperID = "", ""
@@ -81,18 +100,31 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return nil, err
 	}
 	v := &wire.View{Title: t.papers, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
-	section := wire.Section{Title: fmt.Sprintf(t.results, len(feed.Entries))}
+	seen := make(map[string]struct{}, len(feed.Entries))
+	var rows []wire.Component
 	for _, item := range feed.Entries {
 		id := paperID(item)
-		if id == "" || item.Title == "" {
+		title := strings.Join(strings.Fields(item.Title), " ")
+		if id == "" || title == "" {
 			continue
 		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		var authors []string
 		for _, author := range item.Authors {
 			authors = append(authors, author.Name)
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "paper-" + id, Title: clipText(strings.Join(strings.Fields(item.Title), " "), 1800), Subtitle: clipText(strings.Join(authors, ", ")+" · "+item.Category.Term, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": id}}})
+		rows = append(rows, wire.Component{
+			Type:     wire.ComponentRow,
+			Key:      "paper-" + id,
+			Title:    clipText(title, 1800),
+			Subtitle: clipText(strings.Join(authors, ", ")+" · "+item.Category.Term, 1800),
+			Action:   &wire.Action{ID: "detail", Values: map[string]string{"id": id}},
+		})
 	}
+	section := wire.Section{Title: fmt.Sprintf(t.results, len(rows)), Items: rows}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noPapers})
 	}
@@ -109,14 +141,18 @@ func detailView(r *ext.UIRequest, st pageState, item paper) *wire.View {
 	for _, author := range item.Authors {
 		authors = append(authors, author.Name)
 	}
-	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(t.authors+": "+strings.Join(authors, ", "), 1800)}, {Type: wire.ComponentText, Text: t.category + ": " + item.Category.Term + " · " + t.published + ": " + item.Published}}
+	items := []wire.Component{
+		{Type: wire.ComponentText, Text: clipText(t.authors+": "+strings.Join(authors, ", "), 1800)},
+		{Type: wire.ComponentText, Text: clipText(t.category+": "+item.Category.Term+" · "+t.published+": "+item.Published, 1800)},
+	}
 	if link := paperURL(item); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
 	v := &wire.View{Title: clipText(strings.Join(strings.Fields(item.Title), " "), 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.papers, Items: items}}}
-	if item.Summary != "" {
-		v.Sections = append(v.Sections, wire.Section{Title: t.abstract, Items: textComponents(strings.Join(strings.Fields(item.Summary), " "))})
+	summary := strings.Join(strings.Fields(item.Summary), " ")
+	if summary != "" {
+		v.Sections = append(v.Sections, wire.Section{Title: t.abstract, Items: textComponents(summary)})
 	} else {
 		v.Sections = append(v.Sections, wire.Section{Title: t.abstract, Items: []wire.Component{{Type: wire.ComponentText, Text: t.noAbstract, Style: wire.TextStyleSecondary}}})
 	}

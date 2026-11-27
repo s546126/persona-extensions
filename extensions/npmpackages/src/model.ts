@@ -4,7 +4,14 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
 export function packageName(value: unknown): string {
   if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
@@ -14,7 +21,7 @@ export function packageName(value: unknown): string {
   return name;
 }
 export function queryText(value: unknown): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 200) throw new ReadError("invalid");
   return query;
@@ -48,7 +55,7 @@ function httpsURL(value: unknown, hosts?: Set<string>): string | undefined {
   const raw = string(value).trim().replace(/^git\+/, "").replace(/\.git(?:$|(?=[#?]))/, "");
   let url: URL;
   try { url = new URL(raw); } catch { throw new ReadError("bad_answer"); }
-  if (url.protocol !== "https:" || url.username || url.password || url.port || url.pathname.includes("..") || (hosts && !hosts.has(url.hostname))) throw new ReadError("bad_answer");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.pathname.includes("..") || url.href.length > 4096 || (hosts && !hosts.has(url.hostname))) throw new ReadError("bad_answer");
   return url.href;
 }
 export interface PackageSummary {
@@ -63,7 +70,7 @@ export interface DetailResult { package: PackageDetail; at: number; downloadsSta
 function license(value: unknown): string {
   if (value && typeof value === "object" && !Array.isArray(value)) value = (value as Record<string, unknown>).type;
   const license = clip(oneLine(string(value, "Unspecified")), 120);
-  if (!license || /[\u0000-\u001f\u007f]/u.test(license)) throw new ReadError("bad_answer");
+  if (!license || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(license)) throw new ReadError("bad_answer");
   return license;
 }
 // optionalLink is a repository or homepage link as https, or nothing. Package metadata often writes the repository as
@@ -85,7 +92,9 @@ function summary(value: unknown): PackageSummary {
   if (!url) throw new ReadError("bad_answer");
   const published = item.date == null ? undefined : item.date;
   if (published !== undefined && (typeof published !== "string" || !Number.isFinite(Date.parse(published)))) throw new ReadError("bad_answer");
-  return { name, version, description: clip(oneLine(string(item.description, "")), 500), license: license(item.license), url, ...(repository(item.repository ?? links.repository) ? { repository: repository(item.repository ?? links.repository) } : {}), ...(optionalLink(item.homepage ?? links.homepage) ? { homepage: optionalLink(item.homepage ?? links.homepage) } : {}), ...(published ? { published: published as string } : {}) };
+  const repoURL = repository(item.repository ?? links.repository);
+  const homeURL = optionalLink(item.homepage ?? links.homepage);
+  return { name, version, description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), license: license(item.license), url, ...(repoURL ? { repository: repoURL } : {}), ...(homeURL ? { homepage: homeURL } : {}), ...(published ? { published: published as string } : {}) };
 }
 export function parseSearch(raw: unknown, at: number): SearchResult {
   const root = object(raw), objects = array(root.objects), total = integer(root.total, 1_000_000_000_000), seen = new Set<string>();
@@ -100,7 +109,7 @@ export function parseSearch(raw: unknown, at: number): SearchResult {
 export function parsePackage(raw: unknown, at: number): PackageDetail {
   const item = object(raw), summaryValue = summary({ ...item, links: { npm: `https://www.npmjs.com/package/${packageName(item.name)}`, repository: item.repository, homepage: item.homepage } });
   const engines = item.engines == null ? {} : object(item.engines), parts: string[] = [];
-  for (const key of ["node", "npm", "pnpm", "yarn", "bun"].filter(key => engines[key] != null).slice(0, 5)) parts.push(`${key} ${clip(oneLine(string(engines[key])), 100)}`);
+  for (const key of ["node", "npm", "pnpm", "yarn", "bun"].filter(key => engines[key] != null).slice(0, 5)) parts.push(`${key} ${clip(oneLine(string(engines[key]).replace(/[\ud800-\udfff]/gu, "")), 100)}`);
   const dependencies = item.dependencies == null ? {} : object(item.dependencies), dist = item.dist == null ? {} : object(item.dist);
   const unpackedSize = dist.unpackedSize == null ? undefined : integer(dist.unpackedSize, 2_000_000_000_000);
   return { ...summaryValue, install: `npm install ${summaryValue.name}@${summaryValue.version}`, engines: parts.join(" · "), dependencies: Object.keys(dependencies).length, ...(unpackedSize === undefined ? {} : { unpackedSize }), types: typeof item.types === "string" || typeof item.typings === "string" };

@@ -114,3 +114,27 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     assert.ok(JSON.stringify(searched).includes("Left Hand of Darkness"));
   } finally { h.p.close(); }
 });
+
+test("ExactJSON rejects limit: 0, unknown tool checks before args, and refresh resets on navigation", async () => {
+  const h = await setup();
+  try {
+    const zeroLimit = await h.call("connector.tools.call", { name: "openlibrary_search", args: { query: "synthetic", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
+    const unknownTool = await h.call("connector.tools.call", { name: "openlibrary_unknown", args: { limit: "bad" } });
+    assert.equal(unknownTool.error?.code, "unknown_method");
+
+    const searchPath = "/search.json?q=synthetic&limit=20&fields=key%2Ctitle%2Cauthor_name%2Cfirst_publish_year%2Cedition_count%2Cebook_access%2Cpublic_scan_b%2Cia";
+    await h.call("ui.page.mount", { session: "refresh-reset", params: { contribution: "openlibrary", locale: "en", ui_version: 1 } });
+    let snap = await settled(h, "refresh-reset", "book-welcome-text");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "book-search-submit", { query: "synthetic" }) });
+    snap = await settled(h, "refresh-reset", "Left Hand of Darkness");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "book-OL59800W") });
+    snap = await settled(h, "refresh-reset", "A synthetic description of a novel.");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "work-refresh") });
+    snap = await settled(h, "refresh-reset", "A synthetic description of a novel.");
+    const hitsBeforeBack = h.fixture.hits.get(searchPath) ?? 0;
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "work-back") });
+    await settled(h, "refresh-reset", "Pride and Prejudice");
+    assert.equal(h.fixture.hits.get(searchPath), hitsBeforeBack, "refresh must reset after navigating back");
+  } finally { h.p.close(); }
+});

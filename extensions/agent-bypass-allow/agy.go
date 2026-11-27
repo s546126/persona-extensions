@@ -81,7 +81,7 @@ func installAgyHookWith(path, matcher, cmd string) (bool, error) {
 			var spec jsonObject
 			if json.Unmarshal(m.Val, &spec) != nil {
 				if m.Key == currentExtensionID || m.Key == legacyExtensionID {
-					return false, fmt.Errorf("hooks.%s is not an object", m.Key)
+					return false, fmt.Errorf("%w: hooks.%s is not an object", errSettingsFormat, m.Key)
 				}
 				keep = append(keep, m)
 				continue
@@ -234,7 +234,7 @@ func agyPreToolGroups(spec *jsonObject) ([]json.RawMessage, bool, error) {
 	}
 	var groups []json.RawMessage
 	if err := json.Unmarshal(raw, &groups); err != nil {
-		return nil, true, fmt.Errorf("PreToolUse is not a list: %w", err)
+		return nil, true, fmt.Errorf("%w: PreToolUse is not a list", errSettingsFormat)
 	}
 	return groups, true, nil
 }

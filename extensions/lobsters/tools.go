@@ -47,11 +47,11 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 	switch name {
 	case "lobsters_stories":
 		var in struct {
-			Filter   string
-			Tags     []string
-			Query    string
-			MinScore int
-			Limit    int
+			Filter   string   `json:"filter"`
+			Tags     []string `json:"tags"`
+			Query    string   `json:"query"`
+			MinScore int      `json:"min_score"`
+			Limit    int      `json:"limit"`
 		}
 		if err := decode(raw, &in); err != nil {
 			return "", err
@@ -70,7 +70,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if err != nil {
 			return "", err
 		}
-		filtered := filterStories(items, a.cfg, in.Tags, in.Query, in.MinScore)
+		filtered := filterStories(items, a.currentConfig(), in.Tags, in.Query, in.MinScore)
 		if in.Limit == 0 {
 			in.Limit = 20
 		}
@@ -84,7 +84,9 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return b.String(), nil
 	case "lobsters_story":
-		var in struct{ ID string }
+		var in struct {
+			ID string `json:"id"`
+		}
 		if err := decode(raw, &in); err != nil {
 			return "", err
 		}

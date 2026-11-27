@@ -1,7 +1,7 @@
 import { ExtError, noContribution, unknownMethod, withExactParams, type ExactJSON, type Handler } from "@persona/extension";
 import { clip, queryText, ReadError, repositoryName, type ImageDetail, type ImageSummary } from "./model.ts";
 import { dateText, errorText, fmt, number, textsFor } from "./i18n.ts";
-import { budget, type DockerHub } from "./service.ts";
+import { budget, checkSignal, type DockerHub } from "./service.ts";
 export function toolsFor(locale = "en") {
   const t = textsFor(locale);
   return [
@@ -20,12 +20,23 @@ function detailText(image: ImageDetail, locale: string): string {
 }
 function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
     for (const field of ["query", "name"]) for (const token of exact.fieldValues(field)) {
+      if (token.raw === "null") { delete args[field]; continue; }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args[field] = value;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = Number(limit);
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") { hasLimit = false; limit = 0n; continue; }
+      try { limit = token.int64(limit); } catch { throw new ReadError("invalid"); }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -36,19 +47,30 @@ function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   return value;
 }
 export async function callTool(service: DockerHub, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
+  if (name !== "dockerhub_search" && name !== "dockerhub_repository") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "dockerhub_search") {
-      const query = queryText(args.query), limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
+      const query = queryText(args.query);
+      let limit = 10;
+      if (args.limit != null) {
+        if (typeof args.limit === "bigint") {
+          if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+          limit = Number(args.limit);
+        } else {
+          if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+          limit = args.limit;
+        }
+      }
       const result = await service.search(query, limit, false, request.signal);
       return clip((result.images.length ? result.images.map((image, index) => summaryLine(image, index, service.locale)).join("\n") : t.empty) + `\n${t.attribution}${result.stale ? `\n${errorText(result.stale, service.locale)}` : ""}`, 29_999);
     }
-    if (name === "dockerhub_repository") {
-      const result = await service.repository(repositoryName(args.name), false, request.signal);
-      return clip(detailText(result.image, service.locale) + `\n${t.attribution}${result.stale ? `\n${errorText(result.stale, service.locale)}` : ""}`, 29_999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    const result = await service.repository(repositoryName(args.name), false, request.signal);
+    return clip(detailText(result.image, service.locale) + `\n${t.attribution}${result.stale ? `\n${errorText(result.stale, service.locale)}` : ""}`, 29_999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally { request.dispose(); }
 }
 export function connector(getService: () => DockerHub): Handler { return withExactParams(async (method, params: unknown, call) => {

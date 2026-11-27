@@ -12,9 +12,10 @@ import (
 	"github.com/nwverse/persona/sdk/go/wire"
 )
 
-// The nav page "RSSHub": the instance and the unread count on top, then either the latest entries with the
-// subscriptions grouped by tag, one feed's entries, one entry's text, or a route's preview; a form at the bottom
-// previews or subscribes to a route.
+// The nav page "网站订阅": what it is for and how it stands on top (sources, unread, last check, the RSSHub instance,
+// what is failing), then either the latest entries with the subscriptions grouped by tag, one feed's entries, one
+// entry's text, or a source's preview; a form at the bottom previews or subscribes to a source. The words are in
+// words.go.
 
 const (
 	pageEntries    = 30
@@ -53,29 +54,29 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if arg != "" {
 			n, err := a.refresh(ctx, arg)
 			if err != nil {
-				toast = "刷新失败：" + clip(oneLine(err.Error()), 120)
+				toast = explain(err.Error()).toast("没读到：")
 			} else {
-				toast = fmt.Sprintf("刷新好了，新增 %d 条", n)
+				toast = freshWords(n)
 			}
 			a.badge()
 			break
 		}
 		if a.health().Config != nil {
-			toast = a.health().Config.Error()
+			toast = explain(a.health().Config.Error()).toast("")
 			break
 		}
 		n, failed := a.refreshAll(ctx)
-		toast = fmt.Sprintf("刷新好了，新增 %d 条", n)
+		toast = freshWords(n)
 		if failed > 0 {
-			toast += fmt.Sprintf("，%d 个订阅没读到", failed)
+			toast += fmt.Sprintf("；%d 个网站没读到，点开标着「出错」的看原因", failed)
 		}
 	case "ping":
 		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
 		if err := a.ping(ctx); err != nil {
-			toast = "连不上实例：" + clip(oneLine(err.Error()), 120)
+			toast = explain(err.Error()).toast("连不上 RSSHub：")
 		} else {
-			toast = "实例连通"
+			toast = "能连上 RSSHub"
 		}
 	case "feed":
 		st.Feed, st.Entry, st.Preview = arg, "", ""
@@ -92,7 +93,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err != nil {
 			toast = err.Error()
 		} else {
-			toast = fmt.Sprintf("%d 条标为已读", n)
+			toast = fmt.Sprintf("%d 篇标为已读", n)
 		}
 	case "only_unread":
 		st.Unread = !st.Unread
@@ -112,7 +113,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		route := strings.TrimSpace(firstNonEmpty(r.Values["route"], arg))
 		p, err := a.preview(ctx, route)
 		if err != nil {
-			toast = err.Error()
+			toast = explain(err.Error()).toast("")
 			break
 		}
 		a.keepPreview(p)
@@ -124,12 +125,12 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		f, added, n, err := a.subscribe(ctx, route, r.Values["title"], r.Values["tag"])
 		switch {
 		case err != nil:
-			toast = clip(oneLine(err.Error()), 200)
+			toast = explain(err.Error()).toast("没订阅上：")
 		case !added:
 			toast = "已经订阅过了"
 			st.Feed, st.Preview, st.Entry = f.ID, "", ""
 		default:
-			toast = fmt.Sprintf("订阅了「%s」，读到 %d 条", f.name(), n)
+			toast = fmt.Sprintf("订阅了「%s」，现在有 %d 篇", f.name(), n)
 			st.Feed, st.Preview, st.Entry = f.ID, "", ""
 		}
 	case "unsubscribe":
@@ -142,6 +143,14 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		st.Feed, st.Entry = "", ""
 	}
 	return &wire.ActionResult{View: a.page(r, st), Toast: toast}, nil
+}
+
+// freshWords is the toast after a check: how many new entries it found.
+func freshWords(n int) string {
+	if n == 0 {
+		return "检查完了，没有新文章"
+	}
+	return fmt.Sprintf("检查完了，有 %d 篇新文章", n)
 }
 
 // ping asks the instance for its front page: whether it answers at all.
@@ -162,11 +171,13 @@ func (a *app) ping(ctx context.Context) error {
 
 // --- drawing ---
 
+const timeFormat = "01-02 15:04"
+
 func (a *app) page(r *ext.UIRequest, st pageState) *wire.View {
 	loc := zone(r.TZ)
 	st0 := a.feeds()
 	feeds := st0.list()
-	v := &wire.View{Title: "RSSHub", Sections: []wire.Section{a.overview(r, feeds)}}
+	v := &wire.View{Title: pageTitle, Sections: []wire.Section{a.overview(r, feeds, loc)}}
 	switch {
 	case st.Entry != "":
 		if f, e, ok := st0.entryByID(st.Entry); ok {
@@ -194,7 +205,7 @@ func (a *app) page(r *ext.UIRequest, st pageState) *wire.View {
 		}
 		fallthrough
 	default:
-		v.Sections = append(v.Sections, a.latest(r, st, loc))
+		v.Sections = append(v.Sections, a.latest(r, st, feeds))
 		v.Sections = append(v.Sections, feedGroups(feeds, loc)...)
 	}
 	v.Sections = append(v.Sections, addSection(st))
@@ -205,69 +216,135 @@ func (a *app) page(r *ext.UIRequest, st pageState) *wire.View {
 	return v
 }
 
-func (a *app) overview(r *ext.UIRequest, feeds []feed) wire.Section {
+// pageTitle is the page's and the navigation entry's name (persona-extension.json contributes.ui).
+const pageTitle = "网站订阅"
+
+// lastCheck is when any feed was last read, zero before the first.
+func lastCheck(feeds []feed) time.Time {
+	var t time.Time
+	for _, f := range feeds {
+		if f.LastFetch.After(t) {
+			t = f.LastFetch
+		}
+	}
+	return t
+}
+
+// overview is the top of the page: what this is, how it stands (sources, unread, last check, the RSSHub service)
+// and what is wrong, with the buttons that act on everything.
+func (a *app) overview(r *ext.UIRequest, feeds []feed, loc *time.Location) wire.Section {
 	h := a.health()
 	unread := 0
+	var failing []string
 	for _, f := range feeds {
 		unread += f.unread()
+		if f.LastError != "" {
+			failing = append(failing, "「"+clip(f.name(), 40)+"」")
+		}
 	}
-	state, tone := "未检查", wire.ToneNeutral
+	// Until something is read through RSSHub (a source previewed or read, or the button below) nothing has asked
+	// the service; with nothing subscribed the stat says nothing needs doing, so "not tried" is not read as a task.
+	state, tone := "还没用到", wire.ToneNeutral
 	switch {
 	case h.Config != nil:
-		state, tone = "地址不对", wire.ToneDanger
+		state, tone = "地址填错了", wire.ToneDanger
 	case h.failing():
 		state, tone = "连不上", wire.ToneDanger
 	case !h.OK.IsZero():
-		state, tone = "连通", wire.TonePositive
+		state, tone = "能连上", wire.TonePositive
 	}
-	sec := wire.Section{}
+	service := clip(h.Host, 60)
+	switch {
+	case h.Config != nil:
+		service = "设置里的地址用不了"
+	case h.Host == "rsshub.app":
+		service = "免费公共服务 rsshub.app"
+	}
+	if len(feeds) == 0 && h.Config == nil && !h.failing() && h.OK.IsZero() {
+		service += "；" + serviceIdleNote
+	}
+	checked := "还没检查过"
+	if t := lastCheck(feeds); !t.IsZero() {
+		checked = t.In(loc).Format(timeFormat)
+	}
+	every := int(h.Every / time.Minute)
+	sec := wire.Section{Items: []wire.Component{{Type: wire.ComponentText, Text: introText}}}
 	if r.UIVersion >= 2 {
 		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentStatGrid, Stats: []wire.Stat{
-			{Label: "未读", Value: strconv.Itoa(unread)},
-			{Label: "订阅", Value: strconv.Itoa(len(feeds))},
-			{Label: "实例", Value: state, Detail: clip(h.Host, 60), Tone: tone},
+			{Label: "订阅的网站", Value: strconv.Itoa(len(feeds))},
+			{Label: "未读文章", Value: strconv.Itoa(unread)},
+			{Label: "上次检查", Value: checked, Detail: fmt.Sprintf("每 %d 分钟自动检查", every)},
+			{Label: "RSSHub 服务", Value: state, Detail: service, Tone: tone},
 		}})
 	} else {
 		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText,
-			Text: fmt.Sprintf("未读 %d · 订阅 %d · 实例 %s（%s）", unread, len(feeds), clip(h.Host, 60), state)})
+			Text: fmt.Sprintf("订阅了 %d 个网站 · 未读 %d 篇 · 上次检查：%s · RSSHub 服务：%s（%s）", len(feeds), unread, checked, state, service)})
+	}
+	if len(failing) > 0 {
+		names := failing
+		if len(names) > 5 {
+			names = append(names[:5:5], "等")
+		}
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText,
+			Text: fmt.Sprintf("有 %d 个网站上次没读到：%s。点开下面标着「出错」的网站，看原因和怎么办。", len(failing), strings.Join(names, ""))})
 	}
 	switch {
 	case h.Config != nil:
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText, Text: h.Config.Error(), Style: wire.TextStyleSecondary})
+		sec.Items = append(sec.Items, problemTexts("", explain(h.Config.Error()))...)
 	case h.failing():
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText, Text: clip("上次没连上："+oneLine(h.Err.Error()), pageTextMost), Style: wire.TextStyleSecondary})
+		sec.Items = append(sec.Items, problemTexts("上次连不上 RSSHub：", explain(h.Err.Error()))...)
 	}
-	sec.Items = append(sec.Items,
-		wire.Component{Type: wire.ComponentButton, Title: "全部刷新", Action: &wire.Action{ID: "refresh"}},
-		wire.Component{Type: wire.ComponentButton, Title: "全部标为已读", Action: &wire.Action{ID: "read", Confirm: "把所有订阅的条目都标为已读？"}},
-		wire.Component{Type: wire.ComponentButton, Title: "检查实例连通", Action: &wire.Action{ID: "ping"}},
-	)
-	sec.Footer = fmt.Sprintf("每 %d 分钟在后台刷新", int(h.Every/time.Minute))
+	if len(feeds) > 0 {
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Title: "现在检查更新", Action: &wire.Action{ID: "refresh"}})
+	}
+	if unread > 0 {
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Title: "全部标为已读", Action: &wire.Action{ID: "read", Confirm: "把所有网站的文章都标为已读？"}})
+	}
+	sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Title: "试试能不能连上 RSSHub", Action: &wire.Action{ID: "ping"}})
+	sec.Footer = fmt.Sprintf("每 %d 分钟自动检查一次有没有新文章；间隔和 RSSHub 服务地址在这个扩展的设置里改，一般不用改。", every)
 	return sec
 }
 
-// latest is the newest entries of every feed (or the unread ones).
-func (a *app) latest(r *ext.UIRequest, st pageState, loc *time.Location) wire.Section {
+// problemTexts is a failure on the page: what happened and what to do, then the raw message in small print.
+func problemTexts(prefix string, p problem) []wire.Component {
+	out := []wire.Component{
+		{Type: wire.ComponentText, Text: clip(prefix+p.Cause+"。", pageTextMost)},
+		{Type: wire.ComponentText, Text: clip("怎么办："+p.Todo+"。", pageTextMost)},
+	}
+	if p.Detail != "" {
+		out = append(out, wire.Component{Type: wire.ComponentText, Text: clip(detailPrefix+p.Detail, pageTextMost), Style: wire.TextStyleCaption})
+	}
+	return out
+}
+
+// latest is the newest entries of every feed (or the unread ones), or what to do first when there are none.
+func (a *app) latest(r *ext.UIRequest, st pageState, feeds []feed) wire.Section {
 	list, total := a.feeds().entries(entryFilter{UnreadOnly: st.Unread, Limit: pageEntries})
-	title := "最新条目"
+	title := "最新文章"
 	if st.Unread {
-		title = "未读条目"
+		title = "未读文章"
 	}
 	sec := wire.Section{Title: title}
+	if len(feeds) == 0 {
+		sec.Items = append(sec.Items, emptyItems(r, "还没有订阅任何网站",
+			"在下面「添加订阅」里粘贴一个地址，先点「先看看」确认能读到，再点「订阅」。不知道填什么，就点下面的按钮试一个例子。",
+			&wire.EmptyButton{Title: "试一个例子：" + exampleRouteTitle, Action: wire.Action{ID: "preview:" + exampleRoute}})...)
+		return sec
+	}
 	sec.Items = append(sec.Items, unreadToggle(r, st))
 	if len(list) == 0 {
-		text := "还没有条目：在下面预览或订阅一条 RSSHub 路由"
+		text, detail := "订阅的网站暂时还没有文章", fmt.Sprintf("每 %d 分钟会自动检查一次，也可以点上面的「现在检查更新」。", int(a.health().Every/time.Minute))
 		if st.Unread {
-			text = "没有未读的了"
+			text, detail = "没有未读的了", ""
 		}
-		sec.Items = append(sec.Items, emptyState(r, text))
+		sec.Items = append(sec.Items, emptyState(r, text, detail, nil))
 		return sec
 	}
 	for _, e := range list {
-		sec.Items = append(sec.Items, entryRow(e.entry, e.FeedName, loc))
+		sec.Items = append(sec.Items, entryRow(e.entry, e.FeedName, zone(r.TZ)))
 	}
 	if total > len(list) {
-		sec.Footer = fmt.Sprintf("共 %d 条，这里是最新的 %d 条", total, len(list))
+		sec.Footer = fmt.Sprintf("一共 %d 篇，这里是最新的 %d 篇", total, len(list))
 	}
 	return sec
 }
@@ -288,11 +365,26 @@ func unreadToggle(r *ext.UIRequest, st pageState) wire.Component {
 	return wire.Component{Type: wire.ComponentButton, Title: title, Action: &wire.Action{ID: "only_unread"}}
 }
 
-func emptyState(r *ext.UIRequest, text string) wire.Component {
+// emptyState is "nothing here" with what to do next; an app before UI version 3 gets texts and a button.
+func emptyState(r *ext.UIRequest, title, detail string, button *wire.EmptyButton) wire.Component {
 	if r.UIVersion >= 3 {
-		return wire.Component{Type: wire.ComponentEmpty, Title: text, Icon: wire.NavIconList}
+		return wire.Component{Type: wire.ComponentEmpty, Title: title, Detail: detail, Icon: wire.NavIconList, Button: button}
+	}
+	text := title
+	if detail != "" {
+		text += "。" + detail
 	}
 	return wire.Component{Type: wire.ComponentText, Text: text, Style: wire.TextStyleSecondary}
+}
+
+// emptyItems is emptyState with, for an older app, its button as a button of its own.
+func emptyItems(r *ext.UIRequest, title, detail string, button *wire.EmptyButton) []wire.Component {
+	out := []wire.Component{emptyState(r, title, detail, button)}
+	if r.UIVersion < 3 && button != nil {
+		act := button.Action
+		out = append(out, wire.Component{Type: wire.ComponentButton, Title: button.Title, Action: &act})
+	}
+	return out
 }
 
 func entryRow(e entry, from string, loc *time.Location) wire.Component {
@@ -301,7 +393,7 @@ func entryRow(e entry, from string, loc *time.Location) wire.Component {
 		sub = append(sub, from)
 	}
 	if t := e.when(); !t.IsZero() {
-		sub = append(sub, t.In(loc).Format("01-02 15:04"))
+		sub = append(sub, t.In(loc).Format(timeFormat))
 	}
 	if e.Summary != "" {
 		sub = append(sub, e.Summary)
@@ -321,7 +413,7 @@ func feedGroups(feeds []feed, loc *time.Location) []wire.Section {
 	}
 	var out []wire.Section
 	for _, t := range tagsOf(feeds) {
-		sec := wire.Section{Title: "订阅 · " + t}
+		sec := wire.Section{Title: "我订阅的 · " + t}
 		for _, f := range feeds {
 			if f.tag() != t {
 				continue
@@ -330,7 +422,7 @@ func feedGroups(feeds []feed, loc *time.Location) []wire.Section {
 				Action: &wire.Action{ID: "feed:" + f.ID}}
 			switch {
 			case f.LastError != "":
-				row.Badge = &wire.Badge{Text: "失败", Tone: wire.ToneDanger}
+				row.Badge = &wire.Badge{Text: "出错", Tone: wire.ToneDanger}
 			case f.unread() > 0:
 				row.Badge = &wire.Badge{Text: strconv.Itoa(f.unread()), Tone: wire.ToneCaution}
 			}
@@ -341,32 +433,45 @@ func feedGroups(feeds []feed, loc *time.Location) []wire.Section {
 	return out
 }
 
+// fetchState is how a feed's last check went, short.
 func fetchState(f feed, loc *time.Location) string {
 	switch {
 	case f.LastFetch.IsZero():
-		return "还没刷新"
+		return "还没检查过"
 	case f.LastError != "":
-		return f.LastFetch.In(loc).Format("01-02 15:04") + " 失败：" + f.LastError
+		return f.LastFetch.In(loc).Format(timeFormat) + " 没读到：" + explain(f.LastError).Cause
 	}
-	return f.LastOK.In(loc).Format("01-02 15:04") + " 刷新"
+	return f.LastOK.In(loc).Format(timeFormat) + " 检查过"
 }
 
-// feedSections is one feed: what it is, its buttons and its entries.
+// feedSections is one feed: what it is, how its last check went, its buttons and its entries.
 func feedSections(r *ext.UIRequest, f feed, st pageState, loc *time.Location) []wire.Section {
 	head := wire.Section{Title: clip(f.name(), 200), Items: []wire.Component{
-		{Type: wire.ComponentText, Text: clip(fmt.Sprintf("%s · 分类 %s · 未读 %d / %d · %s", f.Source, f.tag(), f.unread(), len(f.Entries), fetchState(f, loc)), pageTextMost), Style: wire.TextStyleSecondary},
+		{Type: wire.ComponentText, Text: clip(fmt.Sprintf("地址 %s · 分类 %s · 未读 %d 篇，一共 %d 篇", f.Source, f.tag(), f.unread(), len(f.Entries)), pageTextMost), Style: wire.TextStyleSecondary},
 	}}
+	switch {
+	case f.LastFetch.IsZero():
+		head.Items = append(head.Items, wire.Component{Type: wire.ComponentText, Text: "还没检查过，稍后会自动检查。", Style: wire.TextStyleSecondary})
+	case f.LastError != "":
+		head.Items = append(head.Items, problemTexts("上次检查（"+f.LastFetch.In(loc).Format(timeFormat)+"）没读到：", explain(f.LastError))...)
+	default:
+		head.Items = append(head.Items, wire.Component{Type: wire.ComponentText, Text: "上次检查 " + f.LastOK.In(loc).Format(timeFormat) + "，一切正常。", Style: wire.TextStyleSecondary})
+	}
 	if httpsLink(f.SiteLink) {
 		head.Items = append(head.Items, wire.Component{Type: wire.ComponentLink, Title: "打开网站", URL: f.SiteLink})
 	}
 	head.Items = append(head.Items,
-		wire.Component{Type: wire.ComponentButton, Title: "刷新", Action: &wire.Action{ID: "refresh:" + f.ID}},
-		wire.Component{Type: wire.ComponentButton, Title: "全部标为已读", Action: &wire.Action{ID: "read:" + f.ID}},
+		wire.Component{Type: wire.ComponentButton, Title: "现在检查更新", Action: &wire.Action{ID: "refresh:" + f.ID}},
+	)
+	if f.unread() > 0 {
+		head.Items = append(head.Items, wire.Component{Type: wire.ComponentButton, Title: "全部标为已读", Action: &wire.Action{ID: "read:" + f.ID}})
+	}
+	head.Items = append(head.Items,
 		wire.Component{Type: wire.ComponentButton, Title: "取消订阅", Role: wire.ButtonRoleDestructive,
-			Action: &wire.Action{ID: "unsubscribe:" + f.ID, Confirm: "取消订阅「" + clip(f.name(), 60) + "」？它的条目会一起删掉。"}},
+			Action: &wire.Action{ID: "unsubscribe:" + f.ID, Confirm: "取消订阅「" + clip(f.name(), 60) + "」？它的文章会一起删掉。"}},
 		wire.Component{Type: wire.ComponentButton, Title: "返回", Action: &wire.Action{ID: "back"}},
 	)
-	list := wire.Section{Title: "条目"}
+	list := wire.Section{Title: "文章"}
 	list.Items = append(list.Items, unreadToggle(r, st))
 	n := 0
 	for _, e := range f.Entries {
@@ -379,7 +484,11 @@ func feedSections(r *ext.UIRequest, f feed, st pageState, loc *time.Location) []
 		list.Items = append(list.Items, entryRow(e, "", loc))
 	}
 	if n == 0 {
-		list.Items = append(list.Items, emptyState(r, "没有条目"))
+		text := "这个网站还没有文章"
+		if st.Unread {
+			text = "没有未读的了"
+		}
+		list.Items = append(list.Items, emptyState(r, text, "", nil))
 	}
 	return []wire.Section{head, list}
 }
@@ -408,7 +517,7 @@ func entrySection(f feed, e entry, loc *time.Location) []wire.Section {
 	case httpsLink(e.Link):
 		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentLink, Title: "打开原文", URL: e.Link})
 	case e.Link != "":
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText, Text: clip(e.Link, pageTextMost), Style: wire.TextStyleCaption})
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText, Text: clip("原文链接："+e.Link, pageTextMost), Style: wire.TextStyleCaption})
 	}
 	sec.Items = append(sec.Items,
 		wire.Component{Type: wire.ComponentButton, Title: "标回未读", Action: &wire.Action{ID: "unread:" + e.ID}},
@@ -444,44 +553,46 @@ func bodyTexts(s string) []wire.Component {
 	return out
 }
 
-// previewSection is a route read without subscribing.
+// previewSection is a source read without subscribing: what it has now, or why it could not be read.
 func previewSection(p *preview, loc *time.Location) wire.Section {
-	sec := wire.Section{Title: "预览 · " + clip(p.Source, 200)}
+	sec := wire.Section{Title: "先看看 · " + clip(p.Source, 200)}
 	if p.Err != "" {
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText, Text: clip("读不到："+p.Err, pageTextMost), Style: wire.TextStyleSecondary})
+		sec.Items = append(sec.Items, problemTexts("没读到：", explain(p.Err))...)
 	} else {
 		f := p.Feed
 		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentText,
-			Text: clip(fmt.Sprintf("%s · %d 条 · %s 读取", firstNonEmpty(f.Title, p.Source), len(f.Entries), p.At.In(loc).Format("15:04")), pageTextMost), Style: wire.TextStyleSecondary})
+			Text: clip(fmt.Sprintf("「%s」能读到，现在有 %d 篇（%s 读的）。合适就点「订阅这个」，以后有新文章会出现在这里。", firstNonEmpty(f.Title, p.Source), len(f.Entries), p.At.In(loc).Format("15:04")), pageTextMost), Style: wire.TextStyleSecondary})
 		for i, pe := range f.Entries {
 			if i >= 15 {
 				break
 			}
 			var sub []string
 			if !pe.Published.IsZero() {
-				sub = append(sub, pe.Published.In(loc).Format("01-02 15:04"))
+				sub = append(sub, pe.Published.In(loc).Format(timeFormat))
 			}
 			if pe.Summary != "" {
 				sub = append(sub, pe.Summary)
 			}
 			sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: clip(firstNonEmpty(pe.Title, "（无标题）"), 300), Subtitle: clip(strings.Join(sub, " · "), 300)})
 		}
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Title: "订阅这条", Action: &wire.Action{ID: "subscribe", Submit: true}})
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Title: "订阅这个", Action: &wire.Action{ID: "subscribe", Submit: true}})
 	}
 	sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentButton, Title: "返回", Action: &wire.Action{ID: "back"}})
 	return sec
 }
 
-// addSection is the form that previews or subscribes to a route.
+// addSection is the form that previews or subscribes to a source, with what can be pasted into it.
 func addSection(st pageState) wire.Section {
-	return wire.Section{Title: "预览或订阅", Items: []wire.Component{
-		{Type: wire.ComponentField, Name: "route", Label: "RSSHub 路由或订阅源网址", Kind: wire.FieldKindText, Value: st.Preview,
-			Placeholder: "/github/issue/nwverse/persona"},
-		{Type: wire.ComponentField, Name: "tag", Label: "分类（订阅时用）", Kind: wire.FieldKindText, Placeholder: "开发"},
-		{Type: wire.ComponentField, Name: "title", Label: "标题（可不填）", Kind: wire.FieldKindText},
-		{Type: wire.ComponentButton, Title: "预览", Action: &wire.Action{ID: "preview", Submit: true}},
+	return wire.Section{Title: "添加订阅", Items: []wire.Component{
+		{Type: wire.ComponentText, Text: addressHelp, Style: wire.TextStyleSecondary},
+		{Type: wire.ComponentField, Name: "route", Label: "要订阅的地址", Kind: wire.FieldKindText, Value: st.Preview,
+			Placeholder: "比如 " + exampleUPRoute + " 或 https://…/feed"},
+		{Type: wire.ComponentField, Name: "tag", Label: "分类（可不填，用来分组）", Kind: wire.FieldKindText, Placeholder: "比如 新闻、学习"},
+		{Type: wire.ComponentField, Name: "title", Label: "名字（可不填，默认用网站自己的）", Kind: wire.FieldKindText},
+		{Type: wire.ComponentButton, Title: "先看看", Action: &wire.Action{ID: "preview", Submit: true}},
 		{Type: wire.ComponentButton, Title: "订阅", Action: &wire.Action{ID: "subscribe", Submit: true}},
-	}, Footer: "路由写法见 docs.rsshub.app/routes，如 /github/trending/daily/go/en、/bilibili/user/video/2267573"}
+		{Type: wire.ComponentLink, Title: "查更多网站的 RSSHub 短地址", URL: routesDocs},
+	}, Footer: "「先看看」只读一次给你看，不会订阅；读得到再点「订阅」。"}
 }
 
 func zone(tz string) *time.Location {

@@ -22,7 +22,19 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Offset < 0 || st.CategoryID < 0 || len(st.StartDate) > 20 || len(st.EndDate) > 20 || len(st.Mode) > 30 || len(st.Kind) > 30 {
+	if err := r.DecodeState(&st); err != nil || st.Offset < 0 || st.Offset > maxViewOffset || st.CategoryID < 0 || len(st.StartDate) > 20 || len(st.EndDate) > 20 || len(st.Mode) > 30 || len(st.Kind) > 30 {
+		return pageState{}, errors.New("invalid page state")
+	}
+	switch st.Mode {
+	case "", "categories":
+		if st.Kind != "" {
+			return pageState{}, errors.New("invalid page state")
+		}
+	case "accounts":
+		if st.Kind != "manual_accounts" && st.Kind != "plaid_accounts" {
+			return pageState{}, errors.New("invalid page state")
+		}
+	default:
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -44,16 +56,18 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	switch r.Action {
 	case "filter":
 		st.StartDate, st.EndDate, st.Offset = strings.TrimSpace(r.Values["start_date"]), strings.TrimSpace(r.Values["end_date"]), 0
-		st.CategoryID, err = strconv.ParseInt(strings.TrimSpace(r.Values["category_id"]), 10, 64)
-		if r.Values["category_id"] == "" {
+		catRaw := strings.TrimSpace(r.Values["category_id"])
+		if catRaw == "" {
 			st.CategoryID, err = 0, nil
+		} else {
+			st.CategoryID, err = strconv.ParseInt(catRaw, 10, 64)
 		}
 		if err != nil || st.CategoryID < 0 {
 			return nil, errors.New("invalid category ID")
 		}
 	case "more":
 		st.Offset, err = strconv.Atoi(r.Values["offset"])
-		if err != nil || st.Offset < 50 {
+		if err != nil || st.Offset < 50 || st.Offset > maxViewOffset {
 			return nil, errors.New("invalid next offset")
 		}
 	case "categories":
@@ -73,19 +87,39 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 }
 
 // maxViewRecords is half the SDK's component limit: a transaction renders a line and a notes line.
-const maxViewRecords = 125
+const (
+	maxViewRecords = 125
+	maxViewItems   = 250
+	maxViewOffset  = 500
+)
 
 // collectTransactions reads the batches from the start through the one at offset so that Load more answers the whole
 // list, longer. It stops at maxViewRecords to keep the view within the SDK's component limit, and HasMore reports
 // whether another batch can be loaded.
 func (a *app) collectTransactions(ctx context.Context, start, end string, categoryID int64, offset int) (transactionPage, error) {
+	cl := a.currentClient()
 	var out transactionPage
+	seen := make(map[int64]struct{})
 	for pos := 0; pos <= offset && len(out.Transactions) < maxViewRecords; pos += 50 {
-		batch, err := a.client.transactions(ctx, start, end, categoryID, pos)
+		batch, err := cl.transactions(ctx, start, end, categoryID, pos)
 		if err != nil {
 			return transactionPage{}, err
 		}
-		out.Transactions = append(out.Transactions, batch.Transactions...)
+		added := 0
+		for _, tx := range batch.Transactions {
+			if tx.ID != 0 {
+				if _, dup := seen[tx.ID]; dup {
+					continue
+				}
+				seen[tx.ID] = struct{}{}
+			}
+			out.Transactions = append(out.Transactions, tx)
+			added++
+		}
+		if added == 0 {
+			out.HasMore = false
+			break
+		}
 		out.HasMore = batch.HasMore
 		if !batch.HasMore {
 			break
@@ -102,18 +136,29 @@ func (a *app) collectTransactions(ctx context.Context, start, end string, catego
 
 func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
-	if a.client.token == "" {
+	cl := a.currentClient()
+	if cl.token == "" {
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "categories" {
-		items, err := a.client.categories(ctx)
+		items, err := cl.categories(ctx)
 		a.record(err)
 		if err != nil {
 			return nil, err
 		}
 		section := wire.Section{Title: t.categories}
+		seen := make(map[int64]struct{}, min(len(items), maxViewItems))
 		for _, item := range items {
+			if item.ID != 0 {
+				if _, dup := seen[item.ID]; dup {
+					continue
+				}
+				seen[item.ID] = struct{}{}
+			}
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %d", item.Name, item.ID), 1800)})
+			if len(section.Items) >= maxViewItems {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noCategories})
@@ -121,14 +166,24 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Title: t.categories, State: ext.EncodeState(st), Sections: []wire.Section{section, {Items: []wire.Component{{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}}}}}}, nil
 	}
 	if st.Mode == "accounts" {
-		items, err := a.client.accounts(ctx, st.Kind)
+		items, err := cl.accounts(ctx, st.Kind)
 		a.record(err)
 		if err != nil {
 			return nil, err
 		}
 		section := wire.Section{Title: t.accounts}
+		seen := make(map[int64]struct{}, min(len(items), maxViewItems))
 		for _, item := range items {
+			if item.ID != 0 {
+				if _, dup := seen[item.ID]; dup {
+					continue
+				}
+				seen[item.ID] = struct{}{}
+			}
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s · %s %s · %s", item.Name, item.Balance, item.Currency, item.asOf()), 1800)})
+			if len(section.Items) >= maxViewItems {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noAccounts})

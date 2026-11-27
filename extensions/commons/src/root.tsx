@@ -3,10 +3,10 @@ import { encodeState, loadPage, page, readState, transition, type Loaded } from 
 import type { Commons } from "./service.ts";
 export interface RootOptions { service: Commons; locale?: string; tz?: string; uiVersion?: number; state?: unknown }
 export function Root(options: RootOptions): Node {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState<{ service: Commons; identity: string; loaded: Loaded } | undefined>(undefined);
-  const identity = `${state.q}:${state.found}:${refresh}`;
+  const identity = JSON.stringify([state.q, state.found, refresh]);
   useLoadEffect(async signal => {
     const loaded = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult(previous => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded)
@@ -19,8 +19,11 @@ export function Root(options: RootOptions): Node {
         return callback(() => ({ push }), { push });
       }
       return callback(values => {
-        if (id === "refresh") setRefresh(previous => previous + 1);
-        else setState(previous => transition(previous, id, values));
+        if (id === "refresh") setView(previous => ({ state: previous.state, refresh: previous.refresh + 1 }));
+        else setView(previous => {
+          const nextState = transition(previous.state, id, values);
+          return nextState.q === previous.state.q && nextState.found === previous.state.found ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     } });
 }

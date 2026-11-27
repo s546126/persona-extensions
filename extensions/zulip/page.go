@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/nwverse/persona/sdk/go/ext"
@@ -17,9 +18,19 @@ type pageState struct {
 	Anchor   int64  `json:"a,omitempty"`
 }
 
+func validTopic(topic string) bool {
+	return len([]rune(topic)) <= maxTopicChars && !strings.ContainsAny(topic, "\x00\r\n")
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.StreamID < 0 || st.Anchor < 0 || len([]rune(st.Topic)) > maxTopicChars || len(st.Mode) > 30 {
+	if err := r.DecodeState(&st); err != nil || st.StreamID < 0 || st.Anchor < 0 || !validTopic(st.Topic) {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode != "" && st.Mode != "topics" && st.Mode != "messages" {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode == "topics" && st.StreamID <= 0 {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -46,7 +57,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		st.Mode, st.Topic, st.Anchor = "topics", "", 0
 	case "topic":
-		if len([]rune(r.Values["topic"])) > maxTopicChars || strings.ContainsAny(r.Values["topic"], "\x00\r\n") {
+		if !validTopic(r.Values["topic"]) {
 			return nil, errors.New("invalid topic name")
 		}
 		st.Mode, st.Topic, st.Anchor = "messages", r.Values["topic"], 0
@@ -56,7 +67,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, errors.New("invalid older message anchor")
 		}
 	case "back":
-		st.Mode, st.Topic, st.Anchor = "", "", 0
+		st = pageState{}
 	default:
 		return nil, fmt.Errorf("unknown page action %q", r.Action)
 	}
@@ -66,11 +77,12 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 
 func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
-	if a.client.base == "" || a.client.email == "" || a.client.token == "" {
+	c := a.currentClient()
+	if c.base == "" || c.email == "" || c.token == "" {
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	if st.Mode == "topics" {
-		items, err := a.client.topics(ctx, st.StreamID)
+		items, err := c.topics(ctx, st.StreamID)
 		a.record(err)
 		if err != nil {
 			return nil, err
@@ -78,7 +90,15 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		section := wire.Section{Title: t.topics}
 		// Zulip lists the most recent topic first; the view keeps the first maxViewTopics.
 		for i, item := range items[:min(len(items), maxViewTopics)] {
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("topic-%d", i), Title: clipText(item.Name, 1800), Subtitle: fmt.Sprintf(t.latest, item.MaxID), Action: &wire.Action{ID: "topic", Values: map[string]string{"topic": item.Name}}})
+			title := strings.TrimSpace(item.Name)
+			if title == "" {
+				title = t.emptyTopic
+			}
+			row := wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("topic-%d", i), Title: clipText(title, 1800), Subtitle: fmt.Sprintf(t.latest, item.MaxID)}
+			if validTopic(item.Name) {
+				row.Action = &wire.Action{ID: "topic", Values: map[string]string{"topic": item.Name}}
+			}
+			section.Items = append(section.Items, row)
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noTopics})
@@ -86,7 +106,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return &wire.View{Title: t.topics, State: ext.EncodeState(st), Sections: []wire.Section{section, {Items: []wire.Component{{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}}}}}}, nil
 	}
 	if st.Mode == "messages" {
-		page, err := a.client.messages(ctx, st.StreamID, st.Topic, st.Anchor, st.Anchor == 0)
+		page, err := c.messages(ctx, st.StreamID, st.Topic, st.Anchor, st.Anchor == 0)
 		a.record(err)
 		if err != nil {
 			return nil, err
@@ -94,9 +114,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		section := wire.Section{Title: t.messages}
 		var oldest int64
 		var shown [][]wire.Component
+		seen := map[int64]bool{}
 		for _, item := range page.Messages {
-			if oldest == 0 || item.ID < oldest {
-				oldest = item.ID
+			if item.ID > 0 {
+				if seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+				if oldest == 0 || item.ID < oldest {
+					oldest = item.ID
+				}
 			}
 			shown = append(shown, textComponents(clipText(fmt.Sprintf("%s · %s\n%s", item.SenderFullName, item.Subject, item.Content), 12000)))
 		}
@@ -106,7 +133,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noMessages})
 		}
-		if !page.FoundOldest && oldest > 0 {
+		if !page.FoundOldest && oldest > 0 && (st.Anchor == 0 || oldest < st.Anchor) {
 			st.Anchor = oldest
 			section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more", Values: map[string]string{"anchor": fmt.Sprint(oldest)}}}
 		}
@@ -115,17 +142,26 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if st.Mode != "" {
 		return nil, errors.New("invalid inbox view")
 	}
-	items, err := a.client.streams(ctx)
+	items, err := c.streams(ctx)
 	a.record(err)
 	if err != nil {
 		return nil, err
 	}
 	section := wire.Section{Title: t.streams}
+	seen := map[int64]bool{}
 	for _, item := range items {
-		if item.IsArchived {
+		if item.IsArchived || item.ID <= 0 || seen[item.ID] {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("stream-%d", item.ID), Title: clipText(item.Name, 1800), Subtitle: clipText(item.Description, 1800), Action: &wire.Action{ID: "stream", Values: map[string]string{"stream_id": fmt.Sprint(item.ID)}}})
+		if len(section.Items) >= maxViewItems {
+			break
+		}
+		seen[item.ID] = true
+		title := strings.TrimSpace(item.Name)
+		if title == "" {
+			title = fmt.Sprintf("#%d", item.ID)
+		}
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("stream-%d", item.ID), Title: clipText(title, 1800), Subtitle: clipText(item.Description, 1800), Action: &wire.Action{ID: "stream", Values: map[string]string{"stream_id": fmt.Sprint(item.ID)}}})
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noStreams})
@@ -142,6 +178,12 @@ const maxViewItems = 250
 // fitMessages cuts the longest messages to a common length, so that together they have at most n components and the
 // short ones are whole. A cut message ends with a mark.
 func fitMessages(messages [][]wire.Component, n int) [][]wire.Component {
+	if n <= 0 {
+		return nil
+	}
+	if len(messages) > n {
+		messages = messages[:n]
+	}
 	limit := 1
 	for l := 240; l > 1; l-- {
 		total := 0
@@ -164,8 +206,11 @@ func fitMessages(messages [][]wire.Component, n int) [][]wire.Component {
 }
 
 func parsePositiveID(raw string) (int64, error) {
-	var id int64
-	if _, err := fmt.Sscan(raw, &id); err != nil || id <= 0 {
+	if raw == "" || strings.TrimSpace(raw) != raw || strings.HasPrefix(raw, "+") {
+		return 0, errors.New("invalid positive ID")
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
 		return 0, errors.New("invalid positive ID")
 	}
 	return id, nil

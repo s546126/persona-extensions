@@ -24,8 +24,9 @@ func TestTypePacksAndLearning(t *testing.T) {
 		_, men := r.Predicates["mentors"]
 		_, srv := r.Predicates["serves"]
 		_, circ := r.Predicates["same_circle"]
-		if rep != tc.work || men != tc.work || srv != tc.life || circ != tc.life {
-			t.Errorf("use %q: work %v/%v life %v/%v", tc.use, rep, men, srv, circ)
+		_, about := r.Predicates["about"]
+		if rep != tc.work || men != tc.work || srv != tc.life || circ || about {
+			t.Errorf("use %q: work %v/%v life %v stopped %v/%v", tc.use, rep, men, srv, circ, about)
 		}
 	}
 	var table []entry.TypeDef
@@ -46,7 +47,7 @@ func TestTypePacksAndLearning(t *testing.T) {
 	if _, ok := r.WithPacks(Packs(""), table).Predicates["hands_over_to"]; !ok {
 		t.Fatal("a learned type is not in the registry")
 	}
-	for _, bad := range []string{"cites", "attended", "参加了", "引用了", "mentions"} {
+	for _, bad := range []string{"cites", "attended", "参加了", "引用了", "mentions", "about", "same_circle"} {
 		if tb, _ := Propose(nil, bad, false); len(tb) != 0 {
 			t.Errorf("%s was counted", bad)
 		}

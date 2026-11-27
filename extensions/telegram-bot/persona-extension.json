@@ -1,0 +1,41 @@
+{
+  "manifest_version": 1,
+  "id": "telegram-bot",
+  "name": "Telegram 机器人",
+  "version": "0.1.0",
+  "icon": "assets/icon.png",
+  "description": "Telegram 机器人：通过官方 Bot API（@BotFather 令牌 + 私聊 6 位配对码）在 Telegram 里和 Persona 对话；只转发绑定人的私聊消息，支持图片、文件、引用回复、正在输入和主动推送，支持可选 HTTP(S) 代理。登录信息加密保存在 hub，升级无需重新绑定。",
+  "publisher": "nwverse",
+  "tags": ["聊天", "Telegram"],
+  "engines": {"persona": ">=202611041602", "plugin_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/telegram-bot-linux-amd64",
+      "linux-arm64": "bin/telegram-bot-linux-arm64",
+      "darwin-arm64": "bin/telegram-bot-darwin-arm64",
+      "darwin-amd64": "bin/telegram-bot-darwin-amd64"
+    }
+  },
+  "contributes": {
+    "connectors": [{"id": "telegrambot", "name": "Telegram 机器人", "capabilities": ["status", "login"]}],
+    "channel": [{
+      "id": "telegrambot",
+      "name": "Telegram 机器人",
+      "kind": "im",
+      "connector": "telegrambot",
+      "bind": "fields",
+      "description": "在 Telegram 里私聊自己的 Bot：填 BotFather 令牌并用配对码绑定本人，消息进主对话，回答发回 Telegram",
+      "capabilities": {
+        "images_in": true,
+        "images_out": true,
+        "files_in": true,
+        "format": "plain",
+        "max_text": 4000,
+        "asks": "text",
+        "push": true,
+        "typing": true
+      }
+    }]
+  },
+  "permissions": {"network": ["api.telegram.org"]}
+}

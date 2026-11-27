@@ -52,8 +52,8 @@ func TestDegradedConfigurations(t *testing.T) {
 			return []string{"-memory-dir", empty}
 		}, func(t *testing.T, st *store.State) {
 			for _, e := range st.Entries {
-				if e.Origin == entry.Handwritten {
-					t.Errorf("a hand-written entry from an empty directory: %+v", e)
+				if entry.IsAssistantNote(e.Origin) {
+					t.Errorf("an assistant note entry from an empty directory: %+v", e)
 				}
 			}
 		}},

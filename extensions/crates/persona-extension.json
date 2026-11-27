@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "crates",
   "name": "Rust Crates",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "icon": "assets/icon.png",
   "description": "Search Rust crates on the official crates.io JSON API. Compare default versions, licenses, release dates, download activity, documentation and repository links. Get an exact-version cargo add command without executing it.",
   "publisher": "nwverse",
@@ -21,7 +21,7 @@
     "source": {
       "entry": "src/index.ts",
       "bundle": "build/crates.mjs",
-      "sha256": "e7caa4bbf5f19fc6064efdab78156814a5ee04f2a72bd0e9adcfc378c513c5be"
+      "sha256": "badd99409f13978cce515efbd40f000190d5930c2ea2a76d233de1201b0c0007"
     }
   },
   "contributes": {

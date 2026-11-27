@@ -44,6 +44,87 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unavailable"):
                 downloads.read_downloads("demo")
 
+    def test_package_url_uses_canonical_path_and_rejects_unsafe_ids(self):
+        self.assertEqual(
+            downloads.package_url("agent-bypass-allow"),
+            "https://github.com/nwverse/persona-extensions/pkgs/container/persona-extensions%2Fagent-bypass-allow",
+        )
+        for bad in ("../other", "UPPER", "has space", "a_b"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                downloads.package_url(bad)
+
+    def test_parse_retry_after_and_pacer_backoff(self):
+        now = downloads.datetime.datetime(2026, 11, 24, 10, 0, 0, tzinfo=downloads.datetime.timezone.utc)
+        self.assertEqual(downloads.parse_retry_after("7", now=now), 7.0)
+        self.assertEqual(downloads.parse_retry_after("0.2", now=now), 1.0)
+        self.assertEqual(downloads.parse_retry_after("999", now=now), downloads.MAX_RETRY_AFTER)
+        self.assertEqual(downloads.parse_retry_after("Tue, 24 Nov 2026 10:00:12 GMT", now=now), 12.0)
+        self.assertIsNone(downloads.parse_retry_after("not-a-delay", now=now))
+
+        clock_now = [100.0]
+        slept = []
+
+        def fake_clock():
+            return clock_now[0]
+
+        def fake_sleep(delay):
+            slept.append(delay)
+            clock_now[0] += delay
+
+        pacer = downloads.Pacer(min_interval=0.5, clock=fake_clock, sleeper=fake_sleep)
+        pacer.wait()
+        self.assertEqual(slept, [])
+        pacer.backoff(10.0)
+        pacer.wait()
+        self.assertEqual(slept, [10.0])
+
+    def test_429_honors_retry_after_and_fails_closed_after_max_attempts(self):
+        import email.message
+        import io
+        import urllib.error
+
+        def make_429(retry_after=None):
+            hdrs = email.message.Message()
+            if retry_after is not None:
+                hdrs["Retry-After"] = retry_after
+            return urllib.error.HTTPError("https://github.com/", 429, "Too Many Requests", hdrs, io.BytesIO(b""))
+
+        class FakeResponse:
+            status = 200
+            url = "https://github.com/nwverse/persona-extensions/pkgs/container/persona-extensions%2Fdemo"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, _limit):
+                return b'<span>Total downloads</span><h3 title="42">42</h3>'
+
+        slept = []
+        pacer = downloads.Pacer(min_interval=0.0, clock=lambda: 100.0, sleeper=slept.append)
+        err1 = make_429("17")
+        try:
+            with mock.patch.object(downloads.urllib.request, "urlopen", side_effect=[err1, FakeResponse()]):
+                count = downloads.read_downloads("demo", pacer=pacer, sleeper=slept.append)
+        finally:
+            err1.close()
+        self.assertEqual(count, 42)
+        self.assertGreaterEqual(pacer.next_at, 117.0)
+
+        direct_sleeps = []
+        errs = [make_429("3") for _ in range(downloads.MAX_ATTEMPTS)]
+        try:
+            with mock.patch.object(downloads.urllib.request, "urlopen", side_effect=errs):
+                with self.assertRaisesRegex(ValueError, "unavailable"):
+                    downloads.read_downloads("demo", sleeper=direct_sleeps.append)
+        finally:
+            for err in errs:
+                err.close()
+        self.assertEqual(len(direct_sleeps), downloads.MAX_ATTEMPTS - 1)
+        self.assertTrue(all(d == 3.0 for d in direct_sleeps))
+
     def test_sorting_is_numeric_descending_with_deterministic_ties(self):
         body = {"extensions": [{"manifest": {"id": name}} for name in ["a", "c", "b"]]}
         downloads.apply(body, {"downloads_updated_at": "2026-01-02T03:04:05Z", "downloads": {"a": 9, "b": 100, "c": 100}})

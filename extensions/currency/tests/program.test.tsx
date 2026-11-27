@@ -48,6 +48,29 @@ test("protocol initialization, localized tools and unknown contributions are SDK
     assert.equal((await h.call("connector.unsupported", {})).error.code, "unknown_method");
     assert.ok((await h.call("connector.tools.list", {})).result.tools[0].description.includes("欧州中央銀行"));
     assert.ok((await h.call("connector.tools.call", { name: "currency_convert", args: { amount: "1", from: "USD\n", to: "CNY" } })).error);
+    assert.equal((await h.call("connector.tools.call", { name: "unknown_tool", args: { amount: [] } })).error.code, "unknown_method");
+  } finally { h.p.close(); }
+});
+
+test("navigation resets refresh flag so switching pairs uses cached rates instead of forcing refresh", async () => {
+  const h = await setup();
+  try {
+    const eurPath = "/v2/providers/ecb/rates?base=eur&quotes=usd";
+    h.fixture.put(eurPath, [{ date: "2026-11-10", base: "EUR", quote: "USD", rate: 1.08 }]);
+    await h.call("ui.page.mount", { session: "nav-reset", params: { contribution: "converter", locale: "en", ui_version: 1 } });
+    let snap = await settled(h, "nav-reset", "currency-welcome-text");
+    await h.call("ui.page.event", { session: "nav-reset", ticket: "host-ticket", interaction: interaction(snap, "currency-convert", { amount: "10", from: "EUR", to: "USD" }) });
+    snap = await settled(h, "nav-reset", "10.8 USD");
+    assert.equal(h.fixture.hits.get(eurPath), 1);
+    await h.call("ui.page.event", { session: "nav-reset", ticket: "host-ticket", interaction: interaction(snap, "currency-convert", { amount: "10", from: "USD", to: "CNY" }) });
+    snap = await settled(h, "nav-reset", "66.703 CNY");
+    await h.call("ui.page.event", { session: "nav-reset", ticket: "host-ticket", interaction: interaction(snap, "currency-refresh") });
+    snap = await settled(h, "nav-reset", "66.703 CNY");
+    // Navigating back to EUR->USD should hit cache rather than forcing another network refresh.
+    await h.call("ui.page.event", { session: "nav-reset", ticket: "host-ticket", interaction: interaction(snap, "currency-convert", { amount: "10", from: "EUR", to: "USD" }) });
+    await settled(h, "nav-reset", "10.8 USD");
+    assert.equal(h.fixture.hits.get(eurPath), 1);
+    await h.call("ui.page.dispose", { session: "nav-reset" });
   } finally { h.p.close(); }
 });
 

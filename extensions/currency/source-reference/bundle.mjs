@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "currency", name: "\u6C47\u7387\u548C\u5355\u4F4D\u6362\u7B97", version: "0.1.3", icon: "assets/icon.png", description: "\u6362\u7B97\u5E38\u7528\u8D27\u5E01\u4E0E\u65E5\u5E38\u5355\u4F4D\u3002\u6C47\u7387\u4F7F\u7528\u6CE8\u660E\u65E5\u671F\u7684\u6B27\u6D32\u592E\u884C\u53C2\u8003\u6570\u636E\uFF1B\u957F\u5EA6\u3001\u8D28\u91CF\u3001\u6E29\u5EA6\u3001\u4F53\u79EF\u3001\u9762\u79EF\u3001\u901F\u5EA6\u3001\u65F6\u957F\u548C\u6570\u636E\u5355\u4F4D\u5728 hub \u672C\u5730\u6362\u7B97\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/currency/README.md", tags: ["\u8D27\u5E01", "\u6C47\u7387", "\u5355\u4F4D\u6362\u7B97"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/currency.mjs", sha256: "" } }, contributes: { connectors: [{ id: "currency", name: "Currency and units", capabilities: ["status", "tools"], hosts: ["api.frankfurter.dev"], agent_tools: ["currency_*", "unit_convert"] }], ui: [{ id: "converter", title: "\u6C47\u7387\u548C\u5355\u4F4D\u6362\u7B97", placement: "nav_page", icon: "money" }] }, permissions: { network: ["api.frankfurter.dev"] } };
+var persona_extension_default = { manifest_version: 1, id: "currency", name: "\u6C47\u7387\u548C\u5355\u4F4D\u6362\u7B97", version: "0.1.4", icon: "assets/icon.png", description: "\u6362\u7B97\u5E38\u7528\u8D27\u5E01\u4E0E\u65E5\u5E38\u5355\u4F4D\u3002\u6C47\u7387\u4F7F\u7528\u6CE8\u660E\u65E5\u671F\u7684\u6B27\u6D32\u592E\u884C\u53C2\u8003\u6570\u636E\uFF1B\u957F\u5EA6\u3001\u8D28\u91CF\u3001\u6E29\u5EA6\u3001\u4F53\u79EF\u3001\u9762\u79EF\u3001\u901F\u5EA6\u3001\u65F6\u957F\u548C\u6570\u636E\u5355\u4F4D\u5728 hub \u672C\u5730\u6362\u7B97\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/currency/README.md", tags: ["\u8D27\u5E01", "\u6C47\u7387", "\u5355\u4F4D\u6362\u7B97"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/currency.mjs", sha256: "" } }, contributes: { connectors: [{ id: "currency", name: "Currency and units", capabilities: ["status", "tools"], hosts: ["api.frankfurter.dev"], agent_tools: ["currency_*", "unit_convert"] }], ui: [{ id: "converter", title: "\u6C47\u7387\u548C\u5355\u4F4D\u6362\u7B97", placement: "nav_page", icon: "money" }] }, permissions: { network: ["api.frankfurter.dev"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 256 << 10, fresh: 6 * 60 * 6e4, cache: 32, cacheBytes: 256 << 10, gap: 200 });
@@ -779,10 +779,17 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text2, most) => text2.length <= most ? text2 : text2.slice(0, most).trimEnd() + "\u2026";
+var clip = (text2, most) => {
+  if (most <= 0) return "";
+  const chars = Array.from(text2);
+  if (chars.length <= most) return text2;
+  if (most === 1) return chars[0];
+  return chars.slice(0, most - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text2) => text2.replace(/\s+/gu, " ").trim();
+var hasLoneSurrogate = (value) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
 function text(value, most) {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value) || hasLoneSurrogate(value)) throw new ReadError("invalid");
   const result = oneLine(value);
   if (!result || Array.from(result).length > most) throw new ReadError("invalid");
   return result;
@@ -808,7 +815,7 @@ function decimal(value, name) {
   if (!/^[0-9]{1,18}(?:\.[0-9]{1,18})?$/.test(raw)) throw new ReadError(name === "amount" ? "invalid" : "bad_answer");
   const [whole, fraction2 = ""] = raw.split(".");
   const normalized = `${whole.replace(/^0+(?=\d)/, "")}${fraction2 ? `.${fraction2}` : ""}`;
-  if (name === "rate" && normalized === "0") throw new ReadError("bad_answer");
+  if (name === "rate" && BigInt(whole + fraction2) === 0n) throw new ReadError("bad_answer");
   return normalized;
 }
 function amount(value) {
@@ -844,7 +851,16 @@ function formatForDisplay(value, locale = "en") {
   const rounded = roundedNumber(value, 6);
   const [whole, fraction2 = ""] = rounded.split(".");
   if (whole.replace("-", "").length > 15) return rounded;
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: Math.min(6, fraction2.length) }).format(Number(rounded));
+  const options = { maximumFractionDigits: Math.min(6, fraction2.length) };
+  try {
+    return new Intl.NumberFormat(locale, options).format(Number(rounded));
+  } catch {
+  }
+  try {
+    return new Intl.NumberFormat("en", options).format(Number(rounded));
+  } catch {
+  }
+  return rounded;
 }
 function currencyConversion(value, rate) {
   return { amount: amount(value), from: rate.base, to: rate.quote, result: multiply(amount(value), rate.rate) };
@@ -954,13 +970,16 @@ function rationalText(value, maximumDigits = 18) {
   const negative = value.n < 0n, numerator = negative ? -value.n : value.n;
   const whole = numerator / value.d;
   let remainder = numerator % value.d, digits = "";
-  const recurring = value.d / 2n ** countFactor(value.d, 2n) / 5n ** countFactor(value.d, 5n) !== 1n;
+  if (maximumDigits <= 0) {
+    const roundedWhole = remainder * 2n >= value.d ? whole + 1n : whole;
+    return (negative && roundedWhole ? "-" : "") + roundedWhole.toString();
+  }
   for (let i = 0; i < maximumDigits && remainder; i++) {
     remainder *= 10n;
     const digit = remainder / value.d;
     digits += digit.toString();
     remainder %= value.d;
-    if (recurring && i === maximumDigits - 1 && remainder * 2n >= value.d) {
+    if (i === maximumDigits - 1 && remainder * 2n >= value.d) {
       const rounded = (BigInt(digits) + 1n).toString().padStart(maximumDigits, "0");
       return (negative ? "-" : "") + formatRounded(whole, rounded, maximumDigits);
     }
@@ -972,14 +991,6 @@ function formatRounded(whole, digits, maximumDigits) {
   if (digits.length > maximumDigits) return (whole + 1n).toString();
   const trimmed = digits.replace(/0+$/, "");
   return whole.toString() + (trimmed ? `.${trimmed}` : "");
-}
-function countFactor(value, factor) {
-  let count = 0n, rest = value;
-  while (rest % factor === 0n) {
-    rest /= factor;
-    count++;
-  }
-  return count;
 }
 
 // src/locales/en.json
@@ -1158,13 +1169,19 @@ var CurrencyService = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    return item && this.monotonic() - item.used < fresh ? { raw: item.raw, at: item.at } : void 0;
+    if (!item || this.monotonic() - item.used >= fresh) return void 0;
+    this.cache.delete(path);
+    this.cache.set(path, item);
+    return { raw: item.raw, at: item.at };
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
     this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
@@ -1187,6 +1204,21 @@ var CurrencyService = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1203,7 +1235,8 @@ var CurrencyService = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1224,20 +1257,18 @@ var CurrencyService = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text2);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal) {
+  async read(path, fresh, signal, validate) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1258,14 +1289,24 @@ var CurrencyService = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
+        validate?.(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted) {
+          const reason = signal.reason;
+          if (reason instanceof ReadError) {
+            if (reason.code !== "not_found") this.lastError = { code: reason.code, status: reason.status, at: this.monotonic() };
+            throw reason;
+          }
+          throw reason instanceof Error && reason.name === "AbortError" ? reason : new DOMException("Cancelled", "AbortError");
+        }
+        const failure = error instanceof ReadError ? error : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1290,12 +1331,14 @@ var CurrencyService = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async rate(base, quote, refresh = false, signal) {
     const a = currency(base), b = currency(quote);
-    const rd = await this.read(ratesPath(a, b), refresh ? 0 : this.limits.fresh, signal);
+    const rd = await this.read(ratesPath(a, b), refresh ? 0 : this.limits.fresh, signal, (raw, at) => {
+      parseRate(raw, a, b, at);
+    });
     return { ...parseRate(rd.raw, a, b, rd.at), stale: rd.stale };
   }
   cacheStats() {
@@ -1315,11 +1358,21 @@ function toolsFor(locale = "en") {
 var tools = toolsFor();
 function argsFrom(raw, exact2) {
   if (exact2) {
+    const trimmed = exact2.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const field of ["amount", "from", "to", "dimension"]) {
-      for (const token of exact2.fieldValues(field)) {
-        const value2 = JSON.parse(token.raw);
-        if (typeof value2 !== "string") throw new ReadError("invalid");
+      const tokens = [...exact2.fieldValues(field)];
+      if (tokens.length > 1) throw new ReadError("invalid");
+      if (tokens.length === 1) {
+        const value2 = JSON.parse(tokens[0].raw);
+        if (value2 == null) continue;
+        if (field === "amount") {
+          if (typeof value2 !== "string" && typeof value2 !== "number") throw new ReadError("invalid");
+        } else if (typeof value2 !== "string") {
+          throw new ReadError("invalid");
+        }
         args[field] = value2;
       }
     }
@@ -1333,21 +1386,22 @@ function argsFrom(raw, exact2) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact2) {
+  if (name !== "currency_convert" && name !== "unit_convert") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact2), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "currency_convert") {
-      const input = amount(args.amount), rate = await service.rate(args.from, args.to, false, request.signal), result = currencyConversion(input, rate);
-      return clip(`${input} ${rate.base} = ${result.result} ${rate.quote}
+      const input = amount(args.amount), rate = await service.rate(args.from, args.to, false, request.signal), result2 = currencyConversion(input, rate);
+      return clip(`${input} ${rate.base} = ${result2.result} ${rate.quote}
 ${fmt(t.rateDate, { date: rate.date })}
 ${t.attribution}${rate.stale ? `
 ${errorText(rate.stale, service.locale)}` : ""}`, 29999);
     }
-    if (name === "unit_convert") {
-      const result = unitConversion(args.amount, args.from, args.to, args.dimension == null ? void 0 : dimension(args.dimension));
-      return `${result.amount} ${result.from} = ${result.result} ${result.to}
+    const result = unitConversion(args.amount, args.from, args.to, args.dimension == null ? void 0 : dimension(args.dimension));
+    return `${result.amount} ${result.from} = ${result.result} ${result.to}
 ${t.local}`;
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+  } catch (error) {
+    if (!signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1380,22 +1434,35 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { mode: "currency", amount: "1", from: "USD", to: "CNY", dimension: "length", converted: false };
-function readState(raw) {
-  if (typeof raw !== "string" || raw.length > 2e3) return initialState;
+var STATE_MAX = 16384;
+var utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
+function safeState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return initialState;
+  const raw = value;
+  if (raw.mode !== "currency" && raw.mode !== "units" || typeof raw.converted !== "boolean") return initialState;
   try {
-    const value = JSON.parse(raw);
-    if (!value || Array.isArray(value) || value.mode !== "currency" && value.mode !== "units" || typeof value.converted !== "boolean") return initialState;
-    if (value.mode === "currency") {
-      return { mode: "currency", amount: amount(value.amount), from: currency(value.from), to: currency(value.to), dimension: "length", converted: value.converted };
+    if (raw.mode === "currency") {
+      return { mode: "currency", amount: amount(raw.amount), from: currency(raw.from), to: currency(raw.to), dimension: "length", converted: raw.converted };
     }
-    const d = dimension(value.dimension);
-    const parsed = unitConversion(value.amount, value.from, value.to, d);
-    return { mode: "units", amount: parsed.amount, from: parsed.from, to: parsed.to, dimension: d, converted: value.converted };
+    const d = dimension(raw.dimension);
+    const parsed = unitConversion(raw.amount, raw.from, raw.to, d);
+    return { mode: "units", amount: parsed.amount, from: parsed.from, to: parsed.to, dimension: d, converted: raw.converted };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+function readState(raw) {
+  if (typeof raw !== "string" || raw.length > 2e3) return initialState;
+  try {
+    return safeState(JSON.parse(raw));
+  } catch {
+    return initialState;
+  }
+}
+function encodeState(state) {
+  const encoded = JSON.stringify(safeState(state));
+  return utf8Bytes(encoded) <= STATE_MAX ? encoded : JSON.stringify(initialState);
+}
 function fields2(values) {
   if (typeof values === "string") {
     try {
@@ -1446,58 +1513,58 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "currency", rate, result: currencyConversion(state.amount, rate) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), locale = props.locale ?? service.locale;
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "converter", state: encodeState(next), ...title ? { title } : {} } } : { id });
+  const { service, loaded, uiVersion = 0 } = props, state = safeState(props.state), locale = props.locale ?? service.locale, t = textsFor(locale);
+  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "converter", state: encodeState(next), ...title ? { title: clip(title, 200) } : {} } } : { id });
   const text2 = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 1900), style }, key);
-  const modes = /* @__PURE__ */ jsx(Section, { children: uiVersion >= 2 ? /* @__PURE__ */ jsx(Segmented, { name: "tab", value: state.mode, choices: [{ value: "currency", title: t.currency }, { value: "units", title: t.units }], action: act("tab") }, "currency-mode") : ["currency", "units"].map((mode) => /* @__PURE__ */ jsx(Row, { title: t[mode], action: act(`mode:${mode}`), badge: state.mode === mode ? { text: t.choose, tone: "positive" } : void 0 }, `mode-${mode}`)) }, "currency-modes");
-  const editor = /* @__PURE__ */ jsxs(Section, { title: state.mode === "currency" ? t.currency : t.units, children: [
-    /* @__PURE__ */ jsx(Field, { name: "amount", label: t.amount, kind: "text", placeholder: "1", value: state.amount }, "currency-amount"),
-    /* @__PURE__ */ jsx(Field, { name: "from", label: t.from, kind: "text", placeholder: state.mode === "currency" ? t.currencyHint : t.unitHint, value: state.from }, "currency-from"),
-    /* @__PURE__ */ jsx(Field, { name: "to", label: t.to, kind: "text", placeholder: state.mode === "currency" ? t.currencyHint : t.unitHint, value: state.to }, "currency-to"),
-    /* @__PURE__ */ jsx(Button, { title: t.convert, action: act("convert") }, "currency-convert")
+  const modes = /* @__PURE__ */ jsx(Section, { children: uiVersion >= 2 ? /* @__PURE__ */ jsx(Segmented, { name: "tab", value: state.mode, choices: [{ value: "currency", title: clip(t.currency, 200) }, { value: "units", title: clip(t.units, 200) }], action: act("tab") }, "currency-mode") : ["currency", "units"].map((mode) => /* @__PURE__ */ jsx(Row, { title: clip(t[mode], 200), action: act(`mode:${mode}`), badge: state.mode === mode ? { text: clip(t.choose, 80), tone: "positive" } : void 0 }, `mode-${mode}`)) }, "currency-modes");
+  const editor = /* @__PURE__ */ jsxs(Section, { title: clip(state.mode === "currency" ? t.currency : t.units, 200), children: [
+    /* @__PURE__ */ jsx(Field, { name: "amount", label: clip(t.amount, 200), kind: "text", placeholder: "1", value: state.amount }, "currency-amount"),
+    /* @__PURE__ */ jsx(Field, { name: "from", label: clip(t.from, 200), kind: "text", placeholder: clip(state.mode === "currency" ? t.currencyHint : t.unitHint, 200), value: state.from }, "currency-from"),
+    /* @__PURE__ */ jsx(Field, { name: "to", label: clip(t.to, 200), kind: "text", placeholder: clip(state.mode === "currency" ? t.currencyHint : t.unitHint, 200), value: state.to }, "currency-to"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.convert, 200), action: act("convert") }, "currency-convert")
   ] }, "currency-editor");
   const attribution = /* @__PURE__ */ jsxs(Section, { children: [
     text2("currency-license", state.mode === "currency" ? t.attribution : t.unitAttribution, "caption"),
-    state.mode === "currency" ? /* @__PURE__ */ jsx(Link, { title: t.source, url: "https://frankfurter.dev/" }, "currency-source") : null
+    state.mode === "currency" ? /* @__PURE__ */ jsx(Link, { title: clip(t.source, 200), url: "https://frankfurter.dev/" }, "currency-source") : null
   ] }, "currency-attribution");
-  if (!state.converted) return /* @__PURE__ */ jsxs(View, { title: t.title, state: encodeState(state), children: [
+  if (!state.converted) return /* @__PURE__ */ jsxs(View, { title: clip(t.title, 200), state: encodeState(state), children: [
     modes,
     editor,
     /* @__PURE__ */ jsx(Section, { children: text2("currency-welcome-text", t.welcome, "body") }, "currency-welcome"),
     attribution
   ] }, "currency");
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.title, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.title, 200), state: encodeState(state), children: [
     modes,
     editor,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.convert }, "currency-loading-indicator") }, "currency-loading"),
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.convert, 200) }, "currency-loading-indicator") }, "currency-loading"),
     attribution
   ] }, "currency");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.title, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.title, 200), state: encodeState(state), children: [
     modes,
     editor,
     /* @__PURE__ */ jsxs(Section, { children: [
       text2("currency-error-text", errorText(loaded.error, locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "currency-retry")
+      /* @__PURE__ */ jsx(Button, { title: clip(t.refresh, 200), action: act("refresh") }, "currency-retry")
     ] }, "currency-error"),
     attribution
   ] }, "currency");
   const result = loaded.result;
-  return /* @__PURE__ */ jsxs(View, { title: t.title, state: encodeState(state), children: [
+  return /* @__PURE__ */ jsxs(View, { title: clip(t.title, 200), state: encodeState(state), children: [
     modes,
     editor,
-    /* @__PURE__ */ jsxs(Section, { title: t.convert, children: [
-      /* @__PURE__ */ jsx(Metric, { label: `${formatForDisplay(result.amount, locale)} ${result.from}`, value: `${formatForDisplay(result.result, locale)} ${result.to}` }, "currency-value"),
+    /* @__PURE__ */ jsxs(Section, { title: clip(t.convert, 200), children: [
+      /* @__PURE__ */ jsx(Metric, { label: clip(`${formatForDisplay(result.amount, locale)} ${result.from}`, 200), value: clip(`${formatForDisplay(result.result, locale)} ${result.to}`, 200) }, "currency-value"),
       text2("currency-rate", loaded.kind === "currency" ? fmt(t.rate, { from: result.from, to: result.to, rate: formatForDisplay(loaded.rate.rate, locale) }) : fmt(t.inverse, { from: result.to, to: result.from, rate: formatForDisplay(result.inverse ?? "1", locale) }), "caption"),
       loaded.kind === "currency" ? text2("currency-date", fmt(t.rateDate, { date: loaded.rate.date }) + (loaded.rate.stale ? ` \xB7 ${errorText(loaded.rate.stale, locale)}` : ""), "caption") : text2("currency-local", t.local, "caption")
     ] }, "currency-result"),
-    state.mode === "units" ? /* @__PURE__ */ jsx(Section, { title: t.dimension, children: dimensions.map((d) => /* @__PURE__ */ jsx(Button, { title: t[d], action: act(`dimension:${d}`) }, `dimension-${d}`)) }, "currency-dimensions") : null,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "currency-refresh") }, "currency-footer"),
+    state.mode === "units" ? /* @__PURE__ */ jsx(Section, { title: clip(t.dimension, 200), children: dimensions.map((d) => /* @__PURE__ */ jsx(Button, { title: clip(t[d], 200), action: act(`dimension:${d}`) }, `dimension-${d}`)) }, "currency-dimensions") : null,
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Button, { title: clip(t.refresh, 200), action: act("refresh") }, "currency-refresh") }, "currency-footer"),
     attribution
   ] }, "currency");
 }
@@ -1523,7 +1590,11 @@ function Root(options) {
       }
       return callback((values) => {
         if (id === "refresh") setRefresh((previous) => previous + 1);
-        else setState((previous) => transition(previous, id, values));
+        else setState((previous) => {
+          const nextState = transition(previous, id, values);
+          if (nextState !== previous) setRefresh(0);
+          return nextState;
+        });
       }, { submit: true });
     }
   });

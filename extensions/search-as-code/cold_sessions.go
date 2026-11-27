@@ -458,13 +458,13 @@ func coldNote(archived, unconfirmed, omitted int) string {
 	}
 	var parts []string
 	if archived > 0 {
-		parts = append(parts, fmt.Sprintf("含 %d 个%s", archived, locationArchived))
+		parts = append(parts, fmt.Sprintf("含 %d 段已移到云端的", archived))
 	}
 	if unconfirmed > 0 {
-		parts = append(parts, fmt.Sprintf("其中 %d 个%s", unconfirmed, locationUnconfirmed))
+		parts = append(parts, fmt.Sprintf("其中 %d 段可能没传完", unconfirmed))
 	}
 	if omitted > 0 {
-		parts = append(parts, fmt.Sprintf("另有 %d 个较旧的%s会话超出上限未扫描", omitted, locationArchived))
+		parts = append(parts, fmt.Sprintf("另有 %d 段较早移到云端的超出上限，这次没搜", omitted))
 	}
 	return "（" + strings.Join(parts, "，") + "）"
 }

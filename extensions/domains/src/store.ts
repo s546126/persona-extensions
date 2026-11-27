@@ -11,7 +11,11 @@ export function decodeHistory(value: string): History {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || (raw as { schema_version?: unknown }).schema_version !== 1 || !Array.isArray((raw as { domains?: unknown }).domains)) throw new ReadError("storage");
   const values = (raw as { domains: unknown[] }).domains;
   if (values.length > 20 || new Set(values).size !== values.length) throw new ReadError("storage");
-  try { return { schema_version: 1, domains: values.map(value => domainName(value).ascii) }; }
+  try {
+    const domains = values.map(value => domainName(value).ascii);
+    if (new Set(domains).size !== domains.length) throw new ReadError("storage");
+    return { schema_version: 1, domains };
+  }
   catch { throw new ReadError("storage"); }
 }
 export function encodeHistory(history: History): string {

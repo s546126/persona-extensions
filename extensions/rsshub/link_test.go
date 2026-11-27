@@ -34,7 +34,7 @@ func TestPagesOpenWithALinkThatIsNotACleanHTTPSAddress(t *testing.T) {
 			}
 			for _, s := range res.View.Sections {
 				for _, c := range s.Items {
-					if c.Type == wire.ComponentLink {
+					if c.Type == wire.ComponentLink && c.URL != routesDocs { // the form's own link to RSSHub's list of routes
 						t.Fatalf("link %q %s: offered %q", link, action, c.URL)
 					}
 				}

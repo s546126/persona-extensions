@@ -299,8 +299,48 @@ class RealTest(unittest.TestCase):
         mock_client.send_msg.return_value = "m1"
         self.assertEqual(backend.send("6001", "@Example hi", None), "m1")
         mock_client.send_msg.assert_called_once_with("@Example hi", "6001", root_id=None)
-        for method in ("create_chat", "search", "history", "chat_info", "user_name", "download"):
+        for method in ("create_chat", "search", "history", "chat_info", "user_name", "chat_members", "download"):
             self.assertTrue(callable(getattr(backend, method)), method)
+
+    def test_chat_members_parses_humans_bots_nicknames_and_pagination(self):
+        from larkx_persona.real import RealBackend
+        from larkx.proto import gateway
+        cmd, req_cls, resp_cls = gateway.resolve_cmd("chats.PullChatChattersRequest")
+        self.assertEqual(cmd, 44)
+        self.assertIsNotNone(req_cls)
+        self.assertIsNotNone(resp_cls)
+
+        backend = RealBackend(ROOT, self.home.name, "feishu")
+        backend._client = mock_client = unittest.mock.Mock()
+        mock_client.api.side_effect = [
+            {
+                "chatters": {
+                    "7001": {"id": "7001", "name": "Alice", "type": 1},
+                    "7002": {"id": "7002", "name": "Bot One", "type": "BOT"},
+                    "bad": {"id": "not-numeric", "name": "Ignored", "type": 1},
+                },
+                "groupNicknames": {"7001": "Alice (Group)"},
+                "nextCursor": 100,
+            },
+            {
+                "chatters": {
+                    "7003": {"id": "7003", "enUsName": "Bot Two", "type": 1, "botConfig": {"appId": "cli_1"}},
+                },
+                "nextCursor": 0,
+            },
+        ]
+        members = backend.chat_members("6001", limit=50)
+        self.assertEqual(
+            members,
+            [
+                {"id": "7001", "name": "Alice (Group)", "real_name": "Alice", "kind": "user"},
+                {"id": "7002", "name": "Bot One", "real_name": "Bot One", "kind": "bot"},
+                {"id": "7003", "name": "Bot Two", "real_name": "Bot Two", "kind": "bot"},
+            ],
+        )
+        self.assertEqual(mock_client.api.call_count, 2)
+        self.assertEqual(mock_client.api.call_args_list[0].args[0], "chats.PullChatChattersRequest")
+        self.assertEqual(mock_client.api.call_args_list[1].args[1]["cursor"], 100)
 
     def test_credentials_go_through_the_hub_and_never_a_file(self):
         from larkx_persona.real import RealBackend

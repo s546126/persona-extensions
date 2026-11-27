@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canonicalEpisodeURL, lookupPath, parseEpisodes, parseSearch, parseShow, podcastID, publicURL, ReadError, searchPath } from "../src/model.ts";
+import { clip, canonicalEpisodeURL, lookupPath, parseEpisodes, parseSearch, parseShow, podcastID, publicURL, queryText, ReadError, searchPath } from "../src/model.ts";
+import { readTime } from "../src/i18n.ts";
 import { decodeList, encodeList, MemoryStore } from "../src/store.ts";
 import { sampleEpisode, sampleShow } from "./fixtures.ts";
-import { encodeState, page, readState, transition } from "../src/page.tsx";
+import { encodeState, initialState, page, readState, transition } from "../src/page.tsx";
 import { Podcasts } from "../src/service.ts";
 import { Renderer } from "@persona/extension/ui";
 
@@ -87,4 +88,95 @@ test("navigation retains only validated show metadata", () => {
   for (const values of ["show", "not-json", "null", "[]", 1, { query: ["bad"] }]) assert.equal(transition(readState(undefined), "search", values).v, "discover");
   assert.equal(readState(JSON.stringify({ ...opened, b: { ...show, url: "https://attacker.invalid" } })).v, "discover");
   assert.equal(readState(JSON.stringify({ ...opened, b: { ...show, feedURL: "http://attacker.invalid" } })).v, "discover");
+});
+
+test("clip, readTime, query normalization and show state consistency handle edge cases safely", () => {
+  assert.equal(clip("abcdef", 4), "abc…");
+  assert.equal(Array.from(clip("abcdef", 4)).length, 4);
+  assert.equal(clip("😀😀😀😀", 3), "😀😀…");
+  assert.equal(clip("abcdef", 0), "");
+  assert.equal(clip("abcdef", -5), "");
+  assert.equal(clip("abcdef", Number.NaN), "");
+  assert.throws(() => queryText("bad\ud800query"), ReadError);
+  assert.equal(readTime(Number.NaN, "UTC", "en"), "");
+  assert.equal(readTime("not-a-date", "UTC", "en"), "");
+  assert.ok(readTime(Date.UTC(2026, 10, 12), "Invalid/Timezone", "en").length > 0);
+  assert.ok(readTime(Date.UTC(2026, 10, 12), "UTC", "not_a_valid_locale!!!").length > 0);
+
+  const longSearch = transition(initialState, "search", { query: "a".repeat(250) });
+  assert.equal(longSearch.v, "search");
+  assert.equal(queryText(longSearch.q), longSearch.q);
+  const multiline = transition(initialState, "search", { query: "Systems\nPodcast" });
+  assert.equal(multiline.v, "search");
+  assert.equal(queryText(multiline.q), "Systems Podcast");
+  assert.equal(transition(initialState, "search", { query: "bad\u0000query" }).v, "discover");
+  assert.deepEqual(readState(JSON.stringify({ v: "search", q: "bad\nquery", k: 0 })), initialState);
+  assert.deepEqual(readState(JSON.stringify({ v: "search", q: "a".repeat(250), k: 0 })), initialState);
+
+  // Mismatched show state (k !== b.id) must reset to initialState.
+  const show = parseShow(sampleShow);
+  assert.deepEqual(readState(JSON.stringify({ v: "show", q: "eng", k: 42, b: show })), initialState);
+});
+
+test("page omits empty episode-notes section and enforces CheckView item, key, state and frame budgets", () => {
+  const service = new Podcasts(async () => new Response(), {}, { locale: "en", limits: { gap: 0 } });
+  const store = new MemoryStore();
+  const render = (node: ReturnType<typeof page>) => {
+    const renderer = new Renderer({ authorize: () => false });
+    try { return renderer.mount(node).view; }
+    finally { renderer.dispose(); }
+  };
+
+  // Zero episodes must NOT render an empty Section (items: [] violates wire.CheckView).
+  const show = parseShow(sampleShow);
+  const emptyShowView = render(page({
+    service,
+    store,
+    state: { v: "show", q: "eng", k: show.id, b: show },
+    loaded: { kind: "show", result: { show, episodes: [], at: Date.UTC(2026, 10, 12) } },
+    uiVersion: 5,
+  }));
+  for (const section of emptyShowView.sections) {
+    assert.ok(section.items.length > 0, `empty section emitted: ${section.key}`);
+  }
+
+  // Duplicate shows and many shows passed directly to page() must respect keys, ItemsMost = 300, and 512 KiB.
+  const dupView = render(page({
+    service,
+    store,
+    state: { v: "search", q: "eng", k: 0 },
+    loaded: { kind: "search", result: { shows: [show, { ...show }], at: 0 } },
+    uiVersion: 5,
+  }));
+  const seenKeys = new Set<string>();
+  for (const section of dupView.sections) {
+    assert.equal(seenKeys.has(section.key), false);
+    seenKeys.add(section.key);
+    for (const item of section.items) {
+      assert.ok(typeof item.key === "string" && Array.from(item.key).length <= 128);
+      assert.equal(seenKeys.has(item.key), false);
+      seenKeys.add(item.key);
+    }
+  }
+
+  const manyShows = Array.from({ length: 320 }, (_, i) => ({
+    ...show,
+    id: i + 1,
+    title: `Podcast ${i} ` + "x".repeat(300),
+    url: `https://podcasts.apple.com/us/podcast/id${i + 1}`,
+  }));
+  const largeView = render(page({
+    service,
+    store,
+    state: { v: "search", q: "eng", k: 0 },
+    loaded: { kind: "search", result: { shows: manyShows, at: 0 } },
+    uiVersion: 5,
+  }));
+  const totalItems = largeView.sections.reduce((sum, s) => sum + s.items.length, 0);
+  assert.ok(totalItems <= 300, `items exceeded 300: ${totalItems}`);
+  assert.ok(new TextEncoder().encode(JSON.stringify(largeView)).byteLength <= 512 * 1024);
+
+  // Invalid state passed directly to page() must be normalized.
+  const badStateView = render(page({ service, store, state: { v: "search", q: "bad\nquery", k: 0 }, loaded: { kind: "empty" }, uiVersion: 5 }));
+  assert.equal(badStateView.state, encodeState(initialState));
 });

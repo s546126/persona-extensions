@@ -92,6 +92,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
 	var fn func() (string, error)
+	var keyArgs any
 	switch name {
 	case "asana_create_task":
 		var in createArgs
@@ -110,6 +111,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 				return nil, errors.New("project must be active and belong to the selected workspace; no task was created")
 			}
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			item, err := a.client.createTask(ctx, in.WorkspaceGID, in.ProjectGID, in.Name, in.Notes, in.DueOn)
 			if err != nil {
@@ -125,6 +127,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := validGID(in.TaskGID); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			if _, err := a.client.completeTask(ctx, in.TaskGID); err != nil {
 				return "", err
@@ -134,8 +137,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(keyArgs)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

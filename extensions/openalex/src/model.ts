@@ -4,11 +4,33 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+export function boundedID(prefix: string, raw: string, most = 128): string {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 export function queryText(value: unknown): string {
   if (typeof value !== "string") throw new ReadError("invalid");
-  if (/[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 200) throw new ReadError("invalid");
   return query;
@@ -41,7 +63,7 @@ function httpsURL(value: unknown): string | undefined {
   const raw = string(value);
   let url: URL;
   try { url = new URL(raw); } catch { throw new ReadError("bad_answer"); }
-  if (url.protocol !== "https:" || url.username || url.password) throw new ReadError("bad_answer");
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 // openAccessURL is a work's open-access link when it is https. Publishers' links are often plain http (cell.com, for one):
@@ -70,16 +92,16 @@ export function parseWorks(raw: unknown, at: number): SearchResult {
     const work = object(rawWork), id = workID(work.id);
     if (seen.has(id)) throw new ReadError("bad_answer");
     seen.add(id);
-    const title = clip(oneLine(string(work.display_name)), 600);
+    const title = clip(oneLine(string(work.display_name).replace(/[\ud800-\udfff]/gu, "")), 600);
     if (!title) throw new ReadError("bad_answer");
     const year = work.publication_year == null ? undefined : integer(work.publication_year, 2200);
     const access = object(work.open_access ?? {}), isOA = boolean(access.is_oa ?? false);
     const location = work.primary_location == null ? {} : object(work.primary_location);
-    const source = location.source == null ? "" : clip(oneLine(string(object(location.source).display_name)), 300);
-    const license = location.license == null ? "" : clip(oneLine(string(location.license)), 100);
+    const source = location.source == null ? "" : clip(oneLine(string(object(location.source).display_name).replace(/[\ud800-\udfff]/gu, "")), 300);
+    const license = location.license == null ? "" : clip(oneLine(string(location.license).replace(/[\ud800-\udfff]/gu, "")), 100);
     const oaURL = openAccessURL(access.oa_url);
     return { id, title, ...(year === undefined ? {} : { year }), citations: integer(work.cited_by_count ?? 0), openAccess: isOA,
-      oaStatus: clip(oneLine(string(access.oa_status, isOA ? "open" : "closed")), 50), doi: httpsURL(work.doi), ...(oaURL ? { oaURL } : {}), source, license };
+      oaStatus: clip(oneLine(string(access.oa_status, isOA ? "open" : "closed").replace(/[\ud800-\udfff]/gu, "")), 50), doi: httpsURL(work.doi), ...(oaURL ? { oaURL } : {}), source, license };
   });
   return { works, total, at };
 }

@@ -224,31 +224,92 @@ func stock(nb *kernel.Base, sp *kernel.Space, buyID string, now time.Time, loc *
 	if !ok {
 		return fmt.Errorf("没有记录「%s」", buy.ItemID)
 	}
+	amount := buy.Amount
+	if amount == 0 {
+		amount = it.Refill
+	}
+	if amount == 0 {
+		amount = 1
+	}
+	vals := stockValues(it, amount, false, today)
+	if len(vals) == 0 {
+		return nil
+	}
+	_, err := sp.PutEntity(nb, kernel.EntityInput{ID: it.ID, Values: vals}, now)
+	return err
+}
+
+// stockValues are the values that put amount more of an item away, as Purchase does: an item with a quantity gets the
+// amount added to its estimate and is counted today, or, when its expiry date is past, the amount alone with the date
+// cleared. An item without a quantity only loses a past date, unless track is set: then it starts being tracked with
+// the amount.
+func stockValues(it model.Item, amount float64, track bool, today model.Day) map[string]any {
 	expired := it.Expires != "" && it.Expires < today
 	vals := map[string]any{}
 	if expired {
 		vals["expires"] = nil
 	}
-	if it.HasQty {
-		amount := buy.Amount
-		if amount == 0 {
-			amount = it.Refill
-		}
-		if amount == 0 {
-			amount = 1
-		}
-		if expired {
+	if it.HasQty || track {
+		if expired || !it.HasQty {
 			vals["qty"] = amount
 		} else {
 			vals["qty"] = rules.Estimate(it, today) + amount
 		}
 		vals["counted"] = string(today)
 	}
-	if len(vals) == 0 {
-		return nil
+	return vals
+}
+
+// AddStock puts amount more of an item away, as buying it does (see Purchase), without a purchase: the amount is
+// added to the estimate and the item is counted today; a past expiry date means the old batch is gone, so the
+// quantity is the amount alone and the date is cleared. An item that had no quantity is tracked from now on, with the
+// amount. The amount must be above zero.
+func AddStock(b *kernel.Base, itemID string, amount float64, now time.Time, loc *time.Location) (*kernel.Entity, error) {
+	if !(amount > 0) {
+		return nil, errors.New("放进去的数量需要大于 0")
 	}
-	_, err := sp.PutEntity(nb, kernel.EntityInput{ID: it.ID, Values: vals}, now)
-	return err
+	var out *kernel.Entity
+	err := tx(b, now, loc, func(nb *kernel.Base, sp *kernel.Space, today model.Day) error {
+		it, err := loadItem(nb, sp, itemID, loc)
+		if err != nil {
+			return err
+		}
+		out, err = sp.PutEntity(nb, kernel.EntityInput{ID: itemID, Values: stockValues(it, amount, true, today)}, now)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Restore puts a record of the household space back the way it was: its title, its stage and exactly the values of
+// was, every other value cleared. It is how an import is undone; the record must still exist.
+func Restore(b *kernel.Base, was kernel.Entity, now time.Time) (*kernel.Entity, error) {
+	var out *kernel.Entity
+	err := tx(b, now, nil, func(nb *kernel.Base, sp *kernel.Space, _ model.Day) error {
+		cur, err := find(nb, was.ID, was.Type)
+		if err != nil {
+			return err
+		}
+		vals := map[string]any{}
+		for k := range cur.Values {
+			vals[k] = nil
+		}
+		for k, v := range was.Values {
+			vals[k] = v
+		}
+		in := kernel.EntityInput{ID: was.ID, Title: strPtr(was.Title), Values: vals}
+		if was.Status != "" && was.Status != cur.Status {
+			in.Status = strPtr(was.Status)
+		}
+		out, err = sp.PutEntity(nb, in, now)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ChoreDone completes a chore: last is today, and next is today plus the period rounded up to whole days (at least

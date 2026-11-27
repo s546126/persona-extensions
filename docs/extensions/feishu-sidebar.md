@@ -2,17 +2,17 @@
 
 [Documentation](../README.md) · [Source](../../extensions/feishu-sidebar/)
 
-Open the user's Persona web from a Feishu sidebar. The extension builds a Feishu applink from the hub address the user configured; opening the link in Feishu opens Persona in a half-width sidebar. It needs no Feishu app id, makes no request to Feishu, and keeps no credentials.
+Open Persona in Feishu's desktop navigation. The extension builds a Feishu AppLink from the configured hub address. Clicking it in Feishu opens Persona in a tab in the left navigation. It needs no Feishu app id, makes no request to Feishu, and keeps no credentials.
 
 ## How it works
 
 Feishu's general link (no app id, no web app):
 
 ```text
-https://applink.feishu.cn/client/web_url/open?mode=sidebar-semi&url=<percent-encoded target URL>
+https://applink.feishu.cn/client/web_url/open?mode=appCenter&url=<percent-encoded target URL>
 ```
 
-`mode=sidebar-semi` opens a half-width sidebar (Feishu 3.41+); `window` and `appCenter` are for Feishu 7.5+ but are not used here. The `web_app/open` form needs a web app already created, so it is not used either.
+`mode=appCenter` opens the web page as a tab in the desktop client's left navigation. Right-click the tab and choose **Pin** to keep it there.
 
 The extension percent-encodes the target URL the way JavaScript's `encodeURIComponent` does (Chinese, `?`, `#`, `&` and `=` all encoded), so the query and hash of the target path are carried whole.
 
@@ -34,7 +34,7 @@ A trailing `/` on the address is normalized away. Only same-site relative paths 
 
 ## Notes shown to the user
 
-- Feishu 3.41+ is required (`sidebar-semi`); the phone Feishu may have no sidebar.
+- Use Feishu desktop 7.5 or newer to open the link in the left navigation.
 - The first open asks for a login inside Feishu's built-in browser: the web sign-in is separate from the app's.
 - The extension never calls Feishu and keeps no credentials; the link is built locally.
 
@@ -49,7 +49,7 @@ scripts/package.sh feishu-sidebar
 Run the tests:
 
 ```sh
-go test ./extensions/feishu-sidebar
+go -C extensions/feishu-sidebar test ./...
 ```
 
 The [manifest](../../extensions/feishu-sidebar/persona-extension.json) declares its contributions and platforms.

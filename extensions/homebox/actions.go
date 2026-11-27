@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 )
@@ -25,7 +26,7 @@ const maxDescriptionChars = 1000
 const maxNameChars = 255
 
 func (in createArgs) validate() error {
-	if !validEntityID(in.EntityTypeID) || !validEntityID(in.LocationID) || strings.TrimSpace(in.Name) == "" || len([]rune(in.Name)) > maxNameChars || len([]rune(in.Description)) > maxDescriptionChars || in.Quantity <= 0 || in.Quantity > 1000000 || len(in.TagIDs) > 20 {
+	if !validEntityID(in.EntityTypeID) || !validEntityID(in.LocationID) || strings.TrimSpace(in.Name) == "" || len([]rune(in.Name)) > maxNameChars || len([]rune(in.Description)) > maxDescriptionChars || math.IsNaN(in.Quantity) || math.IsInf(in.Quantity, 0) || in.Quantity <= 0 || in.Quantity > 1000000 || len(in.TagIDs) > 20 {
 		return errors.New("valid type/location UUIDs, a bounded name/description, positive quantity and at most 20 tags are required")
 	}
 	if strings.ContainsFunc(in.Name, unicode.IsControl) || strings.ContainsFunc(in.Description, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) {
@@ -70,8 +71,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), func() (string, error) {
+	keyData, _ := json.Marshal(in)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 		item, err := a.client.createItem(ctx, in.EntityTypeID, in.LocationID, in.Name, in.Description, in.Quantity, in.TagIDs)
 		if err != nil {
 			return "", err

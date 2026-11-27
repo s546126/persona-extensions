@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/nwverse/persona/sdk/go/ext"
@@ -23,13 +22,31 @@ import (
 // keys it sends, over the revision it read. A conflict (someone else wrote meanwhile) is built once more over the
 // document the conflict carries; a second one gives up.
 
+type writeReceipt struct {
+	fingerprint string
+	text        string
+}
+
 // write is one checked write.
 type write struct {
-	name    string
-	summary string
-	scope   string // the token's category that must be at apply
+	name        string
+	fingerprint string
+	summary     string
+	scope       string // the token's category that must be at apply
 	// build makes the keys to replace over s, and what to answer; no keys means nothing to write (answered as is).
 	build func(s *snapshot, requestID string) (map[string]any, string, error)
+}
+
+func canonicalArgs(raw json.RawMessage) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return strings.TrimSpace(string(raw))
+	}
+	return string(b)
 }
 
 func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
@@ -49,13 +66,14 @@ func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
 		return write{}, err
 	}
 	w.name = name
+	w.fingerprint = name + ":" + canonicalArgs(raw)
 	return w, nil
 }
 
 // cached is the document a write is checked against, and the scope check.
 func (a *app) cached(scope string) (*snapshot, error) {
-	if err := a.health().Config; err != nil {
-		return nil, bad(err.Error())
+	if h := a.health(); h.Config != nil {
+		return nil, bad(setupNeeded(h))
 	}
 	s := a.snapshot()
 	switch {
@@ -214,7 +232,7 @@ func (a *app) logWorkout(raw json.RawMessage) (write, error) {
 	if err != nil {
 		return write{}, err
 	}
-	loc, now := a.zone(), a.now()
+	loc, now := a.currentZone(), a.now()
 	today := dateOf(now, loc)
 	unit := s.State.Unit
 	date := firstNonEmpty(strings.TrimSpace(in.Date), today)
@@ -459,7 +477,7 @@ func (a *app) createRoutine(raw json.RawMessage) (write, error) {
 	if name == "" {
 		return write{}, bad("要给计划起个名字（name）")
 	}
-	today := dateOf(a.now(), a.zone())
+	today := dateOf(a.now(), a.currentZone())
 	date := strings.TrimSpace(in.Date)
 	if date != "" && (!validDate(date) || date < today) {
 		return write{}, bad("date 要是今天或以后，写成 YYYY-MM-DD")
@@ -592,7 +610,7 @@ func (a *app) scheduleDay(raw json.RawMessage) (write, error) {
 		return write{}, bad("参数不对：" + err.Error())
 	}
 	date, id := strings.TrimSpace(in.Date), strings.TrimSpace(in.RoutineID)
-	today := dateOf(a.now(), a.zone())
+	today := dateOf(a.now(), a.currentZone())
 	if !validDate(date) || date < today {
 		return write{}, bad("date 要是今天或以后，写成 YYYY-MM-DD")
 	}
@@ -648,25 +666,36 @@ func (a *app) scheduleDay(raw json.RawMessage) (write, error) {
 
 // --- running a write
 
-// done remembers the answers of actions.do by request id: the hub may send the same one again.
-var (
-	doneMu sync.Mutex
-	done   = map[string]string{}
-)
+func (a *app) lookupDone(key, fingerprint string) (string, bool, error) {
+	a.doneMu.Lock()
+	defer a.doneMu.Unlock()
+	rec, ok := a.done[key]
+	if !ok {
+		return "", false, nil
+	}
+	if rec.fingerprint != fingerprint {
+		return "", false, bad("这个 request_id 已经用于不同的参数")
+	}
+	return rec.text, true, nil
+}
 
 func (a *app) runWrite(ctx context.Context, requestID string, w write) (any, error) {
 	if requestID == "" || len(requestID) > 256 {
 		return nil, bad("没有 request_id")
 	}
 	key := w.name + "\x00" + requestID
-	doneMu.Lock()
-	text, ok := done[key]
-	doneMu.Unlock()
-	if ok {
+	if text, ok, err := a.lookupDone(key, w.fingerprint); err != nil {
+		return nil, err
+	} else if ok {
 		return map[string]any{"text": text}, nil
 	}
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
+	if text, ok, err := a.lookupDone(key, w.fingerprint); err != nil {
+		return nil, err
+	} else if ok {
+		return map[string]any{"text": text}, nil
+	}
 	if err := a.sync(ctx, true); err != nil {
 		return nil, err
 	}
@@ -674,16 +703,16 @@ func (a *app) runWrite(ctx context.Context, requestID string, w write) (any, err
 	if err != nil {
 		return nil, err
 	}
-	text, err = a.put(ctx, s, requestID, w)
+	text, err := a.put(ctx, s, requestID, w)
 	if err != nil {
 		return nil, err
 	}
-	doneMu.Lock()
-	if len(done) > 500 {
-		done = map[string]string{}
+	a.doneMu.Lock()
+	if a.done == nil || len(a.done) > 500 {
+		a.done = map[string]writeReceipt{}
 	}
-	done[key] = text
-	doneMu.Unlock()
+	a.done[key] = writeReceipt{fingerprint: w.fingerprint, text: text}
+	a.doneMu.Unlock()
 	return map[string]any{"text": text}, nil
 }
 

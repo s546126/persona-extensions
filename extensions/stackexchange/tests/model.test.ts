@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerMarkdown, answersPath, clip, clipMarkdown, decodeEntities, parseAnswers, parseQuestions, queryText, questionID, ReadError, searchPath, selectedAnswer, siteID, tagText } from "../src/model.ts";
-import { encodeState, initialState, questionTransition, readState, transition } from "../src/page.tsx";
+import { answerMarkdown, answersPath, clip, clipMarkdown, decodeEntities, parseAnswers, parseQuestions, queryText, questionID, ReadError, searchPath, selectedAnswer, siteID, tagText, titleText } from "../src/model.ts";
+import { StackExchange } from "../src/service.ts";
+import { encodeState, initialState, page, questionTransition, readState, transition } from "../src/page.tsx";
+import { Renderer } from "@persona/extension/ui";
 import { answer, question, questionPath } from "./fixtures.ts";
 
 test("bounded public search and answer paths validate all user-controlled fields", () => {
@@ -181,4 +183,66 @@ test("page state and question actions reject forged IDs, hosts and fields", () =
   assert.deepEqual(readState('{"q":"bad\\n"}'), initialState);
   assert.equal(transition(state, "search", { query: "typescript", site: "__proto__" }), state);
   assert.equal(transition(state, "search", { query: "typescript", site: "unix", tag: "bash" }).site, "unix");
+});
+
+test("upstream malformed tags throw bad_answer, URLs and lone surrogates are bounded, and direct page() handles invalid site safely", () => {
+  // Unexpected upstream tag must throw bad_answer (not user-input invalid).
+  assert.throws(
+    () => parseQuestions({ items: [{ ...question, tags: ["bad tag!"] }] }, "stackoverflow", 0),
+    (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+  );
+  assert.throws(
+    () => parseQuestions({ items: [{ ...question, tags: [""] }] }, "stackoverflow", 0),
+    (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+  );
+
+  // Overlong canonical URL (> 4096 chars) must be rejected as bad_answer.
+  assert.throws(
+    () => parseQuestions({ items: [{ ...question, link: "https://stackoverflow.com/questions/70794241/" + "a".repeat(4100) }] }, "stackoverflow", 0),
+    (error: unknown) => error instanceof ReadError && error.code === "bad_answer",
+  );
+
+  // Lone surrogates must be rejected in queryText and titleText.
+  assert.throws(() => queryText("bad\ud800query"), (error: unknown) => error instanceof ReadError && error.code === "invalid");
+  assert.throws(() => titleText("bad\udc00title"), (error: unknown) => error instanceof ReadError && error.code === "invalid");
+
+  // Direct page() with invalid state.site must not crash with TypeError.
+  const service = new StackExchange(async () => new Response("{}", { status: 200 }));
+  const renderer = new Renderer({ authorize: () => false });
+  try {
+    const view = renderer.render(page({
+      service,
+      state: { q: "typescript", site: "nonexistent" as any, tag: "", found: false },
+      loaded: { kind: "empty" },
+      locale: "en",
+    })).view;
+    assert.equal(JSON.parse(view.state ?? "{}").site, "stackoverflow");
+  } finally { renderer.dispose(); }
+
+  // Direct page() with long titles and duplicate question IDs must satisfy CheckView limits.
+  const longTitle = "Long title ".repeat(40);
+  const dupQ = {
+    id: 70794241, title: longTitle, url: "https://stackoverflow.com/questions/70794241/x",
+    score: 1, answerCount: 1, tags: ["typescript"], license: "CC BY-SA 4.0", author: "Author",
+  };
+  const r2 = new Renderer({ authorize: () => false });
+  try {
+    const view = r2.render(page({
+      service,
+      state: { q: "typescript", site: "stackoverflow", tag: "", found: true },
+      loaded: { kind: "results", result: { questions: [dupQ, dupQ], at: 0 } },
+      locale: "en",
+    })).view;
+    const seen = new Set<string>();
+    for (const section of view.sections) {
+      assert.ok(section.items.length > 0);
+      if (section.title) assert.ok(Array.from(section.title).length <= 200, `section title too long: ${section.title.length}`);
+      for (const item of section.items) {
+        if (typeof item.key === "string") {
+          assert.equal(seen.has(item.key), false, `duplicate key: ${item.key}`);
+          seen.add(item.key);
+        }
+      }
+    }
+  } finally { r2.dispose(); }
 });

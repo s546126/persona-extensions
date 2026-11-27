@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,15 @@ import (
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
+)
+
+const (
+	// pageLimit is how many bookmarks one page of the bookmarks view requests.
+	pageLimit     = 50
+	maxQueryChars = 200
+	maxViewItems  = 250
+	maxNoteItems  = 40
+	maxTextItems  = 120
 )
 
 type pageState struct {
@@ -25,7 +35,7 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || len(st.Cursor) > 256 || len(st.BookmarkID) > 128 || len(st.DraftID) > 128 || len(st.SaveURL) > 8192 {
+	if err := r.DecodeState(&st); err != nil || len([]rune(st.Query)) > maxQueryChars || len(st.Cursor) > 256 || len(st.BookmarkID) > 128 || len(st.DraftID) > 128 || len(st.SaveURL) > 8192 {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -46,7 +56,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Cursor, st.Mode = r.Values["q"], "", "list"
+		st.Query, st.Cursor, st.Mode = strings.TrimSpace(clipText(r.Values["q"], maxQueryChars)), "", "list"
 	case "more":
 		if st.Cursor == "" {
 			return nil, errors.New("no further bookmarks")
@@ -55,9 +65,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err := validID(r.Values["id"]); err != nil {
 			return nil, err
 		}
-		st.BookmarkID, st.Mode = r.Values["id"], "detail"
+		st.BookmarkID, st.Mode, st.DraftID = r.Values["id"], "detail", randomID()
 	case "back":
-		st.Mode, st.BookmarkID = "list", ""
+		st.Mode, st.BookmarkID, st.DraftID = "list", "", ""
 	case "save-form":
 		st.Mode, st.DraftID = "save", randomID()
 	case "review-save":
@@ -79,12 +89,14 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err := validID(st.BookmarkID); err != nil {
 			return nil, err
 		}
-		value := r.Action == "favourite"
+		if st.DraftID == "" {
+			return nil, errors.New("the bookmark action form expired")
+		}
 		field := "favourited"
 		if r.Action == "archive" {
 			field = "archived"
 		}
-		raw := []byte(`{"id":` + quote(st.BookmarkID) + `,` + quote(field) + `:` + fmt.Sprint(value) + `}`)
+		raw := []byte(`{"id":` + quote(st.BookmarkID) + `,` + quote(field) + `:true}`)
 		out, err := a.doAction(ctx, "ui-"+r.Action+":"+st.DraftID, "karakeep_update", raw)
 		if err != nil {
 			return nil, err
@@ -114,13 +126,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if err != nil {
 			return nil, err
 		}
-		highlights, err := a.client.highlights(ctx, "")
+		highlights, err := a.client.bookmarkHighlights(ctx, st.BookmarkID)
 		if err != nil {
 			return nil, err
 		}
-		return detailView(r, st, item, highlights.Bookmarks), nil
+		if st.DraftID == "" {
+			st.DraftID = randomID()
+		}
+		return detailView(r, st, item, highlights), nil
 	}
-	page, err := a.client.bookmarks(ctx, st.Query, st.Cursor)
+	page, err := a.client.bookmarks(ctx, st.Query, st.Cursor, pageLimit)
 	a.record(err)
 	if err != nil {
 		return nil, err
@@ -129,10 +144,18 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	section := wire.Section{Title: fmt.Sprintf(t.results, len(page.Bookmarks)), Items: []wire.Component{{
 		Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "save-form", Push: &wire.Push{State: ext.EncodeState(pageState{Mode: "save", DraftID: randomID()}), Title: t.save}},
 	}}}
+	seen := make(map[string]bool, len(page.Bookmarks))
 	for _, item := range page.Bookmarks {
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "bookmark-" + item.ID, Title: clipText(item.Title, 2000), Subtitle: item.Type, Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
+		if len(section.Items) >= maxViewItems {
+			break
+		}
+		if item.ID == "" || seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: boundedKey("bookmark-", item.ID), Title: clipText(item.displayTitle(), 2000), Subtitle: clipText(item.kind(), 2000), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 	}
-	if len(page.Bookmarks) == 0 {
+	if len(section.Items) == 1 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noBookmarks})
 	}
 	if page.NextCursor != nil && *page.NextCursor != "" {
@@ -144,6 +167,18 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	return v, nil
 }
 
+// boundedKey returns prefix+id when it fits the 128-character key limit, and a stable hashed key otherwise.
+func boundedKey(prefix, id string) string {
+	full := prefix + id
+	if len(full) <= 128 {
+		return full
+	}
+	sum := sha256.Sum256([]byte(id))
+	suffix := "-" + hex.EncodeToString(sum[:8])
+	keep := max(0, 128-len(prefix)-len(suffix))
+	return prefix + id[:keep] + suffix
+}
+
 // httpsLink reports whether a link component can carry raw: the view check refuses the whole view for any other.
 func httpsLink(raw string) bool {
 	u, err := url.Parse(raw)
@@ -153,39 +188,53 @@ func httpsLink(raw string) bool {
 func detailView(r *ext.UIRequest, st pageState, item bookmark, highlights []highlight) *wire.View {
 	t := textsFor(r.Locale)
 	items := []wire.Component{}
-	if item.Type != "" {
-		items = append(items, wire.Component{Type: wire.ComponentText, Text: item.Type, Style: wire.TextStyleSecondary})
+	title := clipText(item.displayTitle(), 2000)
+	confirmTitle := clipText(title, 1800)
+	if kind := item.kind(); kind != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(kind, 2000), Style: wire.TextStyleSecondary})
 	}
-	if httpsLink(item.URL) {
-		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: item.URL})
+	if link := item.link(); httpsLink(link) {
+		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.favourite, Action: &wire.Action{ID: "favourite", Confirm: t.favourite + "\n" + item.Title}})
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.archive, Action: &wire.Action{ID: "archive", Confirm: t.archive + "\n" + item.Title}})
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.favourite, Action: &wire.Action{ID: "favourite", Confirm: t.favourite + "\n" + confirmTitle}})
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.archive, Action: &wire.Action{ID: "archive", Confirm: t.archive + "\n" + confirmTitle}})
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Title, 2000), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.read, Items: items}}}
-	if item.Note != "" {
-		v.Sections = append(v.Sections, wire.Section{Title: t.note, Items: textComponents(item.Note)})
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.read, Items: items}}}
+	used := len(items)
+	if note := capComponents(textComponents(item.Note), maxNoteItems); len(note) > 0 {
+		used += len(note)
+		v.Sections = append(v.Sections, wire.Section{Title: t.note, Items: note})
 	}
-	if item.Text != "" {
-		v.Sections = append(v.Sections, wire.Section{Title: t.text, Items: textComponents(item.Text)})
+	if body := capComponents(textComponents(item.Content.Text), maxTextItems); len(body) > 0 {
+		used += len(body)
+		v.Sections = append(v.Sections, wire.Section{Title: t.text, Items: body})
 	}
-	if item.Content != "" {
-		v.Sections = append(v.Sections, wire.Section{Title: t.text, Items: textComponents(item.Content)})
-	}
-	if len(highlights) > 0 {
-		section := wire.Section{Title: t.highlights}
-		for _, h := range highlights {
-			if h.BookmarkID != item.ID {
-				continue
-			}
-			section.Items = append(section.Items, textComponents(h.Text)...)
-			section.Items = append(section.Items, textComponents(h.Note)...)
+	section := wire.Section{Title: t.highlights}
+	for _, h := range highlights {
+		if h.BookmarkID != item.ID {
+			continue
 		}
-		if len(section.Items) > 0 {
-			v.Sections = append(v.Sections, section)
-		}
+		section.Items = append(section.Items, textComponents(h.Text)...)
+		section.Items = append(section.Items, textComponents(h.Note)...)
+	}
+	section.Items = capComponents(section.Items, maxViewItems-used)
+	if len(section.Items) > 0 {
+		v.Sections = append(v.Sections, section)
 	}
 	return v
+}
+
+// capComponents keeps the first n components and shows the cut on the last one.
+func capComponents(items []wire.Component, n int) []wire.Component {
+	if n <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) <= n {
+		return items
+	}
+	items = items[:n]
+	items[n-1].Text = clipText(items[n-1].Text, 1700) + " […]"
+	return items
 }
 
 func saveView(r *ext.UIRequest, st pageState) *wire.View {
@@ -198,9 +247,10 @@ func saveView(r *ext.UIRequest, st pageState) *wire.View {
 
 func reviewSaveView(r *ext.UIRequest, st pageState) *wire.View {
 	t := textsFor(r.Locale)
+	displayURL := clipText(st.SaveURL, 1800)
 	return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentText, Text: st.SaveURL},
-		{Type: wire.ComponentButton, Title: t.confirm, Action: &wire.Action{ID: "save", Confirm: t.save + "\n" + st.SaveURL}},
+		{Type: wire.ComponentText, Text: displayURL},
+		{Type: wire.ComponentButton, Title: t.confirm, Action: &wire.Action{ID: "save", Confirm: t.save + "\n" + displayURL}},
 	}}}}
 }
 

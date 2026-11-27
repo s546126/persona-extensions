@@ -34,9 +34,9 @@ func newFakeDEV(t *testing.T) *fakeDEV {
 				fmt.Fprint(w, `[]`)
 				return
 			}
-			fmt.Fprint(w, `[{"id":101,"title":"Designing a calmer reading workflow","description":"Keep context with your notes","url":"https://dev.to/example/calmer-reading","comments_count":2,"public_reactions_count":30,"reading_time_minutes":6,"tag_list":["programming","productivity"],"user":{"name":"Example Author","username":"author"}},{"id":102,"title":"Other topic","url":"https://dev.to/example/other","comments_count":0,"public_reactions_count":0,"reading_time_minutes":3,"tag_list":["hardware"],"user":{"name":"Other","username":"other"}}]`)
+			fmt.Fprint(w, `[{"id":101,"title":"Designing a calmer reading workflow","description":"Keep context with your notes","url":"https://dev.to/example/calmer-reading","comments_count":2,"public_reactions_count":30,"reading_time_minutes":6,"tag_list":["programming","productivity"],"tags":"programming, productivity","user":{"name":"Example Author","username":"author"}},{"id":102,"title":"Other topic","url":"https://dev.to/example/other","comments_count":0,"public_reactions_count":0,"reading_time_minutes":3,"tag_list":["hardware"],"tags":"hardware","user":{"name":"Other","username":"other"}}]`)
 		case "/articles/101":
-			fmt.Fprint(w, `{"id":101,"title":"Designing a calmer reading workflow","description":"Keep context with your notes","url":"https://dev.to/example/calmer-reading","comments_count":2,"public_reactions_count":30,"reading_time_minutes":6,"tag_list":["programming"],"body_markdown":"# Calmer reading\n\nKeep the original context next to the note.","user":{"name":"Example Author","username":"author"}}`)
+			fmt.Fprint(w, `{"id":101,"title":"Designing a calmer reading workflow","description":"Keep context with your notes","url":"https://dev.to/example/calmer-reading","comments_count":2,"public_reactions_count":30,"reading_time_minutes":6,"tag_list":"programming, productivity","tags":["programming","productivity"],"body_markdown":"# Calmer reading\n\nKeep the original context next to the note.","user":{"name":"Example Author","username":"author"}}`)
 		case "/comments":
 			fmt.Fprint(w, `[{"id_code":"c1","created_at":"2026-11-09T10:00:00Z","body_html":"<p>Useful context</p><script>never execute</script>","user":{"name":"Reader"},"children":[{"id_code":"c2","created_at":"2026-11-09T11:00:00Z","body_html":"<p>A follow-up</p>","user":{"name":"Another"},"children":[]}]}]`)
 		default:
@@ -77,12 +77,42 @@ func TestInterestsAndArticleRead(t *testing.T) {
 	a := f.app()
 	a.cfg = config{Tags: []string{"programming"}, MinReactions: 10}
 	text, err := a.callTool(t.Context(), "devto_articles", json.RawMessage(`{"query":"calmer"}`))
-	if err != nil || !strings.Contains(text, "calmer reading") || strings.Contains(text, "Other topic") {
+	if err != nil || !strings.Contains(text, "calmer reading") || !strings.Contains(text, "tags: programming, productivity") || strings.Contains(text, "Other topic") {
 		t.Fatalf("%v %s", err, text)
 	}
 	text, err = a.callTool(t.Context(), "devto_read", json.RawMessage(`{"id":101}`))
-	if err != nil || !strings.Contains(text, "Keep the original context") || !strings.Contains(text, "Useful context") || !strings.Contains(text, "A follow-up") || strings.Contains(text, "never execute") {
+	if err != nil || !strings.Contains(text, "Keep the original context") || !strings.Contains(text, "tags: programming, productivity") || !strings.Contains(text, "Useful context") || !strings.Contains(text, "A follow-up") || strings.Contains(text, "never execute") {
 		t.Fatalf("%v %s", err, text)
+	}
+}
+
+func TestDocumentedTagShapes(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"list", `{"tag_list":["go","webdev"],"tags":"go, webdev"}`, "go,webdev"},
+		{"show", `{"tag_list":"go, webdev","tags":["go","webdev"]}`, "go,webdev"},
+		{"string only", `{"tags":" go,, webdev , "}`, "go,webdev"},
+		{"tag_list string only", `{"tag_list":"go","tags":null}`, "go"},
+		{"none", `{"tag_list":"","tags":[]}`, ""},
+	} {
+		var item article
+		if err := json.Unmarshal([]byte(tc.body), &item); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := strings.Join(item.tagNames(), ","); got != tc.want {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+		if tc.want != "" && len(filterArticles([]article{item}, config{Tags: []string{"WebDev", "go"}}, "", 0)) != 1 {
+			t.Fatalf("%s: configured tags did not match", tc.name)
+		}
+	}
+	a := newFakeDEV(t).app()
+	a.cfg = config{Tags: []string{"productivity"}}
+	v, err := a.render(t.Context(), &ext.UIRequest{UIParams: wire.UIParams{Locale: "en", UIVersion: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := v.Sections[0].Items; len(rows) != 1 || rows[0].Key != "article-101" || !strings.HasSuffix(rows[0].Subtitle, "programming, productivity") {
+		t.Fatalf("%+v", v.Sections[0].Items)
 	}
 }
 
@@ -150,7 +180,7 @@ func TestPageLoadsMoreWithoutReplacingArticles(t *testing.T) {
 		}
 		items := make([]map[string]any, 30)
 		for i := range items {
-			items[i] = map[string]any{"id": i + 1, "title": "Article", "url": "https://dev.to/example", "tag_list": []string{"programming"}}
+			items[i] = map[string]any{"id": i + 1, "title": "Article", "url": "https://dev.to/example", "tag_list": []string{"programming"}, "tags": "programming"}
 		}
 		_ = json.NewEncoder(w).Encode(items)
 	}))

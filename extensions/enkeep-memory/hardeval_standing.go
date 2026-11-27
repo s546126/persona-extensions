@@ -61,27 +61,69 @@ func hardevalStanding(args []string) error {
 		}
 		after = r.After
 	}
+	byID := map[string]memsrc.Extra{}
+	for _, x := range extras {
+		byID[x.Entry.ID] = x
+	}
 	in := map[string]bool{}
-	low := 101
+	low := 1000
 	bytes := 0
+	bucketCount := map[string]int{}
+	bucketBytes := map[string]int{}
+	polCount := map[string]int{}
+	dimCount := map[string]int{}
+	clippedCount := 0
 	fmt.Printf("standing set, room %d bytes:\n", *room)
 	for _, e := range standing {
 		in[e.ID] = true
 		sc := -1
-		if x := st.Entries[e.ID]; x != nil {
-			sc = entry.Score(x)
-		} else {
-			for _, x := range extras {
-				if x.Entry.ID == e.ID {
-					sc = x.Score
+		bucket := "unknown"
+		tag := ""
+		if x, ok := byID[e.ID]; ok {
+			sc = x.Score
+			bucket = x.L1Kind
+			if bucket == memsrc.BucketContract {
+				tag = "pol=" + x.Polarity
+				if x.Hard {
+					tag += ",hard"
 				}
+				polCount[x.Polarity]++
+			} else {
+				tag = "dim=" + x.Dimension
+				dimCount[x.Dimension]++
+			}
+		} else if x := st.Entries[e.ID]; x != nil {
+			sc = entry.Score(x)
+			if e.Rank >= 990 {
+				bucket = memsrc.BucketHot
+				if x.Pinned {
+					tag = "pinned"
+				} else {
+					tag = "fast_hot"
+				}
+			} else if entry.KindOf(x) == entry.KindRules {
+				bucket = "cold_contract"
+			} else {
+				bucket = "cold_principle"
 			}
 		}
+		if strings.Contains(e.Text, "…") {
+			clippedCount++
+		}
 		low = min(low, sc)
-		bytes += len(e.Text) + 3
-		fmt.Printf("  %4d  score %3d  %-28s %s\n", e.Rank, sc, e.ID, clipRunes(strings.ReplaceAll(e.Text, "\n", " "), 60))
+		sz := len(e.Text) + 3
+		bytes += sz
+		bucketCount[bucket]++
+		bucketBytes[bucket] += sz
+		fmt.Printf("  %4d  score %3d  %-10s %-18s %3dB  %-22s %s\n", e.Rank, sc, bucket, tag, sz, e.ID, clipRunes(strings.ReplaceAll(e.Text, "\n", " "), 70))
 	}
-	fmt.Printf("  %d lines, %d bytes, lowest score %d\n\npatterns:\n", len(standing), bytes, low)
+	fmt.Printf("  total: %d lines, %d/%d bytes (unused %d B), lowest score %d, clipped %d\n", len(standing), bytes, *room, *room-bytes, low, clippedCount)
+	fmt.Printf("  buckets: hot=%d (%d B), profile=%d (%d B), principle=%d (%d B), contract=%d (%d B)\n",
+		bucketCount[memsrc.BucketHot], bucketBytes[memsrc.BucketHot],
+		bucketCount[memsrc.BucketProfile], bucketBytes[memsrc.BucketProfile],
+		bucketCount[memsrc.BucketPrinciple], bucketBytes[memsrc.BucketPrinciple],
+		bucketCount[memsrc.BucketContract], bucketBytes[memsrc.BucketContract])
+	fmt.Printf("  contract polarities: %v | principle dimensions: %v\n\npatterns:\n", polCount, dimCount)
 	tpl := entry.TemplateQuotes(st.Entries)
 	sort.Slice(extras, func(i, j int) bool { return extras[i].Score > extras[j].Score })
 	for _, x := range extras {

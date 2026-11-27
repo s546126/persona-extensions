@@ -49,6 +49,10 @@ func newFakeNotion(t *testing.T) *fakeNotion {
 			if r.Method == http.MethodPatch {
 				var in map[string]any
 				_ = json.NewDecoder(io.LimitReader(r.Body, 65536)).Decode(&in)
+				if _, ok := in["children"]; !ok || !validWrite(in) {
+					rejectWrite(w)
+					return
+				}
 				f.mu.Lock()
 				f.patches = append(f.patches, in)
 				f.mu.Unlock()
@@ -61,6 +65,10 @@ func newFakeNotion(t *testing.T) *fakeNotion {
 		case "/pages":
 			var in map[string]any
 			_ = json.NewDecoder(io.LimitReader(r.Body, 65536)).Decode(&in)
+			if _, ok := in["properties"]; !ok || !validWrite(in) {
+				rejectWrite(w)
+				return
+			}
 			f.mu.Lock()
 			f.creates = append(f.creates, in)
 			f.mu.Unlock()
@@ -71,6 +79,75 @@ func newFakeNotion(t *testing.T) *fakeNotion {
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func rejectWrite(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusBadRequest)
+	fmt.Fprint(w, `{"object":"error","status":400,"code":"validation_error","message":"body failed validation"}`)
+}
+
+// validWrite checks a write body against Notion's documented request schema:
+// each child block holds only object, type and the body named by type, the
+// body holds only request fields, and each rich text or title item is a text
+// request with content.
+func validWrite(in map[string]any) bool {
+	if raw, ok := in["children"]; ok {
+		children, _ := raw.([]any)
+		if len(children) == 0 {
+			return false
+		}
+		for _, raw := range children {
+			child, _ := raw.(map[string]any)
+			kind, _ := child["type"].(string)
+			body, _ := child[kind].(map[string]any)
+			if body == nil || !validRichText(body["rich_text"]) {
+				return false
+			}
+			for key, value := range child {
+				if key == "object" && value != "block" || key != "object" && key != "type" && key != kind {
+					return false
+				}
+			}
+			for key := range body {
+				if key != "rich_text" && (key != "checked" || kind != "to_do") {
+					return false
+				}
+			}
+		}
+	}
+	if raw, ok := in["properties"]; ok {
+		props, _ := raw.(map[string]any)
+		title, _ := props["title"].(map[string]any)
+		if title == nil || !validRichText(title["title"]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validRichText(raw any) bool {
+	items, _ := raw.([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		_, response := item["plain_text"]
+		if item["type"] != "text" || response || textContent([]any{item}) == "" {
+			return false
+		}
+	}
+	return len(items) > 0
+}
+
+// textContent joins the text.content of rich text request items.
+func textContent(raw any) string {
+	var b strings.Builder
+	items, _ := raw.([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		text, _ := item["text"].(map[string]any)
+		content, _ := text["content"].(string)
+		b.WriteString(content)
+	}
+	return b.String()
 }
 
 func (f *fakeNotion) app() *app {
@@ -127,7 +204,8 @@ func TestAppendTodoUsesRealBlockTypeAndReplay(t *testing.T) {
 	}
 	children := f.patches[0]["children"].([]any)
 	first := children[0].(map[string]any)
-	if first["type"] != "to_do" || first["to_do"].(map[string]any)["checked"] != false {
+	todo, _ := first["to_do"].(map[string]any)
+	if len(children) != 1 || first["type"] != "to_do" || todo["checked"] != false || textContent(todo["rich_text"]) != "Review tomorrow" {
 		t.Fatal(first)
 	}
 }
@@ -142,8 +220,14 @@ func TestCreateParentAndTitleAreSeparate(t *testing.T) {
 	if len(f.creates) != 1 {
 		t.Fatal(f.creates)
 	}
-	if f.creates[0]["parent"].(map[string]any)["page_id"] != "page-1" || f.creates[0]["children"] == nil {
-		t.Fatal(f.creates)
+	in := f.creates[0]
+	title, _ := in["properties"].(map[string]any)["title"].(map[string]any)
+	children, _ := in["children"].([]any)
+	if in["parent"].(map[string]any)["page_id"] != "page-1" || textContent(title["title"]) != "New child page" || len(children) != 1 {
+		t.Fatal(in)
+	}
+	if paragraph, _ := children[0].(map[string]any)["paragraph"].(map[string]any); textContent(paragraph["rich_text"]) != "Read notes" {
+		t.Fatal(children)
 	}
 }
 

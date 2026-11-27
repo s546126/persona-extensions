@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "commons",
   "name": "Wikimedia Commons 图片检索",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "icon": "assets/icon.png",
   "description": "搜索 Wikimedia Commons 图片，查看作者、许可、缩略图和原始说明页。内容由 hub 通过公开 API 获取，无需账号。",
   "publisher": "nwverse",
@@ -20,7 +20,7 @@
     "source": {
       "entry": "src/index.ts",
       "bundle": "build/commons.mjs",
-      "sha256": "10c197c7065c740d369cbcab848a99900b8072338f656b08002016c438976ecb"
+      "sha256": "0db8b6d2a45f0244b288b168ae46bb94a96595172d52672456db499826b15874"
     }
   },
   "contributes": {

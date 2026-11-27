@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // Task IDs and project IDs are opaque strings in Todoist's current API, not numbers.
 type task struct {
 	ID          string    `json:"id"`
@@ -17,12 +19,44 @@ type task struct {
 	ChildOrder  int       `json:"child_order"`
 }
 
+// dueDate is the API v1 due object. Date is a full day ("2016-12-01"), a floating wall time in the
+// user's zone ("2016-12-01T12:00:00[.ffffff]") or a fixed time stored in UTC ("2016-12-06T13:00:00[.ffffff]Z").
 type dueDate struct {
-	Date      string `json:"date"`
-	String    string `json:"string"`
-	Recurring bool   `json:"recurring"`
-	Datetime  string `json:"datetime"`
-	Timezone  string `json:"timezone"`
+	Date        string `json:"date"`
+	String      string `json:"string"`
+	IsRecurring bool   `json:"is_recurring"`
+	Timezone    string `json:"timezone"`
+}
+
+// localDay returns the due day (YYYY-MM-DD) and, for timed dues, the wall clock (HH:MM) in loc.
+// Both are empty when there is no due date or Todoist sent a form this version does not know.
+func (d *dueDate) localDay(loc *time.Location) (day, clock string) {
+	if d == nil {
+		return "", ""
+	}
+	if t, err := time.Parse(time.DateOnly, d.Date); err == nil {
+		return t.Format(time.DateOnly), ""
+	}
+	if t, err := time.Parse(time.RFC3339Nano, d.Date); err == nil {
+		t = t.In(loc)
+		return t.Format(time.DateOnly), t.Format("15:04")
+	}
+	if t, err := time.Parse("2006-01-02T15:04:05.999999999", d.Date); err == nil {
+		return t.Format(time.DateOnly), t.Format("15:04")
+	}
+	return "", ""
+}
+
+// label is the due day and clock in loc for display; an unknown form is shown as Todoist sent it.
+func (d *dueDate) label(loc *time.Location) string {
+	day, clock := d.localDay(loc)
+	if day == "" {
+		return d.Date
+	}
+	if clock != "" {
+		return day + " " + clock
+	}
+	return day
 }
 
 type duration struct {

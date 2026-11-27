@@ -71,7 +71,6 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 }
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
-	keyData, _ := json.Marshal(raw)
 	var text string
 	var err error
 	switch name {
@@ -83,7 +82,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if err := in.validate(); err != nil {
 			return nil, err
 		}
-		text, err = a.receipts.commit(requestID, string(keyData), func() (string, error) {
+		keyData, _ := json.Marshal(in)
+		text, err = a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 			item, err := a.client.createTask(ctx, in.ProjectID, in.Title, in.Description, in.DueDate)
 			if err != nil {
 				return "", err
@@ -100,7 +100,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if in.TaskID <= 0 {
 			return nil, errors.New("task ID must be positive")
 		}
-		text, err = a.receipts.commit(requestID, string(keyData), func() (string, error) {
+		keyData, _ := json.Marshal(in)
+		text, err = a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 			if _, err := a.client.completeTask(ctx, in.TaskID); err != nil {
 				return "", err
 			}

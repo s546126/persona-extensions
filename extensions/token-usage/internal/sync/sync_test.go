@@ -519,3 +519,69 @@ func TestLoopStopsWithoutAHub(t *testing.T) {
 
 // Keep io imported for the request body drain pattern used by other tests of this module.
 var _ = io.Discard
+
+// Each round reports how it ended to the client, so the page can tell the user why nothing new arrives: nothing read
+// when the computer list fails, then nothing wrong once a round reads every computer.
+func TestARoundReportsHowItEnded(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"machines": []hub.Machine{}})
+	}))
+	defer srv.Close()
+	client := hub.New(srv.URL, "tok", nil)
+	st, bf := store.Open(""), budget.Open("")
+
+	if r := client.LastPull(); !r.At.IsZero() || r.Err != nil || len(r.Failed) > 0 {
+		t.Fatalf("before any round: %+v", r)
+	}
+	pull(context.Background(), client, st, bf, time.UTC, map[string]bool{})
+	r := client.LastPull()
+	if r.At.IsZero() || r.Err == nil || !strings.Contains(r.Err.Error(), "自动再试") {
+		t.Fatalf("after a failed round: %+v", r)
+	}
+	fail.Store(false)
+	pull(context.Background(), client, st, bf, time.UTC, map[string]bool{})
+	if r := client.LastPull(); r.Err != nil || len(r.Failed) > 0 {
+		t.Fatalf("after a good round: %+v", r)
+	}
+}
+
+// One computer that cannot be read is reported as that computer, by its display name, out of how many there are; the
+// round itself did not fail and the others are still read.
+func TestOneComputerFailingIsReportedByName(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusBadGateway} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/v1/machines":
+					_ = json.NewEncoder(w).Encode(map[string]any{"machines": []hub.Machine{
+						{ID: "m-a", Name: "书房电脑"}, {ID: "m-b", Name: "旧笔记本"}, {ID: "m-c"},
+					}})
+				case strings.HasPrefix(r.URL.Path, "/api/v1/machines/m-b/"):
+					http.Error(w, "no such machine", status)
+				default:
+					_ = json.NewEncoder(w).Encode(map[string]any{"usage": map[string]any{}})
+				}
+			}))
+			defer srv.Close()
+			client := hub.New(srv.URL, "tok", nil)
+			backfilled := map[string]bool{}
+			pull(context.Background(), client, store.Open(""), budget.Open(""), time.UTC, backfilled)
+			r := client.LastPull()
+			if r.Err != nil || r.Total != 3 || len(r.Failed) != 1 || r.Failed[0].Name != "旧笔记本" {
+				t.Fatalf("report %+v", r)
+			}
+			if hub.NotFound(r.Failed[0].Err) != (status == http.StatusNotFound) {
+				t.Fatalf("not found %v for %d", hub.NotFound(r.Failed[0].Err), status)
+			}
+			if !backfilled["m-a"] || !backfilled["m-c"] || backfilled["m-b"] {
+				t.Fatalf("the other computers were not read: %v", backfilled)
+			}
+		})
+	}
+}

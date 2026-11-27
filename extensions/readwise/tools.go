@@ -114,8 +114,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if !map[string]bool{"": true, "article": true, "email": true, "rss": true, "pdf": true, "epub": true, "tweet": true, "video": true}[in.Category] {
 			return "", errors.New("invalid category")
 		}
-		if in.Limit < 0 || in.Limit > 50 || len([]rune(in.Query)) > 200 {
-			return "", errors.New("invalid query or limit")
+		if in.Limit < 0 || in.Limit > 50 || len([]rune(in.Query)) > 200 || len(in.Cursor) > 256 {
+			return "", errors.New("invalid query, cursor or limit")
 		}
 		page, err := a.client.list(ctx, listParams{Location: in.Location, Category: in.Category, Cursor: in.Cursor})
 		a.record(err)
@@ -139,7 +139,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if page.Cursor != "" {
 			fmt.Fprintf(&b, "\nNext cursor: %s\n", page.Cursor)
 		}
-		return b.String(), nil
+		return clipText(b.String(), 90000), nil
 	case "readwise_read":
 		var in struct{ ID string }
 		if err := decode(raw, &in); err != nil {

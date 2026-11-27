@@ -1,0 +1,43 @@
+{
+  "manifest_version": 1,
+  "id": "relingo",
+  "name": "Relingo",
+  "version": "0.2.1",
+  "replaces": "termwise",
+  "icon": "assets/icon.png",
+  "description": "帮你读英文：扩展里多一页「英文阅读」，有两种看法。「翻译模式」在每段原文下面附上中文；「生词模式」把较难的词挑出来，点一下看意思，有用就记下来。Persona 版本支持的话，在 App 里点英文单词也能直接查意思、记下或删掉。记下的词保存在你的 Persona 里，不用装别的程序，也不用打开终端。以前装过 termwise 的，升级后记下的词和设置都还在。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/relingo.md",
+  "tags": ["阅读", "翻译", "生词", "英语"],
+  "engines": {"plugin_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/relingo-linux-amd64",
+      "linux-arm64": "bin/relingo-linux-arm64",
+      "darwin-arm64": "bin/relingo-darwin-arm64",
+      "darwin-amd64": "bin/relingo-darwin-amd64"
+    }
+  },
+  "contributes": {
+    "ui": [
+      {"id": "read", "title": "英文阅读", "placement": "plugin_page"}
+    ],
+    "text_lookup": [
+      {"id": "relingo", "name": "Relingo", "languages": ["en"]}
+    ]
+  },
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "underline_saved": {
+        "type": "boolean",
+        "default": false,
+        "title": "在 App 里给记下的词加下划线",
+        "description": "一般不用改，默认关着。打开后，在 App 里看到的英文中，凡是你记下的词都会带一条下划线，方便复习；点一下就能看意思。"
+      }
+    }
+  },
+  "permissions": {
+    "network": ["api.mymemory.translated.net"]
+  }
+}

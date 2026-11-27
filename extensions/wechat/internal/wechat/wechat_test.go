@@ -82,6 +82,7 @@ type fakeILink struct {
 	failedSend chan struct{}
 	clientIDs  []string          // every sendmessage's client_id, repeated ones too
 	kept       map[string]bool   // client_ids iLink has: a repeat is not posted again
+	hosts      []string          // hosts requested through RoundTrip
 	uploadReq  []map[string]any  // getuploadurl's requests
 	uploads    map[string][]byte // what the CDN took, by the download reference it answered
 	pictures   []sentPicture
@@ -123,6 +124,7 @@ func newFakeILink(t *testing.T) *fakeILink {
 
 func (f *fakeILink) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Lock()
+	f.hosts = append(f.hosts, r.URL.Host)
 	f.requests = append(f.requests, fakeRequest{Host: r.URL.Host, Path: r.URL.Path, Auth: r.Header.Get("Authorization")})
 	f.mu.Unlock()
 	u, _ := url.Parse(f.srv.URL)
@@ -462,8 +464,47 @@ func TestBindByQRCode(t *testing.T) {
 	}
 }
 
-// A poll that fails for good (here iLink confirms with a base URL outside weixin.qq.com) must not leave the dead QR
-// in place: asking again with the same code would fail the same way forever.
+// International WeChat accounts redirect from ilinkai.weixin.qq.com to ilinkai.wechat.com during QR polling and
+// confirm with https://ilinkai.wechat.com/ as their base URL.
+func TestBindInternationalWeChatByQRCode(t *testing.T) {
+	r := newRig(t, false)
+	ctx := context.Background()
+	eventually(t, "not signed in", func() bool { return r.bot.Status(ctx).State == wire.ConnectorStateNotSignedIn })
+	r.ilink.statuses = []map[string]any{
+		{"status": "scaned_but_redirect", "redirect_host": "ilinkai.wechat.com"},
+		{"status": "confirmed", "bot_token": "BT-INTL", "ilink_bot_id": "bot@im.bot", "ilink_user_id": owner, "baseurl": "https://ilinkai.wechat.com/"},
+	}
+	p, err := r.bot.LoginStep(ctx, "", nil)
+	if err != nil || p.Kind != wire.ConnectorPromptKindQr {
+		t.Fatalf("begin: %+v %v", p, err)
+	}
+	if p, err = r.bot.LoginStep(ctx, "qr", nil); err != nil || p.Kind != wire.ConnectorPromptKindQr {
+		t.Fatalf("redirect: %+v %v", p, err)
+	}
+	if p, err = r.bot.LoginStep(ctx, "qr", nil); err != nil || !p.Done {
+		t.Fatalf("confirmed: %+v %v", p, err)
+	}
+	if st := r.secrets.state(t); st.Creds == nil || st.Creds.BaseURL != "https://ilinkai.wechat.com/" || st.Creds.Token != "BT-INTL" {
+		t.Fatalf("stored %+v", st)
+	}
+	eventually(t, "serving on ilinkai.wechat.com", func() bool {
+		if r.bot.Status(ctx).State != wire.ConnectorStateOk {
+			return false
+		}
+		r.ilink.mu.Lock()
+		defer r.ilink.mu.Unlock()
+		return len(r.ilink.hosts) >= 4 && slices.Contains(r.ilink.hosts[3:], "ilinkai.wechat.com")
+	})
+	r.ilink.mu.Lock()
+	hosts := append([]string(nil), r.ilink.hosts...)
+	r.ilink.mu.Unlock()
+	if hosts[0] != "ilinkai.weixin.qq.com" || hosts[1] != "ilinkai.weixin.qq.com" || hosts[2] != "ilinkai.wechat.com" {
+		t.Fatalf("unexpected request hosts: %v", hosts)
+	}
+}
+
+// A poll that fails for good (here iLink confirms with a base URL outside weixin.qq.com / wechat.com) must not leave
+// the dead QR in place: asking again with the same code would fail the same way forever.
 func TestFailedPollForgetsThePendingQR(t *testing.T) {
 	r := newRig(t, false)
 	ctx := context.Background()
@@ -474,6 +515,10 @@ func TestFailedPollForgetsThePendingQR(t *testing.T) {
 	_, err := r.bot.LoginStep(ctx, "qr", nil)
 	if err == nil || ilink.Retryable(err) {
 		t.Fatalf("want a final error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "source=baseurl") || !strings.Contains(err.Error(), `host="ilink.example.com"`) ||
+		strings.Contains(err.Error(), "BT") || strings.Contains(err.Error(), owner) {
+		t.Fatalf("unexpected final error diagnostic: %v", err)
 	}
 	r.bot.mu.Lock()
 	pending := r.bot.qr

@@ -176,21 +176,40 @@ func (b *Bot) rememberOutbound(peer, serverID, text string, media []quoteMedia) 
 	}
 }
 
-// Send is the hub's channel.send: text to the owner, in the chat of their latest message, then its pictures. Before
-// the owner has written to the bot there is no context token, and nothing can be sent: errCannotSend.
+// Send is sendIn for the WeChat bound now.
+func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelSendResult, error) {
+	return b.sendIn(ctx, b.sendGeneration(), p)
+}
+
+// sendGeneration is the bot's sending generation now (Bot.sendGen): the binding a channel.send comes in for.
+func (b *Bot) sendGeneration() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sendGen
+}
+
+// sendIn is the hub's channel.send that came in during sending generation gen (Bot.sendGen): text to the owner, in the
+// chat of their latest message, then its pictures. Before the owner has written to the bot there is no context token,
+// and nothing can be sent: errCannotSend. A send that starts after the binding changed (it waited for an earlier send of
+// its ref) was for a WeChat no longer bound, and sends nothing: errRebound.
 //
 // A picture that cannot be sent (not a picture, too large, or refused by WeChat in a way that does not pass) is skipped
 // and the pictures after it go on; a last text then tells the owner how many were not sent. A failure that may pass
 // stops the send (sendFailed), and so does sendDeadline: the hub sends the same ref again, and what WeChat confirmed of
 // it is remembered by ref (sendProgress), so the next send of the ref goes on from the piece or picture that failed.
-func (b *Bot) Send(ctx context.Context, p wire.ChannelSendParams) (wire.ChannelSendResult, error) {
+func (b *Bot) sendIn(ctx context.Context, gen uint64, p wire.ChannelSendParams) (wire.ChannelSendResult, error) {
 	parts := splitText(p.Text)
 	sum := ""
 	if p.Ref != "" {
 		sum = messageSum(parts, p.Images)
 	}
 	b.mu.Lock()
-	c, creds, contextToken, gen := b.client, b.st.Creds, b.st.Context, b.sendGen
+	if gen != b.sendGen {
+		b.mu.Unlock()
+		log.Printf("wechat: send reply_to=%q ref=%q not sent: the WeChat it came in for is no longer bound", p.ReplyTo, p.Ref)
+		return wire.ChannelSendResult{}, errRebound
+	}
+	c, creds, contextToken := b.client, b.st.Creds, b.st.Context
 	round := b.roundLocked(p.Ref, sum)
 	b.mu.Unlock()
 	if creds == nil || c == nil || contextToken == "" {
@@ -290,7 +309,8 @@ func sendIDsOf(ref, peer string, round int, sum string, n, m int) sendIDs {
 	return ids
 }
 
-// roundsMost is how many refs' rounds the bot keeps; past it the oldest is dropped.
+// roundsMost is how many refs' rounds the bot keeps; past it the oldest is dropped (a ref with progress kept gets its
+// round back from the progress: roundLocked).
 const roundsMost = 256
 
 // sendRound is the latest content sent under a ref (its messageSum) and which round of the ref it is.
@@ -300,7 +320,9 @@ type sendRound struct {
 }
 
 // roundLocked is the round of ref's send of the content sum, b.mu held: the latest round when sum is the latest
-// content sent under ref (the hub sends it again), the next round when it is not. Without a ref it is 0.
+// content sent under ref (the hub sends it again), the next round when it is not. Without a ref it is 0. A ref whose
+// round was dropped while its progress is still kept (the hub sends it again after a failure) takes the progress's
+// round as the latest, so the same content goes on from where it stopped and other content takes the next round.
 func (b *Bot) roundLocked(ref, sum string) int {
 	if ref == "" {
 		return 0
@@ -318,19 +340,21 @@ func (b *Bot) roundLocked(ref, sum string) int {
 			delete(b.rounds, b.roundOrder[0])
 			b.roundOrder = b.roundOrder[1:]
 		}
+		if kept, has := b.progress[ref]; has {
+			r = sendRound{sum: kept.sum, n: kept.round}
+		}
 	}
-	r = sendRound{sum: sum, n: r.n + 1}
+	if r.sum != sum {
+		r = sendRound{sum: sum, n: r.n + 1}
+	}
 	b.rounds[ref] = r
 	return r.n
 }
 
-// sendKey tells one channel.send under a ref from another at the program's entry (sentRefs): the binding's sending
-// generation (Bot.sendGen) and the message's content, so a send to a WeChat bound later is not answered with what
-// was sent to one before.
-func (b *Bot) sendKey(p wire.ChannelSendParams) string {
-	b.mu.Lock()
-	gen := b.sendGen
-	b.mu.Unlock()
+// sendKey tells one channel.send under a ref from another at the program's entry (sentRefs): the sending generation
+// the call came in (Bot.sendGen) and the message's content, so a send to a WeChat bound later is not answered with
+// what was sent to one before.
+func sendKey(gen uint64, p wire.ChannelSendParams) string {
 	return strconv.FormatUint(gen, 10) + ":" + messageSum(splitText(p.Text), p.Images)
 }
 

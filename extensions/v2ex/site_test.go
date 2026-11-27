@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -58,35 +60,48 @@ func TestRefreshWaitsForTheFloor(t *testing.T) {
 	}
 }
 
+type siteTestTransport func(*http.Request) (*http.Response, error)
+
+func (send siteTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return send(req)
+}
+
 func TestRequestsArePacedAndNamed(t *testing.T) {
-	f := newFakeSite(t)
-	sample(f)
-	a := testApp(t, f, "")
-	set(t, &requestGap, 80*time.Millisecond)
-	ctx := context.Background()
-	for _, id := range []string{"hot", "latest"} {
-		if _, err := a.list(ctx, id, false); err != nil {
-			t.Fatal(err)
+	const gap = 80 * time.Millisecond
+	set(t, &requestGap, gap)
+	synctest.Test(t, func(t *testing.T) {
+		s := newSite("https://v2ex.example")
+		var previous time.Time
+		requests := 0
+		// Observe dispatch directly so socket scheduling and transport retries
+		// cannot affect either the measured gap or the number of requests.
+		s.http.Transport = siteTestTransport(func(req *http.Request) (*http.Response, error) {
+			now := time.Now()
+			if !previous.IsZero() && now.Sub(previous) < gap {
+				t.Errorf("request %d came %v after the previous one, want at least %v",
+					requests+1, now.Sub(previous), gap)
+			}
+			previous = now
+			requests++
+			if ua := req.Header.Get("User-Agent"); ua != "persona-v2ex/"+about.Version || about.Version == "" {
+				t.Errorf("User-Agent %q", ua)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("[]")),
+			}, nil
+		})
+
+		paths := []string{"/topics/hot.json", "/topics/latest.json", topicPath(1001), repliesPath(1001)}
+		for _, path := range paths {
+			if _, err := s.get(t.Context(), path, 0); err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
 		}
-	}
-	if _, err := a.thread(ctx, 1001, true, false); err != nil {
-		t.Fatal(err)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.times) != 4 {
-		t.Fatalf("%d requests, want 4", len(f.times))
-	}
-	for i := 1; i < len(f.times); i++ {
-		if gap := f.times[i].Sub(f.times[i-1]); gap < 70*time.Millisecond {
-			t.Fatalf("request %d came %v after the one before", i, gap)
+		if requests != len(paths) {
+			t.Fatalf("%d requests, want %d", requests, len(paths))
 		}
-	}
-	for _, ua := range f.agents {
-		if ua != "persona-v2ex/"+about.Version || about.Version == "" {
-			t.Fatalf("User-Agent %q", ua)
-		}
-	}
+	})
 }
 
 func TestWaitingForTheGateEndsWithTheCaller(t *testing.T) {

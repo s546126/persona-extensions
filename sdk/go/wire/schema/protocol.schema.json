@@ -112,6 +112,7 @@
         "extension": {"$ref": "#/$defs/ExtensionInfo"},
         "plugin": {"$ref": "#/$defs/ExtensionInfo"},
         "config": {"description": "The configuration with the schema's defaults filled in."},
+        "inbox_visibility": {"description": "The manager's source-privacy boundary, sent only to an extension contributing a selected connector. Runtime authorization input, not extension settings persisted in the extension registry."},
         "secrets": {"type": "object", "additionalProperties": {"type": "string"}},
         "granted": {"$ref": "manifest.schema.json#/$defs/Permissions"},
         "active": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}},
@@ -591,15 +592,21 @@
           "type": "string",
           "enum": [
             "STRING",
-            "CONCEALED"
+            "CONCEALED",
+            "OTP"
           ]
+        },
+        "delete": {
+          "type": "boolean"
+        },
+        "keep_value": {
+          "type": "boolean"
         }
       },
       "required": [
-        "name",
-        "type"
+        "name"
       ],
-      "description": "A public field name/type; never a value or source path."
+      "description": "A public field name/type or edit action (delete, keep_value); never a value or source path."
     },
     "SecretStoreTarget": {
       "type": "object",

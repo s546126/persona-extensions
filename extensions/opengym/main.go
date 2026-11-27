@@ -94,6 +94,9 @@ type app struct {
 	syncMu  sync.Mutex // one sync at a time
 	writeMu sync.Mutex // one write at a time
 
+	doneMu sync.Mutex
+	done   map[string]writeReceipt
+
 	catalog catalogNames
 }
 
@@ -103,7 +106,17 @@ func newApp(logf func(string, ...any)) *app {
 	}
 	return &app{logf: logf, client: newClient(), now: time.Now, zone: func() *time.Location { return time.Local },
 		getenv: os.Getenv, catalogURL: defaultCatalog, every: defaultRefresh * time.Minute, names: true,
-		cfgErr: errNoServer}
+		cfgErr: errNoServer, done: map[string]writeReceipt{}}
+}
+
+func (a *app) currentZone() *time.Location {
+	a.mu.Lock()
+	z := a.zone
+	a.mu.Unlock()
+	if z != nil {
+		return z()
+	}
+	return time.Local
 }
 
 func main() {
@@ -149,7 +162,7 @@ func (a *app) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]
 	every, cfgErr := a.every, a.cfgErr
 	a.mu.Unlock()
 	if cfgErr != nil {
-		a.logf("opengym: %v", cfgErr)
+		a.logf("opengym: not set up yet (%v); the page shows what to fill in", cfgErr)
 		return nil, nil
 	}
 	a.logf("opengym: server %s, checking every %s", a.serverName(), every)
@@ -187,6 +200,9 @@ func (a *app) configure(cfg config, token string) {
 	}
 	a.every = time.Duration(min(max(m, refreshFloor), refreshCeil)) * time.Minute
 	a.snap, a.lastErr, a.checked = nil, nil, time.Time{}
+	a.doneMu.Lock()
+	a.done = map[string]writeReceipt{}
+	a.doneMu.Unlock()
 }
 
 // poll checks the server soon after start and then every period, and the exercise names once a day, until ctx ends.
@@ -200,16 +216,25 @@ func (a *app) poll(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 		}
-		if time.Since(namesAt) > 24*time.Hour {
-			namesAt = time.Now()
-			if err := a.loadNames(ctx); err != nil {
-				a.logf("opengym: exercise names: %v", err)
-			}
-		}
-		if err := a.sync(ctx, true); err != nil {
-			a.logf("opengym: %v", err)
-		}
+		a.tick(ctx, &namesAt)
 		t.Reset(every)
+	}
+}
+
+// tick is one round of the loop. Before the address and the key are filled in it does nothing: no request, no log
+// line (init said once that the settings are missing; a change of the settings starts the program again).
+func (a *app) tick(ctx context.Context, namesAt *time.Time) {
+	if a.health().Config != nil {
+		return
+	}
+	if time.Since(*namesAt) > 24*time.Hour {
+		*namesAt = time.Now()
+		if err := a.loadNames(ctx); err != nil {
+			a.logf("opengym: exercise names: %v", err)
+		}
+	}
+	if err := a.sync(ctx, true); err != nil {
+		a.logf("opengym: %v", err)
 	}
 }
 
@@ -225,17 +250,18 @@ func (a *app) invalidate() {
 
 // health is how the server is doing, for the page and the status.
 type health struct {
-	Server  string
-	Config  error
-	Checked time.Time
-	Err     error
-	Every   time.Duration
+	Server   string
+	Config   error
+	HasToken bool
+	Checked  time.Time
+	Err      error
+	Every    time.Duration
 }
 
 func (a *app) health() health {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	h := health{Config: a.cfgErr, Checked: a.checked, Every: a.every}
+	h := health{Config: a.cfgErr, HasToken: a.token != "", Checked: a.checked, Every: a.every}
 	if a.base != nil {
 		h.Server = a.base.Host + a.base.Path
 	}

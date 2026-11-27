@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "domains",
   "name": "Domains 域名",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "icon": "assets/icon.png",
   "description": "查询单个 .com 或 .net 域名的公开 RDAP 注册信息，查看注册、到期和变更日期，保留本地最近查询。无需账号；不做批量扫描、DNS 探测或联系人收集。",
   "publisher": "nwverse",
@@ -22,7 +22,7 @@
     "source": {
       "entry": "src/index.ts",
       "bundle": "build/domains.mjs",
-      "sha256": "5859b838bc7da285c4c71b733b8a69a4268edb59919556fab5cec871fe222469"
+      "sha256": "4523711a0dc1a12f7c699ed3806b453cf67b01fdff366fd7b89cd5e57df2a401"
     }
   },
   "contributes": {

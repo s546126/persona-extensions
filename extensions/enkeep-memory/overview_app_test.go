@@ -295,3 +295,39 @@ func TestProfilePagePatternPoints(t *testing.T) {
 		t.Fatalf("%+v %+v", p, p.Action)
 	}
 }
+
+func TestReportPageCheckViewFallbackAndCap(t *testing.T) {
+	a, _, _ := overviewApp(t)
+	// Report with disallowed Markdown (http:// link and image) must fall back cleanly and pass CheckView.
+	disallowed := "# Weekly Report\n\nSee [local server](http://localhost:8080/status) and ![chart](https://example.com/chart.png).\n"
+	if err := overview.SaveReportIn(a.c.St.Dir, "weekly", "2026-W12", disallowed); err != nil {
+		t.Fatal(err)
+	}
+	v := a.reportPage(trOf("en"), "ovr:weekly:2026-W12")
+	if err := wire.CheckView(v); err != nil {
+		t.Fatalf("reportPage with disallowed markdown failed CheckView: %v", err)
+	}
+	if len(v.Sections) == 0 || len(v.Sections[0].Items) == 0 || !strings.Contains(v.Sections[0].Items[0].Text, "http://localhost:8080/status") {
+		t.Fatalf("reportPage lost content during fallback: %+v", v)
+	}
+
+	// Report whose raw chunk count exceeds CheckView's 300-component limit must be capped and pass CheckView.
+	huge := strings.Repeat(strings.Repeat("a", 1790)+"\n", 320)
+	if err := overview.SaveReportIn(a.c.St.Dir, "monthly", "2026-12", huge); err != nil {
+		t.Fatal(err)
+	}
+	vh := a.reportPage(trOf("en"), "ovr:monthly:2026-12")
+	if err := wire.CheckView(vh); err != nil {
+		t.Fatalf("huge reportPage failed CheckView: %v", err)
+	}
+	last := vh.Sections[0].Items[len(vh.Sections[0].Items)-1]
+	if !strings.Contains(last.Text, "omitted") {
+		t.Fatalf("huge reportPage missing truncation note: %+v", last)
+	}
+
+	// Overlong period parameter in open state must be truncated so v.Title stays within CheckView's 2000-char limit.
+	vLongTitle := a.reportPage(trOf("en"), "ovr:weekly:"+strings.Repeat("x", 2005))
+	if err := wire.CheckView(vLongTitle); err != nil {
+		t.Fatalf("reportPage with overlong period failed CheckView: %v", err)
+	}
+}

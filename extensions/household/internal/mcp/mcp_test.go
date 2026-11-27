@@ -29,29 +29,41 @@ func today() model.Day { return model.DayOf(time.Now(), shanghai) }
 var wantTools = []string{
 	"household_status", "household_list", "household_meal_suggest", "household_save", "household_use",
 	"household_restock", "household_purchase", "household_chore_done", "household_remove",
+	"household_import_preview", "household_import_list", "household_import_apply", "household_import_undo",
+	"household_import_discard", "household_advise",
 }
 
 // readTools are the tools that never change the data; the manifest allows exactly these.
-var readTools = map[string]bool{"household_status": true, "household_list": true, "household_meal_suggest": true}
+var readTools = map[string]bool{
+	"household_status": true, "household_list": true, "household_meal_suggest": true,
+	"household_import_preview": true, "household_import_list": true, "household_advise": true,
+}
 
 // destructiveTools are the tools that overwrite stored data or delete a record (destructiveHint). Restock only adds
 // purchases, so it is not destructive.
 var destructiveTools = map[string]bool{
 	"household_save": true, "household_use": true, "household_purchase": true,
 	"household_chore_done": true, "household_remove": true,
+	"household_import_apply": true, "household_import_undo": true,
 }
 
 // wantRequired is the required arguments of each tool.
 var wantRequired = map[string][]string{
-	"household_status":       nil,
-	"household_list":         {"type"},
-	"household_meal_suggest": nil,
-	"household_save":         nil,
-	"household_use":          {"id", "amount"},
-	"household_restock":      nil,
-	"household_purchase":     {"ids"},
-	"household_chore_done":   {"id"},
-	"household_remove":       {"id"},
+	"household_status":         nil,
+	"household_list":           {"type"},
+	"household_meal_suggest":   nil,
+	"household_save":           nil,
+	"household_use":            {"id", "amount"},
+	"household_restock":        nil,
+	"household_purchase":       {"ids"},
+	"household_chore_done":     {"id"},
+	"household_remove":         {"id"},
+	"household_import_preview": nil,
+	"household_import_list":    nil,
+	"household_import_apply":   {"draft_id", "revision"},
+	"household_import_undo":    nil,
+	"household_import_discard": {"draft_id"},
+	"household_advise":         nil,
 }
 
 // ---- JSON helpers ----

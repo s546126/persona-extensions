@@ -143,11 +143,13 @@ func (c *client) create(ctx context.Context, collectionID, title, text string) (
 		return document{}, errors.New("collection must be a discovered UUID or personal")
 	}
 	var out envelope[document]
-	err := c.call(ctx, "/documents.create", map[string]any{"collectionId": collectionID, "title": title, "text": text, "publish": false}, &out)
+	if err := c.call(ctx, "/documents.create", map[string]any{"collectionId": collectionID, "title": title, "text": text, "publish": false}, &out); err != nil {
+		return document{}, err
+	}
 	if out.Data.ID == "" {
 		return document{}, errors.New("Outline did not return the created document ID")
 	}
-	return out.Data, err
+	return out.Data, nil
 }
 
 func nextOffset(p pagination) (int, bool, error) {

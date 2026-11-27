@@ -4,7 +4,14 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
 export function repositoryName(value: unknown): string {
   if (typeof value !== "string" || !/^(?:library|[a-z0-9][a-z0-9_-]{0,63})\/[a-z0-9][a-z0-9_.-]{0,99}$/.test(value)) throw new ReadError("invalid");
@@ -15,7 +22,7 @@ function searchName(value: unknown): string {
   return `library/${value}`;
 }
 export function queryText(value: unknown): string {
-  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 100) throw new ReadError("invalid");
   return query;
@@ -61,7 +68,7 @@ function summary(value: unknown): ImageSummary {
   const item = object(value);
   if (typeof item.repo_name !== "string") throw new ReadError("bad_answer");
   const name = repositoryName(item.repo_name.includes("/") ? item.repo_name : searchName(item.repo_name));
-  return { name, description: clip(oneLine(string(item.short_description, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: boolean(item.is_official), url: `https://hub.docker.com/r/${name}` };
+  return { name, description: clip(oneLine(string(item.short_description, "").replace(/[\ud800-\udfff]/gu, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: boolean(item.is_official), url: `https://hub.docker.com/r/${name}` };
 }
 export function parseSearch(raw: unknown, at: number): SearchResult {
   const root = object(raw), seen = new Set<string>();
@@ -74,11 +81,13 @@ export function parseSearch(raw: unknown, at: number): SearchResult {
 }
 export function parseRepository(raw: unknown, name: string): ImageDetail {
   const item = object(raw);
-  if (repositoryName(`${item.namespace}/${string(item.name)}`) !== repositoryName(name)) throw new ReadError("bad_answer");
-  return { name: repositoryName(name), namespace: string(item.namespace), description: clip(oneLine(string(item.description, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: item.namespace === "library", url: `https://hub.docker.com/r/${repositoryName(name)}`, updated: date(item.last_updated), pull: `docker pull ${repositoryName(name)}`, tags: [] };
+  const canonical = repositoryName(name);
+  if (repositoryName(`${item.namespace}/${string(item.name)}`) !== canonical) throw new ReadError("bad_answer");
+  return { name: canonical, namespace: string(item.namespace), description: clip(oneLine(string(item.description, "").replace(/[\ud800-\udfff]/gu, "")), 500), pulls: integer(item.pull_count), stars: integer(item.star_count), official: item.namespace === "library", url: `https://hub.docker.com/r/${canonical}`, updated: date(item.last_updated), pull: `docker pull ${canonical}`, tags: [] };
 }
 export function parseTags(raw: unknown, repository: string): ImageTag[] {
-  const root = object(raw);
+  repositoryName(repository);
+  const root = object(raw), seen = new Set<string>();
   return array(root.results).slice(0, 10).map(value => {
     const item = object(value);
     // Signatures, attestations and metadata are listed as tags too (content_type "unrecognized"): nothing to pull, so they
@@ -86,6 +95,8 @@ export function parseTags(raw: unknown, repository: string): ImageTag[] {
     if (item.content_type !== "image" || item.tag_status !== "active") return undefined;
     const name = string(item.name);
     if (!/^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/.test(name)) throw new ReadError("bad_answer");
+    if (seen.has(name)) throw new ReadError("bad_answer");
+    seen.add(name);
     const digest = string(item.digest);
     if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw new ReadError("bad_answer");
     const platforms = array(item.images).slice(0, 64).map(value => {
@@ -99,7 +110,6 @@ export function parseTags(raw: unknown, repository: string): ImageTag[] {
       if (!/^sha256:[a-f0-9]{64}$/.test(string(image.digest))) throw new ReadError("bad_answer");
       return platform;
     }).filter((value): value is string => value !== undefined);
-    if (repositoryName(repository).length > 130) throw new ReadError("bad_answer");
     return { name, digest, updated: date(item.last_updated), platforms: [...new Set(platforms)] };
   }).filter((tag): tag is ImageTag => tag !== undefined);
 }

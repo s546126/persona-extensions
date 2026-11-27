@@ -1,18 +1,23 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
 )
+
+const maxBoardNameChars = 500
 
 type pageState struct {
 	Mode      string `json:"m,omitempty"`
@@ -27,9 +32,18 @@ type pageState struct {
 	Label     string `json:"s,omitempty"`
 }
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "items", "detail", "create", "review-create", "edit", "review-edit":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.BoardID < 0 || st.ItemID < 0 || len(st.BoardName) > 1000 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len(st.Cursor) > 2048 || len(st.Next) > 2048 || len(st.ColumnID) > 100 || len([]rune(st.Label)) > maxLabelChars {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || st.BoardID < 0 || st.ItemID < 0 || utf8.RuneCountInString(st.BoardName) > maxBoardNameChars || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len(st.Cursor) > 2048 || len(st.Next) > 2048 || len(st.ColumnID) > 100 || len([]rune(st.Label)) > maxLabelChars {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -54,11 +68,11 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err != nil || id <= 0 || r.Values["name"] == "" {
 			return nil, errors.New("invalid board")
 		}
-		st = pageState{Mode: "items", BoardID: id, BoardName: r.Values["name"]}
+		st = pageState{Mode: "items", BoardID: id, BoardName: clipText(r.Values["name"], maxBoardNameChars)}
 	case "boards":
 		st = pageState{}
 	case "more":
-		if st.Next == "" || len(st.Next) > 2048 || strings.ContainsAny(st.Next, "\x00\r\n\"'") {
+		if st.Next == "" || st.Next == st.Cursor || len(st.Next) > 2048 || strings.ContainsAny(st.Next, "\x00\r\n\"'") {
 			return nil, errors.New("invalid next cursor")
 		}
 		st.Cursor = st.Next
@@ -87,6 +101,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, err
 		}
 		st.Name, st.Mode = in.Name, "review-create"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("item draft exceeds page state limit")
+		}
 	case "review-edit":
 		columnID := r.Values["column_id"]
 		if columnID == "" {
@@ -104,7 +121,13 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, err
 		}
 		st.ColumnID, st.Label, st.Mode = in.ColumnID, in.Label, "review-edit"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("status draft exceeds page state limit")
+		}
 	case "confirm-create":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		raw, _ := json.Marshal(createArgs{BoardID: st.BoardID, Name: st.Name})
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "monday_create_item", raw)
 		if err != nil {
@@ -112,6 +135,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-edit":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		raw, _ := json.Marshal(statusArgs{BoardID: st.BoardID, ItemID: st.ItemID, ColumnID: st.ColumnID, Label: st.Label})
 		out, err := a.doAction(ctx, "ui-edit:"+st.DraftID, "monday_update_status", raw)
 		if err != nil {
@@ -151,18 +177,26 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if err != nil {
 			return nil, err
 		}
-		st.Next = page.Cursor
+		st.Next = ""
+		if page.Cursor != "" && page.Cursor != st.Cursor && len(page.Cursor) <= 2048 {
+			st.Next = page.Cursor
+		}
 		section := wire.Section{Title: t.items}
+		seen := map[int64]bool{}
 		for _, item := range page.Items {
-			if item.ID <= 0 || item.Name == "" {
+			if item.ID <= 0 || item.Name == "" || seen[item.ID] {
 				continue
 			}
+			seen[item.ID] = true
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "item-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: clipText(item.UpdatedAt, 100), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
+			if len(section.Items) >= maxViewItems {
+				break
+			}
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noItems})
 		}
-		if page.Cursor != "" {
+		if st.Next != "" {
 			section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more"}}
 		}
 		v := &wire.View{Title: clipText(st.BoardName, 1800), State: ext.EncodeState(st), Sections: []wire.Section{section, {Title: t.items, Items: []wire.Component{
@@ -180,11 +214,16 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return nil, err
 	}
 	section := wire.Section{Title: t.boards}
+	seenBoards := map[int64]bool{}
 	for _, item := range boards {
-		if item.ID <= 0 || item.Name == "" {
+		if item.ID <= 0 || item.Name == "" || seenBoards[item.ID] {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "board-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: fmt.Sprint(item.ID), Action: &wire.Action{ID: "board", Values: map[string]string{"id": fmt.Sprint(item.ID), "name": item.Name}}})
+		seenBoards[item.ID] = true
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "board-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: fmt.Sprint(item.ID), Action: &wire.Action{ID: "board", Values: map[string]string{"id": fmt.Sprint(item.ID), "name": clipText(item.Name, maxBoardNameChars)}}})
+		if len(section.Items) >= maxViewItems {
+			break
+		}
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noBoards})
@@ -195,12 +234,19 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 func (a *app) editorView(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
 	if st.Mode == "review-create" || st.Mode == "review-edit" {
-		action, back := "confirm-create", "create"
-		if st.Mode == "review-edit" {
-			action, back = "confirm-edit", "edit"
+		action, back, summary := "confirm-create", "create", st.Name
+		if st.Mode == "review-create" {
+			if err := (createArgs{BoardID: st.BoardID, Name: st.Name}).validate(); err != nil {
+				return nil, err
+			}
+		} else {
+			action, back, summary = "confirm-edit", "edit", st.Label
+			if err := (statusArgs{BoardID: st.BoardID, ItemID: st.ItemID, ColumnID: st.ColumnID, Label: st.Label}).validate(); err != nil {
+				return nil, err
+			}
 		}
-		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(st.Name+st.Label, 1800)}}
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: action, Confirm: t.review + "\n" + clipText(st.Name+st.Label, 500)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: back}})
+		items := []wire.Component{{Type: wire.ComponentText, Text: clipText(summary, 1800)}}
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: action, Confirm: clipText(t.review+"\n"+clipText(summary, 500), wire.StringMost)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: back}})
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.review, Items: items}}}, nil
 	}
 	var items []wire.Component
@@ -216,12 +262,16 @@ func (a *app) editorView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 		}
 		choices := statusChoices(board, st.ColumnID)
 		if len(choices) > 0 {
-			items = append(items, wire.Component{Type: wire.ComponentField, Kind: "choice", Name: "label", Label: t.label, Value: choices[0].Value, Choices: choices})
+			selected := choices[0].Value
+			if st.Label != "" && slices.ContainsFunc(choices, func(c wire.Choice) bool { return c.Value == st.Label }) {
+				selected = st.Label
+			}
+			items = append(items, wire.Component{Type: wire.ComponentField, Kind: "choice", Name: "label", Label: t.label, Value: selected, Choices: choices})
 		} else {
-			items = append(items, wire.Component{Type: wire.ComponentField, Kind: "text", Name: "label", Label: t.label, Value: st.Label})
+			items = append(items, wire.Component{Type: wire.ComponentField, Kind: "text", Name: "label", Label: t.label, Value: clipText(st.Label, wire.StringMost)})
 		}
 	} else {
-		items = []wire.Component{{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: st.Name}}
+		items = []wire.Component{{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: clipText(st.Name, wire.StringMost)}}
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: action, Submit: true}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
 	return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Items: items}}}, nil
@@ -231,7 +281,10 @@ const maxViewItems = 250
 
 func detailView(r *ext.UIRequest, st pageState, board board, item item) *wire.View {
 	t := textsFor(r.Locale)
-	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(item.UpdatedAt, 100)}}
+	var items []wire.Component
+	if item.UpdatedAt != "" {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(item.UpdatedAt, 100)})
+	}
 	if link := safeBoardLink(item.URL); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}
@@ -248,7 +301,11 @@ func detailView(r *ext.UIRequest, st pageState, board board, item item) *wire.Vi
 	}
 	items = append(items, cols...)
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.update, Action: &wire.Action{ID: "edit", Push: &wire.Push{Title: t.update, State: ext.EncodeState(pageState{Mode: "edit", BoardID: st.BoardID, ItemID: st.ItemID, ColumnID: statusColumnID(board, st.ColumnID), DraftID: randomID()})}}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	return &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.items, Items: items}}}
+	title := clipText(item.Name, 1800)
+	if title == "" {
+		title = fmt.Sprintf("#%d", item.ID)
+	}
+	return &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.items, Items: items}}}
 }
 
 func statusColumnID(board board, selected string) string {
@@ -274,10 +331,31 @@ func statusChoices(board board, selected string) []wire.Choice {
 		if json.Unmarshal([]byte(column.SettingsStr), &settings) != nil {
 			continue
 		}
+		keys := make([]string, 0, len(settings.Labels))
+		for k := range settings.Labels {
+			keys = append(keys, k)
+		}
+		slices.SortFunc(keys, func(a, b string) int {
+			ai, aerr := strconv.Atoi(a)
+			bi, berr := strconv.Atoi(b)
+			if aerr == nil && berr == nil {
+				if c := cmp.Compare(ai, bi); c != 0 {
+					return c
+				}
+			}
+			return cmp.Compare(a, b)
+		})
 		var out []wire.Choice
-		for _, name := range settings.Labels {
-			if name != "" && len(out) < 50 {
-				out = append(out, wire.Choice{Value: name, Title: name})
+		seen := map[string]bool{}
+		for _, k := range keys {
+			name := settings.Labels[k]
+			if name == "" || seen[name] || utf8.RuneCountInString(name) > wire.StringMost {
+				continue
+			}
+			seen[name] = true
+			out = append(out, wire.Choice{Value: name, Title: clipText(name, 200)})
+			if len(out) >= 50 {
+				break
 			}
 		}
 		return out

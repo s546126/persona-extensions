@@ -18,7 +18,14 @@ export function languageFor(config: Config, locale = ""): Language {
   if (config.language && config.language !== "auto") return config.language as Language;
   return locale.toLowerCase().startsWith("ja") ? "ja" : locale.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
-export const clip = (text: string, most: number) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
 export function plain(text: string): string {
   let out = "";
@@ -40,12 +47,12 @@ function validCodepoint(n: number) { return n >= 32 && n <= 0x10ffff && !(n >= 0
 export function word(value: unknown): string {
   if (typeof value !== "string") throw new ReadError("invalid");
   const text = value.trim();
-  if (/[\u0000-\u001f\u007f#?<>[\]{}|\\]/u.test(value) || text.split("/").includes("..")) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff#?<>[\]{}|\\]/u.test(value) || text.split("/").includes("..")) throw new ReadError("invalid");
   if (!text || Array.from(text).length > 120) throw new ReadError("invalid");
   return text;
 }
 export function definitionPath(value: string): string { return `/api/rest_v1/page/definition/${encodeURIComponent(word(value)).replaceAll("%2F", "/")}`; }
-export function entryURL(language: Language, value: string): string { return `https://${language}.wiktionary.org/wiki/${word(value).replaceAll(" ", "_")}`; }
+export function entryURL(language: Language, value: string): string { return `https://${language}.wiktionary.org/wiki/${encodeURIComponent(word(value).replaceAll(" ", "_")).replaceAll("%2F", "/")}`; }
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
   return value as Record<string, unknown>;

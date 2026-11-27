@@ -41,6 +41,9 @@ func (c *client) queryRange(ctx context.Context, query string, recent bool, star
 	if start < 0 {
 		return feed{}, errors.New("start must not be negative")
 	}
+	if count <= 0 || count > maxViewPapers {
+		return feed{}, errors.New("max_results must be between 1 and 100")
+	}
 	q := url.Values{"start": {strconv.Itoa(start)}, "max_results": {strconv.Itoa(count)}}
 	if recent {
 		q.Set("search_query", "all:"+query)

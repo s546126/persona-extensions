@@ -14,6 +14,7 @@ import (
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
 
+	"github.com/nwverse/persona-extensions/extensions/household/internal/imports"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/model"
 	"github.com/nwverse/persona-extensions/pluginkit/spaces/kernel"
 )
@@ -30,6 +31,7 @@ type App struct {
 	loc     func() *time.Location
 	changed func()
 	now     func() time.Time // the clock; replaced in tests
+	imp     *imports.Store   // the import drafts; in memory until UseImports
 }
 
 // New returns the app over st. loc gives the time zone the days are counted in (time.Local when nil). changed is
@@ -60,16 +62,22 @@ type state struct {
 // ctx is one request: its state, the time and time zone, and the base read or changed, with the household space and
 // its records as they are in that base.
 type ctx struct {
-	app   *App
-	r     *ext.UIRequest
-	st    state
-	now   time.Time
-	loc   *time.Location
-	b     *kernel.Base
-	sp    *kernel.Space // the household space; nil before its first write
-	home  *model.Home   // its records, typed
-	today model.Day
+	app    *App
+	r      *ext.UIRequest
+	st     state
+	now    time.Time
+	loc    *time.Location
+	b      *kernel.Base
+	sp     *kernel.Space // the household space; nil before its first write
+	home   *model.Home   // its records, typed
+	today  model.Day
+	imps   *imports.State  // the import drafts and the imports applied
+	impErr error           // why the import store could not be read
+	after  []func(ok bool) // run once the update of an action was saved (true) or not
 }
+
+// onSaved registers f to run after the action's update, with whether the records were saved.
+func (c *ctx) onSaved(f func(ok bool)) { c.after = append(c.after, f) }
 
 // errKeep ends a storage update without saving: nothing changed.
 var errKeep = errors.New("keep")
@@ -95,6 +103,15 @@ var actions = map[string]func(c *ctx, arg string) (*wire.ActionResult, error){
 	"plan":       actPlan,
 	"mealdone":   actMealDone,
 	"mealcancel": actMealCancel,
+	"paste":      actPasteOpen,
+	"imppaste":   actPaste,
+	"impapply":   actImportApply,
+	"impdrop":    actImportDrop,
+	"impreplan":  actImportReplan,
+	"impans":     actImportAnswer,
+	"impopen":    actOpenDraft,
+	"impack":     actImportAck,
+	"impundo":    actImportUndo,
 }
 
 // renderPage draws the nav page for the request.
@@ -134,6 +151,12 @@ func (a *App) act(_ context.Context, r *ext.UIRequest) (*wire.ActionResult, erro
 	var res *wire.ActionResult
 	wrote := false
 	err := a.st.Update(func(b *kernel.Base, _ time.Time) error {
+		c.after = nil
+		// An import or undo left pending by an interrupted save is settled first, against the records exactly as they
+		// are before this change (records lock, then the import store's).
+		if err := a.importsOf().SettleRecords(b); err != nil {
+			return err
+		}
 		c.bind(b)
 		before, err := json.Marshal(b)
 		if err != nil {
@@ -153,6 +176,9 @@ func (a *App) act(_ context.Context, r *ext.UIRequest) (*wire.ActionResult, erro
 		wrote = true
 		return nil
 	})
+	for _, f := range c.after {
+		f(err == nil)
+	}
 	if err != nil && !errors.Is(err, errKeep) {
 		c.st = st0
 		res = &wire.ActionResult{Toast: err.Error()}
@@ -190,6 +216,21 @@ func (a *App) draw(c *ctx) (*wire.View, error) {
 
 // route is the form page when the state names one that exists, else the nav page.
 func (c *ctx) route() *wire.View {
+	if c.st.F == pasteForm {
+		return c.pastePage()
+	}
+	if id, ok := strings.CutPrefix(c.st.F, draftForm); ok {
+		if v := c.draftPage(id); v != nil {
+			return v
+		}
+		c.st.F = ""
+	}
+	if arg, ok := strings.CutPrefix(c.st.F, answerForm); ok {
+		if v := c.answerPage(arg); v != nil {
+			return v
+		}
+		c.st.F = ""
+	}
 	if c.st.F != "" {
 		if v := c.formPage(); v != nil {
 			return v
@@ -215,6 +256,7 @@ func (c *ctx) bind(b *kernel.Base) {
 	c.sp = householdSpace(b)
 	c.home = model.Load(c.sp, c.loc)
 	c.today = model.DayOf(c.now, c.loc)
+	c.loadImports()
 }
 
 // clock is the app's time.

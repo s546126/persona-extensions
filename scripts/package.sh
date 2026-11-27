@@ -18,8 +18,8 @@ rm -rf "${out:?}" && mkdir -p "$out/bin"
 # stop writing persona-plugin.json once the compatibility period ends (docs/reference.md, "Compatibility").
 scripts/manifest.py packaged "$id" >"$out/persona-extension.json"
 cp "$out/persona-extension.json" "$out/persona-plugin.json"
-# Package source-owned assets (icons and their licenses) alongside skills, instructions and looks.
-for extra in skills assistant looks assets; do
+# Package source-owned assets (icons and their licenses) alongside skills, instructions, looks and translations.
+for extra in skills assistant looks assets l10n; do
   [ -d "$src/$extra" ] && cp -R "$src/$extra" "$out/"
 done
 # Native TypeScript source packages ship the import-free bundle and its verified digest.

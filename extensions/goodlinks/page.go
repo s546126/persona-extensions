@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -84,7 +85,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err != nil {
 			return nil, errors.New("invalid starred flag")
 		}
-		raw, _ := json.Marshal(starArgs{LinkID: st.LinkID, Starred: starred})
+		raw, _ := json.Marshal(starArgs{LinkID: st.LinkID, Starred: &starred})
 		out, err := a.doAction(ctx, "ui-star:"+st.DraftID, "goodlinks_toggle_star", raw)
 		if err != nil {
 			return nil, err
@@ -128,6 +129,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if st.View == "" {
 		st.View = "unread"
 	}
+	if st.View != "unread" && st.View != "starred" && st.View != "search" {
+		return nil, errors.New("invalid reading view")
+	}
 	links, more, err := a.collectLinks(ctx, st.View, st.Query, st.Offset)
 	a.record(err)
 	if err != nil {
@@ -140,13 +144,14 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if st.View == "search" {
 		v.Filter.Value = "unread"
 	}
-	section := wire.Section{Title: fmt.Sprintf(t.results, len(links))}
+	rows := make([]wire.Component, 0, len(links))
 	for _, item := range links {
 		if item.ID == "" || item.Title == "" {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "link-" + item.ID, Title: clipText(item.Title, 1800), Subtitle: clipText(item.Author+" · "+strings.Join(item.Tags, ", "), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
+		rows = append(rows, wire.Component{Type: wire.ComponentRow, Key: boundedKey("link-", item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(item.Author+" · "+strings.Join(item.Tags, ", "), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 	}
+	section := wire.Section{Title: fmt.Sprintf(t.results, len(rows)), Items: rows}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noLinks})
 	}
@@ -157,20 +162,33 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	return v, nil
 }
 
-// maxViewLinks keeps the accumulated list within the SDK's component limit.
-const maxViewLinks = 250
+const (
+	// maxViewLinks keeps the accumulated list within the SDK's component limit.
+	maxViewLinks    = 250
+	maxViewItems    = 250
+	maxArticleItems = 150
+)
 
 // collectLinks reads batches from offset 0 through offset so that Load more extends the list instead of
 // replacing it, and reports whether GoodLinks has more links that the cap still leaves room to show.
 func (a *app) collectLinks(ctx context.Context, view, query string, offset int) ([]link, bool, error) {
 	var out []link
+	seen := map[string]bool{}
 	more := false
 	for pos := 0; pos <= offset && len(out) < maxViewLinks; pos += 50 {
 		batch, err := a.client.links(ctx, view, query, pos)
 		if err != nil {
 			return nil, false, err
 		}
-		out = append(out, batch.Data...)
+		for _, item := range batch.Data {
+			if item.ID != "" {
+				if seen[item.ID] {
+					continue
+				}
+				seen[item.ID] = true
+			}
+			out = append(out, item)
+		}
 		more = batch.HasMore
 		if !more {
 			break
@@ -184,35 +202,51 @@ func (a *app) collectLinks(ctx context.Context, view, query string, offset int) 
 
 func detailView(r *ext.UIRequest, st pageState, item link, text string, highlights []highlight) *wire.View {
 	t := textsFor(r.Locale)
+	title := clipText(strings.TrimSpace(item.Title), 1800)
+	if title == "" {
+		title = clipText(strings.TrimSpace(item.ID), 1800)
+	}
+	if title == "" {
+		title = t.reading
+	}
 	items := []wire.Component{{Type: wire.ComponentText, Text: clipText(item.Author+" · "+strings.Join(item.Tags, ", "), 1800)}}
 	if link := safeArticleLink(item.URL); link != "" {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: link})
 	}
 	if item.ReadAt == nil || *item.ReadAt == "" {
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.markRead, Action: &wire.Action{ID: "read", Confirm: t.markRead + "\n" + item.Title}})
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.markRead, Action: &wire.Action{ID: "read", Confirm: clipText(t.markRead+"\n"+title, 1800)}})
 	}
 	starTitle := t.star
 	starred := true
 	if item.Starred {
 		starTitle, starred = t.unstar, false
 	}
-	items = append(items, wire.Component{Type: wire.ComponentButton, Title: starTitle, Action: &wire.Action{ID: "star", Values: map[string]string{"starred": strconv.FormatBool(starred)}, Confirm: starTitle + "\n" + item.Title}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
-	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
+	items = append(items, wire.Component{Type: wire.ComponentButton, Title: starTitle, Action: &wire.Action{ID: "star", Values: map[string]string{"starred": strconv.FormatBool(starred)}, Confirm: clipText(starTitle+"\n"+title, 1800)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
+	v := &wire.View{Title: title, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
+	used := len(items)
 	if text != "" {
-		v.Sections = append(v.Sections, wire.Section{Title: t.article, Items: textComponents(clipText(text, 60000))})
+		articleItems := textComponentsLimit(clipText(text, 60000), maxArticleItems)
+		used += len(articleItems)
+		v.Sections = append(v.Sections, wire.Section{Title: t.article, Items: articleItems})
 	} else {
+		used++
 		v.Sections = append(v.Sections, wire.Section{Title: t.article, Items: []wire.Component{{Type: wire.ComponentText, Text: t.noContent, Style: wire.TextStyleSecondary}}})
 	}
+	limit := maxViewItems - used
 	section := wire.Section{Title: t.highlights}
-	for _, item := range highlights {
-		if item.Content == "" {
+	for _, h := range highlights {
+		if len(section.Items) > limit {
+			break
+		}
+		if h.Content == "" {
 			continue
 		}
-		section.Items = append(section.Items, textComponents(clipText(item.Content, 12000))...)
-		if item.Note != nil && *item.Note != "" {
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(*item.Note, 1800), Style: wire.TextStyleSecondary})
+		section.Items = append(section.Items, textComponentsLimit(clipText(h.Content, 12000), limit-len(section.Items)+1)...)
+		if h.Note != nil && *h.Note != "" {
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(*h.Note, 1800), Style: wire.TextStyleSecondary})
 		}
 	}
+	section.Items = capComponents(section.Items, limit)
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: t.noHighlights, Style: wire.TextStyleSecondary})
 	}
@@ -221,6 +255,13 @@ func detailView(r *ext.UIRequest, st pageState, item link, text string, highligh
 }
 
 func textComponents(text string) []wire.Component {
+	return textComponentsLimit(text, 220)
+}
+
+func textComponentsLimit(text string, limit int) []wire.Component {
+	if limit <= 0 {
+		return nil
+	}
 	var out []wire.Component
 	for _, line := range strings.Split(text, "\n") {
 		r := []rune(line)
@@ -228,7 +269,7 @@ func textComponents(text string) []wire.Component {
 			n := min(len(r), 1800)
 			out = append(out, wire.Component{Type: wire.ComponentText, Text: string(r[:n])})
 			r = r[n:]
-			if len(out) >= 220 {
+			if len(out) >= limit {
 				out[len(out)-1].Text = clipText(out[len(out)-1].Text, 1700) + " […]"
 				return out
 			}
@@ -238,6 +279,27 @@ func textComponents(text string) []wire.Component {
 		out = append(out, wire.Component{Type: wire.ComponentText, Text: " ", Style: wire.TextStyleSecondary})
 	}
 	return out
+}
+
+func capComponents(items []wire.Component, n int) []wire.Component {
+	if n <= 0 {
+		return nil
+	}
+	if len(items) <= n {
+		return items
+	}
+	items = items[:n]
+	items[n-1].Text = clipText(items[n-1].Text, 1700) + " […]"
+	return items
+}
+
+func boundedKey(prefix, id string) string {
+	key := prefix + id
+	if len(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(id))
+	return prefix + hex.EncodeToString(sum[:16])
 }
 
 func randomID() string {

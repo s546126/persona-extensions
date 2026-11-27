@@ -26,9 +26,18 @@ type pageState struct {
 	Deadline        string `json:"e,omitempty"`
 }
 
+func validMode(mode string) bool {
+	switch mode {
+	case "", "detail", "create", "review-create", "edit", "review-edit":
+		return true
+	default:
+		return false
+	}
+}
+
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.StoryID < 0 || st.WorkflowStateID < 0 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len([]rune(st.Description)) > maxDescriptionChars || len(st.Next) > 2048 {
+	if err := r.DecodeState(&st); err != nil || !validMode(st.Mode) || st.StoryID < 0 || st.WorkflowStateID < 0 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len([]rune(st.Description)) > maxDescriptionChars || len(st.Next) > 2048 || len(st.StoryType) > 32 || len(st.Deadline) > 32 {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -49,7 +58,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "more":
-		if err := validNext(r.Values["next"]); err != nil || r.Values["next"] == "" {
+		if err := validNext(r.Values["next"]); err != nil || r.Values["next"] == "" || r.Values["next"] == st.Next || len([]rune(r.Values["next"])) > wire.StringMost {
 			return nil, errors.New("invalid next token")
 		}
 		st.Next = r.Values["next"]
@@ -94,7 +103,13 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, errors.New("invalid workflow state")
 		}
 		st.Mode = "review-edit"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("state draft exceeds page state limit")
+		}
 	case "confirm-create":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		in := createArgs{Name: st.Name, Description: st.Description, WorkflowStateID: st.WorkflowStateID, StoryType: st.StoryType, Deadline: st.Deadline}
 		raw, _ := json.Marshal(in)
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "shortcut_create_story", raw)
@@ -103,6 +118,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-edit":
+		if strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("missing draft ID")
+		}
 		in := updateArgs{StoryID: st.StoryID, WorkflowStateID: st.WorkflowStateID}
 		raw, _ := json.Marshal(in)
 		out, err := a.doAction(ctx, "ui-edit:"+st.DraftID, "shortcut_update_story_state", raw)
@@ -142,19 +160,21 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		section := wire.Section{Title: t.stories}
+		seen := map[int64]bool{}
 		for _, item := range page.Data {
-			if item.ID <= 0 || item.Name == "" {
+			if item.ID <= 0 || item.Name == "" || seen[item.ID] {
 				continue
 			}
+			seen[item.ID] = true
 			if len(section.Items) >= maxViewItems {
 				break
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "story-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: fmt.Sprintf("#%d · %s · %s", item.ID, item.StoryType, item.Deadline), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "story-" + fmt.Sprint(item.ID), Title: clipText(item.Name, 1800), Subtitle: clipText(fmt.Sprintf("#%d · %s · %s", item.ID, item.StoryType, item.Deadline), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": fmt.Sprint(item.ID)}}})
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noStories})
 		}
-		if validNext(page.Next) == nil && page.Next != "" {
+		if validNext(page.Next) == nil && page.Next != "" && page.Next != st.Next && len([]rune(page.Next)) <= wire.StringMost {
 			section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more", Values: map[string]string{"next": page.Next}}}
 		}
 		v := &wire.View{Title: t.stories, State: ext.EncodeState(st), Sections: []wire.Section{section, {Title: t.stories, Items: []wire.Component{
@@ -175,7 +195,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return nil, err
 	}
 	if st.Mode == "edit" || st.Mode == "review-edit" {
-		if st.Mode == "edit" {
+		if st.Mode == "edit" && st.WorkflowStateID == 0 {
 			st.WorkflowStateID = item.WorkflowStateID
 		}
 		return editView(r, st, item, workflows), nil
@@ -195,7 +215,7 @@ func (a *app) createView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 		if st.Description != "" {
 			items = append(items, capComponents(textComponents(st.Description), maxViewItems-4)...)
 		}
-		items = append(items, wire.Component{Type: wire.ComponentText, Text: fmt.Sprintf("%s: %d · %s: %s", t.state, st.WorkflowStateID, t.deadline, st.Deadline)}, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: t.create + "\n" + st.Name}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(fmt.Sprintf("%s: %d · %s: %s", t.state, st.WorkflowStateID, t.deadline, st.Deadline), 1800)}, wire.Component{Type: wire.ComponentButton, Title: t.create, Action: &wire.Action{ID: "confirm-create", Confirm: clipText(t.create+"\n"+st.Name, wire.StringMost)}}, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "create"}})
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.create, Items: items}}}, nil
 	}
 	workflows, err := a.client.workflows(ctx)
@@ -207,11 +227,11 @@ func (a *app) createView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 		return nil, errors.New("no Shortcut workflow state is available")
 	}
 	items := []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: st.Name},
-		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: st.Description},
+		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: clipText(st.Name, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.description, Value: clipText(st.Description, wire.StringMost)},
 		{Type: wire.ComponentField, Kind: "choice", Name: "state_id", Label: t.state, Value: selectedState(st.WorkflowStateID, choices), Choices: choices},
 		{Type: wire.ComponentField, Kind: "choice", Name: "story_type", Label: t.typeLabel, Value: selectedType(st.StoryType), Choices: []wire.Choice{{Value: "feature", Title: t.feature}, {Value: "bug", Title: t.bug}, {Value: "chore", Title: t.chore}}},
-		{Type: wire.ComponentField, Kind: "text", Name: "deadline", Label: t.deadline, Value: st.Deadline},
+		{Type: wire.ComponentField, Kind: "text", Name: "deadline", Label: t.deadline, Value: clipText(st.Deadline, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-create", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}
@@ -232,8 +252,8 @@ func editView(r *ext.UIRequest, st pageState, item story, workflows []workflow) 
 			}
 		}
 		return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-			{Type: wire.ComponentText, Text: t.state + ": " + stateName},
-			{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "confirm-edit", Confirm: t.save + "\n" + item.Name + "\n" + t.state + ": " + stateName}},
+			{Type: wire.ComponentText, Text: clipText(t.state+": "+stateName, 1800)},
+			{Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "confirm-edit", Confirm: clipText(t.save+"\n"+item.Name+"\n"+t.state+": "+stateName, wire.StringMost)}},
 			{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "edit"}},
 		}}}}
 	}
@@ -283,7 +303,11 @@ func detailView(r *ext.UIRequest, st pageState, item story, workflows []workflow
 		comments.Items = append(comments.Items, wire.Component{Type: wire.ComponentText, Text: t.noComments, Style: wire.TextStyleSecondary})
 	}
 	sections = append(sections, comments)
-	return &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: sections}
+	title := clipText(item.Name, 1800)
+	if title == "" {
+		title = fmt.Sprintf("#%d", item.ID)
+	}
+	return &wire.View{Title: title, State: ext.EncodeState(st), Sections: sections}
 }
 
 const (
@@ -305,12 +329,14 @@ func capComponents(items []wire.Component, n int) []wire.Component {
 
 func stateChoices(workflows []workflow, workflowID int64) []wire.Choice {
 	out := []wire.Choice{}
+	seen := map[int64]bool{}
 	for _, workflow := range workflows {
 		if workflowID != 0 && workflow.ID != workflowID {
 			continue
 		}
 		for _, state := range workflow.States {
-			if state.ID > 0 && state.Name != "" && len(out) < 50 {
+			if state.ID > 0 && state.Name != "" && !seen[state.ID] && len(out) < 50 {
+				seen[state.ID] = true
 				out = append(out, wire.Choice{Value: fmt.Sprint(state.ID), Title: clipText(workflow.Name+" · "+state.Name, 100)})
 			}
 		}

@@ -15,8 +15,11 @@ type createArgs struct {
 	Description string `json:"description,omitempty"`
 }
 
-// maxSummaryChars is the longest issue summary: the validation, the tool schema and the page state check use it.
-const maxSummaryChars = 500
+// maxSummaryChars and maxDescriptionChars bound issue drafts across validation, tool schemas, and page state checks.
+const (
+	maxSummaryChars     = 500
+	maxDescriptionChars = 30000
+)
 
 func (in createArgs) validate() error {
 	if err := validResourceID(in.ProjectID); err != nil {
@@ -74,8 +77,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	if project.Archived {
 		return nil, errors.New("cannot create an issue in an archived YouTrack project")
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), func() (string, error) {
+	keyData, _ := json.Marshal(in)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 		item, err := a.client.createIssue(ctx, in.ProjectID, in.Summary, in.Description)
 		if err != nil {
 			return "", err

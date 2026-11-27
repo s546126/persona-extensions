@@ -4,7 +4,14 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => text.length <= most ? text : text.slice(0, most).trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const oneLine = (text: string) => text.replace(/\s+/gu, " ").trim();
 export function plain(text: string): string {
   let out = "";
@@ -14,18 +21,18 @@ export function plain(text: string): string {
       const match = /^&(amp|lt|gt|quot|apos|#39|nbsp|#x[0-9a-fA-F]{1,6}|#[0-9]{1,7});/.exec(text.slice(i));
       if (match) {
         const name = match[1], cp = name.startsWith("#x") ? Number.parseInt(name.slice(2), 16) : name.startsWith("#") ? Number(name.slice(1)) : 0;
-        out += name === "amp" ? "&" : name === "lt" ? "<" : name === "gt" ? ">" : name === "quot" ? '"' : name === "apos" || name === "#39" ? "'" : name === "nbsp" ? " " : validCodepoint(cp) ? String.fromCodePoint(cp) : "�";
+        out += name === "amp" ? "&" : name === "lt" ? "<" : name === "gt" ? ">" : name === "quot" ? '"' : name === "apos" || name === "#39" ? "'" : name === "nbsp" ? " " : validCodepoint(cp) ? String.fromCodePoint(cp) : "\uFFFD";
         i += match[0].length; continue;
       }
     }
     out += text[i++];
   }
-  return oneLine(out);
+  return oneLine(out.replace(/[\ud800-\udfff]/gu, ""));
 }
 function validCodepoint(n: number) { return n >= 32 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) && n !== 0xfffe && n !== 0xffff; }
 export function queryText(value: unknown): string {
   if (typeof value !== "string") throw new ReadError("invalid");
-  if (/[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 160) throw new ReadError("invalid");
   return query;
@@ -52,14 +59,18 @@ function uploadURL(value: unknown): string | undefined {
   try { url = new URL(raw); } catch { throw new ReadError("bad_answer"); }
   if (url.protocol !== "https:" || !["upload.wikimedia.org", "thumb.wikimedia.org"].includes(url.hostname) || url.username || url.password || !url.pathname.startsWith("/wikipedia/commons/")) throw new ReadError("bad_answer");
   url.search = ""; url.hash = "";
+  if (url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function commonsURL(value: unknown, title: string): string {
-  const raw = value == null ? `https://commons.wikimedia.org/wiki/${title.replaceAll(" ", "_")}` : string(value);
+  const raw = value == null
+    ? `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(title.slice("File:".length).replaceAll(" ", "_"))}`
+    : string(value);
   let url: URL;
   try { url = new URL(raw); } catch { throw new ReadError("bad_answer"); }
   if (url.protocol !== "https:" || url.hostname !== "commons.wikimedia.org" || url.username || url.password || !url.pathname.startsWith("/wiki/File:")) throw new ReadError("bad_answer");
   url.search = ""; url.hash = "";
+  if (url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 export interface ImageItem {
@@ -75,11 +86,11 @@ export interface ImageItem {
   height?: number;
 }
 export interface SearchResult { images: ImageItem[]; at: number; stale?: ReadError }
-function metadata(value: unknown, name: string): string {
+function metadata(value: unknown, _name: string): string {
   if (value == null) return "";
   const item = object(value);
   if (item.value == null) return "";
-  return clip(plain(string(item.value)), 4000);
+  return clip(plain(string(item.value)), 2000);
 }
 // licenseHosts serve their licenses over https too, so an http link to them is upgraded.
 const licenseHosts = new Set(["creativecommons.org", "www.gnu.org", "gnu.org", "opensource.org"]);
@@ -91,14 +102,25 @@ function licenseLink(text: string): string | undefined {
   let url: URL;
   try { url = new URL(text); } catch { return undefined; }
   if (url.protocol === "http:" && licenseHosts.has(url.hostname)) url.protocol = "https:";
-  return url.protocol === "https:" && !url.username && !url.password ? url.href : undefined;
+  return url.protocol === "https:" && !url.username && !url.password && url.href.length <= 4096 ? url.href : undefined;
 }
 export function parseImages(raw: unknown, at: number): SearchResult {
-  const query = object(object(raw).query), pages = object(query.pages);
+  const root = object(raw);
+  if (root.query == null) {
+    if (root.error == null && "batchcomplete" in root && (typeof root.batchcomplete === "string" || typeof root.batchcomplete === "boolean")) {
+      return { images: [], at };
+    }
+    throw new ReadError("bad_answer");
+  }
+  const query = object(root.query), pages = object(query.pages);
+  const seen = new Set<number>();
   const images = Object.entries(pages).slice(0, 20).map(([id, rawPage]) => {
     if (!/^[1-9][0-9]{0,9}$/.test(id)) throw new ReadError("bad_answer");
     const page = object(rawPage), title = string(page.title);
-    if (!/^File:[^<>{}\[\]|#\u0000-\u001f]{1,255}$/.test(title)) throw new ReadError("bad_answer");
+    if (!/^File:[^<>{}\[\]|#\u0000-\u001f\ud800-\udfff]{1,255}$/u.test(title)) throw new ReadError("bad_answer");
+    const pageID = integer(page.pageid ?? Number(id), 1_000_000_000);
+    if (pageID < 1 || seen.has(pageID)) throw new ReadError("bad_answer");
+    seen.add(pageID);
     const infos = array(page.imageinfo);
     if (!infos.length) throw new ReadError("bad_answer");
     const info = object(infos[0]), meta = object(info.extmetadata ?? {});
@@ -109,7 +131,7 @@ export function parseImages(raw: unknown, at: number): SearchResult {
     const thumbnailURL = uploadURL(info.thumburl);
     const width = info.thumbwidth == null ? undefined : integer(info.thumbwidth, 640);
     const height = info.thumbheight == null ? undefined : integer(info.thumbheight, 100_000);
-    return { id: integer(page.pageid ?? Number(id), 1_000_000_000), title: clip(title, 300), description, artist, license,
+    return { id: pageID, title: clip(title, 300), description, artist, license,
       ...(licenseURL ? { licenseURL } : {}), pageURL: commonsURL(info.descriptionurl, title),
       ...(thumbnailURL ? { thumbnailURL } : {}), ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }) };
   });

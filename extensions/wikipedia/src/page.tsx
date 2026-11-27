@@ -24,8 +24,29 @@ export function readState(raw: unknown): PageState {
   } catch { return initialState; }
 }
 export const encodeState = (state: PageState) => JSON.stringify(state);
+function shortHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix: string, value: string, max = 128): string {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "-" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
+function articleActionID(title: string): string {
+  const direct = `article:${title}`;
+  return Array.from(direct).length <= 128 ? direct : boundedID("open-article:", title);
+}
 export function transition(state: PageState, id: string, values: unknown = {}): PageState {
-  const [kind, argument] = id.split(":", 2);
+  const sep = id.indexOf(":");
+  const kind = sep < 0 ? id : id.slice(0, sep);
+  const argument = sep < 0 ? "" : id.slice(sep + 1);
   // Legacy full-view actions carry a JSON-encoded record. Reject other shapes before
   // reading fields; a string itself is never a search query or an outbound target.
   let fields: Readonly<Record<string, unknown>>;
@@ -43,6 +64,7 @@ export function transition(state: PageState, id: string, values: unknown = {}): 
       return query ? { ...state, v: "search", q: query, a: "" } : state;
     }
     if (kind === "article" && argument) return { ...state, v: "article", a: titleKey(argument) };
+    if (kind === "open-article" && string("article")) return { ...state, v: "article", a: titleKey(string("article")) };
     if (kind === "back") return { ...state, v: state.q ? "search" : "today", a: "" };
     if (kind === "home") return { ...initialState, d: state.d };
   } catch { /* Invalid external state never selects a new outbound target. */ }
@@ -54,13 +76,15 @@ export async function loadPage(service: Wikipedia, state: PageState, refresh: bo
     if (state.v === "article") return { kind: "article", article: await service.article(state.a, refresh, request.signal) };
     if (state.v === "search") return { kind: "search", articles: await service.search(state.q, 30, request.signal) };
     return { kind: "today", feed: await service.today(state.d || dateAt(service.now()), refresh, request.signal) };
-  } catch (error) { checkSignal(signal); return { kind: "error", error }; }
+  } catch (error) { checkSignal(signal); return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error }; }
   finally { request.dispose(); }
 }
-export interface PageProps { service: Wikipedia; state: PageState; loaded: Loaded; locale?: string; tz?: string; uiVersion?: number; action?: (id: string, next?: PageState, title?: string) => NativeAction | CallbackAction }
+export interface PageProps { service: Wikipedia; state: PageState; loaded: Loaded; locale?: string; tz?: string; uiVersion?: number; action?: (id: string, next?: PageState, title?: string, values?: Record<string, string>) => NativeAction | CallbackAction }
 export function page(props: PageProps): Node {
   const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? service.timezone;
-  const act = (id: string, next?: PageState, title?: string) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "today", state: encodeState(next), ...(title ? { title } : {}) } } : { id });
+  const act = (id: string, next?: PageState, title?: string, values?: Record<string, string>) => props.action?.(id, next, title, values) ?? (next && uiVersion >= 3
+    ? { id, push: { ui: "today", state: encodeState(next), ...(title ? { title } : {}) }, ...(values && uiVersion >= 4 ? { values } : {}) }
+    : values && uiVersion >= 4 ? { id, values } : { id });
   const text = (key: string, value: string, style: "body" | "caption" | "secondary" = "secondary") => <Text key={key} text={clip(value, 1900)} style={style} />;
   const search = <Section key="search" title={t.search}><Field key="query-field" name="query" label={t.search} kind="text" placeholder={t.searchHint} value={state.q} /><Button key="do-search" title={t.searchAction} action={act("search")} /></Section>;
   const tabs = <Section key="tabs">{uiVersion >= 2 ? <Segmented key="tab" name="tab" value={state.t} choices={[{ value: "featured", title: t.featuredShort }, { value: "popular", title: t.popularShort }, { value: "history", title: t.historyShort }]} action={act("tab")} />
@@ -77,7 +101,11 @@ export function page(props: PageProps): Node {
       <Section key="attribution">{text("license", t.attribution, "caption")}</Section>
     </View>;
   }
-  const articleRow = (article: Article, index: number) => <Row key={`article-${index}-${article.title}`} title={article.heading} subtitle={[article.description, article.views !== undefined ? fmt(t.views, { views: article.views.toLocaleString("en-US") }) : ""].filter(Boolean).join(" · ")} action={act(`article:${article.title}`, { ...state, v: "article", a: article.title }, article.heading)} />;
+  const articleRow = (article: Article, index: number) => {
+    const id = articleActionID(article.title);
+    const values = id.startsWith("open-article:") ? { article: article.title } : undefined;
+    return <Row key={boundedID(`article-${index}-`, article.title)} title={article.heading} subtitle={[article.description, article.views !== undefined ? fmt(t.views, { views: article.views.toLocaleString("en-US") }) : ""].filter(Boolean).join(" · ")} action={act(id, { ...state, v: "article", a: article.title }, article.heading, values)} />;
+  };
   if (state.v === "search") {
     if (loaded.kind !== "search") throw new ReadError("invalid");
     return <View key="wikipedia" title={fmt(t.results, { query: clip(state.q, 100) })} state={encodeState(state)}>{search}<Section key="results" title={fmt(t.results, { query: clip(state.q, 100) })}>{loaded.articles.length ? loaded.articles.map(articleRow) : text("empty", t.empty)}<Button key="home" title={t.backToday} action={act("home")} /></Section></View>;

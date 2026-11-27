@@ -7,28 +7,53 @@ import (
 
 	"github.com/nwverse/persona/sdk/go/wire"
 
-	"github.com/nwverse/persona-extensions/extensions/household/internal/model"
 	"github.com/nwverse/persona-extensions/extensions/household/internal/rules"
 )
 
 // sectionLimit is how many rows an overview section shows; the rest are on their tab, and the footer says how many.
 const sectionLimit = 20
 
-// overviewSections is the 总览 tab: the stat grid, then what needs buying, what to use first, the chores due and the
-// meal ideas for today. With no records at all it offers the sample set and adding an item instead.
+// overviewSections is the 总览 tab: one line on what the extension is for, the stat grid with a caption on how its
+// numbers relate, the imports waiting, today's advice, then what needs buying, what to use first and the chores due
+// (each only when it has rows: the empty ones are folded into one line under the advice), the meal ideas for today
+// (always: its empty line says what to do), and the ways to add things. With no records at all it offers the sample
+// set and adding an item instead.
 func (c *ctx) overviewSections() []wire.Section {
 	if c.empty() {
 		return c.welcomeSections()
 	}
 	sum := rules.Summarize(c.home, c.today)
-	return []wire.Section{
-		{Items: []wire.Component{statGrid(overviewStats(sum))}},
-		c.restockSection(),
-		c.expiringSection(),
-		c.choreSection(),
-		c.mealSection(),
-		{Items: []wire.Component{button("添加物品", addAction(model.TItem), wire.ButtonRoleNormal)}},
+	out := []wire.Section{
+		{Items: []wire.Component{quiet(overviewIntro), statGrid(overviewStats(sum))}, Footer: statsCaption},
 	}
+	out = append(out, c.importSections()...)
+	var shown []wire.Section
+	var quietOnes []string
+	for _, b := range []struct {
+		sec  wire.Section
+		none string
+	}{
+		{c.restockSection(), "库存里没有缺的"},
+		{c.expiringSection(), "没有快过期的"},
+		{c.choreSection(), "没有到期的家务"},
+	} {
+		if b.sec.Items[0].Type == wire.ComponentText { // orQuiet: the block has nothing but its empty line
+			quietOnes = append(quietOnes, b.none)
+			continue
+		}
+		shown = append(shown, b.sec)
+	}
+	out = append(out, c.adviceSection(foldedLine(quietOnes)))
+	out = append(out, shown...)
+	return append(out, c.mealSection(), addSection())
+}
+
+// foldedLine is the one quiet line that stands in for the overview blocks with nothing to show, "" for none.
+func foldedLine(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "，") + "。"
 }
 
 // empty reports whether the household has no records at all.
@@ -37,36 +62,55 @@ func (c *ctx) empty() bool {
 	return len(h.Places)+len(h.Items)+len(h.Buys)+len(h.Chores)+len(h.Recipes)+len(h.Meals) == 0
 }
 
-// welcomeSections is the overview of a household with no records: an empty state with 载入示例, and 添加物品.
+// overviewIntro is the one line above the numbers of a household with records: what the extension is for. It is kept
+// to one short line so the numbers stay at the top of a phone screen.
+const overviewIntro = "记家里有什么、该买什么、家务和饭菜，到时提醒你。"
+
+// statsCaption is the line under the numbers: 待买 counts the open entries of the shopping list, which the user puts
+// there (by hand, with 一键补货 or through the assistant); 需要处理 counts what the rules find (alertsDetail).
+const statsCaption = "待买是你记下要买的；需要处理是家庭管家自己发现的。"
+
+// welcomeTitle is the empty state's title on the page and the card.
+const welcomeTitle = "家里的东西还没开始记"
+
+// welcomeSections is the overview of a household with no records: what the extension is for and the first steps, an
+// empty state with 载入示例, the imports waiting, and the ways to add things (添加物品 among them).
 func (c *ctx) welcomeSections() []wire.Section {
-	return []wire.Section{
+	out := []wire.Section{
 		{Items: []wire.Component{{
-			Type: wire.ComponentEmpty, Title: "还没有记录", Detail: "载入示例看看各个页面，或者添加第一件物品",
+			Type: wire.ComponentEmpty, Title: welcomeTitle,
+			Detail: "家庭管家帮你记家里有什么、放在哪，东西快用完或快过期时提醒你买，还能管家务和每天吃什么。" +
+				"先点「添加物品」记下第一件东西，或者载入一组示例看看各页是什么样；也可以直接跟助手说，例如「记一下冰箱里有两盒牛奶」。",
 			Button: &wire.EmptyButton{Title: "载入示例", Action: wire.Action{
 				ID: "load", Confirm: "载入一组虚构的示例记录？",
 			}},
 		}}},
-		{Items: []wire.Component{button("添加物品", addAction(model.TItem), wire.ButtonRoleNormal)}},
 	}
+	// A household without records can still have a draft waiting: a pasted list or the assistant's first import.
+	out = append(out, c.importSections()...)
+	return append(out, addSection())
 }
 
 // overviewStats are the four totals of the overview: what needs handling, purchases open, chores due and items about
-// to expire.
+// to expire. Each of the first two says in its detail what it counts.
 func overviewStats(s rules.Summary) []wire.Stat {
 	return []wire.Stat{
-		{Label: "需要处理", Value: strconv.Itoa(s.Alerts), Detail: join(countText("已过期", s.Expired), countText("已用完", s.Out)), Tone: s.Tone},
-		{Label: "待买", Value: strconv.Itoa(s.OpenBuys)},
+		alertsStat(s),
+		{Label: "待买", Value: strconv.Itoa(s.OpenBuys), Detail: "采购清单上没买的"},
 		{Label: "家务到期", Value: strconv.Itoa(s.ChoresDue), Tone: cautionIf(s.ChoresDue)},
 		{Label: "即将过期", Value: strconv.Itoa(s.Expiring), Tone: cautionIf(s.Expiring)},
 	}
 }
 
-// countText is "label n" for a count above zero, "" for none.
-func countText(label string, n int) string {
-	if n == 0 {
-		return ""
+// alertsStat is 需要处理: the items that need buying (expired, used up, low or running out; rules.Kind.Buyable) plus
+// the chores due, as rules.Summary.Alerts counts them, with the two parts in its detail. Items about to expire are not
+// in it; they have their own number.
+func alertsStat(s rules.Summary) wire.Stat {
+	buy := s.Expired + s.Out + s.Low + s.Runout
+	return wire.Stat{
+		Label: "需要处理", Value: strconv.Itoa(s.Alerts),
+		Detail: fmt.Sprintf("补货 %d · 家务 %d", buy, s.ChoresDue), Tone: s.Tone,
 	}
-	return fmt.Sprintf("%s %d", label, n)
 }
 
 // cautionIf is the caution tone when n is above zero, else no tone.
@@ -177,7 +221,7 @@ func (c *ctx) mealSection() wire.Section {
 	for _, idea := range rules.MealIdeas(c.home, c.today, 3) {
 		rows = append(rows, ideaRow(idea))
 	}
-	return wire.Section{Title: "今天吃什么", Items: orQuiet(rows, "还没有可以做的菜，先添加菜谱")}
+	return wire.Section{Title: "今天吃什么", Items: orQuiet(rows, "还没有可以做的菜：先到「餐食」里添加菜谱")}
 }
 
 // ideaRow is a recipe idea: what is missing or what to use first, and the badge says whether the food is all there.

@@ -84,9 +84,37 @@ test("cancellation and deadlines propagate and do not swallow parent AbortError"
   assert.equal(fixture.cancelled, 1);
   const timed = budget(undefined, 1), slow = make(fixture);
   const request = slow.search("typescript", "stackoverflow", "", 12, false, timed.signal);
-  const rejected = assert.rejects(request, (error: unknown) => error instanceof Error && error.name === "AbortError" && timed.signal.reason instanceof ReadError && timed.signal.reason.code === "slow");
+  const rejected = assert.rejects(request, (error: unknown) => error instanceof ReadError && error.code === "slow");
   await until(async () => timed.signal.aborted, aborted => aborted);
   await rejected; timed.dispose();
+});
+
+test("HTTP status classifies first, not_found skips status, oversized refresh evicts cache, and unknown tool checks before args", async () => {
+  // Bodyless 404 classifies as not_found and does not pollute status().
+  const nfService = new StackExchange(async () => new Response(null, { status: 404 }), {}, { limits: { gap: 0 }, locale: "en" });
+  await assert.rejects(nfService.search("typescript"), (error: unknown) => error instanceof ReadError && error.code === "not_found");
+  assert.equal(nfService.status().state, "ok");
+
+  // Non-UTF-8 503 classifies as http(503) and formats {0} in status().error.
+  const errService = new StackExchange(async () => new Response(new Uint8Array([0xff, 0xfe]), { status: 503 }), {}, { limits: { gap: 0 }, locale: "en" });
+  await assert.rejects(errService.search("typescript"), (error: unknown) => error instanceof ReadError && error.code === "http" && error.status === 503);
+  assert.equal(errService.status().error, "Stack Exchange returned HTTP 503.");
+
+  // Oversized refresh evicts old cached entry.
+  const evictFixture = new Fixture();
+  const initialPayload = { items: [question], has_more: false, quota_remaining: 299 };
+  evictFixture.put(questionPath, initialPayload);
+  const baseBytes = new TextEncoder().encode(JSON.stringify(initialPayload)).byteLength;
+  const evictService = make(evictFixture, { limits: { gap: 0, cacheBytes: baseBytes + 20 } });
+  await evictService.search("typescript");
+  assert.equal(evictService.cacheStats().entries, 1);
+  evictFixture.clock += 61_000;
+  evictFixture.put(questionPath, { items: [question], has_more: false, quota_remaining: 299, extra: "x".repeat(baseBytes + 50) });
+  await evictService.search("typescript", "stackoverflow", "", 12, true);
+  assert.equal(evictService.cacheStats().entries, 0);
+
+  // Unknown tool must return unknown_method even with invalid site/args.
+  await assert.rejects(callTool(evictService, "unknown", { site: "__proto__", limit: "bad" }), /unknown method/);
 });
 
 test("internal per-request timeout surfaces ReadError(slow) and falls back to stale cache", async () => {

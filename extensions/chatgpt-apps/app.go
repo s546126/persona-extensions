@@ -42,6 +42,9 @@ type App struct {
 	loadTimeout time.Duration
 	// answerMost is the most of one ChatGPT answer read (maxAnswer; tests make it small).
 	answerMost int64
+	// Optional test hooks (set before Start; nil in production).
+	beforeCompleteLogin func()
+	afterPoll           func()
 
 	mu      sync.Mutex
 	ctx     context.Context // the program's, from Init
@@ -52,6 +55,7 @@ type App struct {
 	tok     *tokens       // nil: not signed in
 	expired bool          // the last sign-in stopped working (refresh refused)
 	login   *deviceLogin  // the sign-in in progress, if any
+	authGen uint64        // monotonic counter for local auth mutations (guards late loadTokens)
 
 	refreshMu sync.Mutex // one refresh at a time: a refresh token works once
 
@@ -148,7 +152,9 @@ func (a *App) loadTokens(ctx context.Context) {
 		return
 	}
 	a.mu.Lock()
-	a.tok = t
+	if a.authGen == 0 {
+		a.tok = t
+	}
 	a.mu.Unlock()
 }
 

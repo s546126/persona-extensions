@@ -23,8 +23,16 @@ export function Root(options: RootOptions): Node {
         if (id === "refresh") setRefresh(previous => previous + 1);
         else if (id.startsWith("question:")) {
           if (loaded.kind !== "results") return;
-          setState(previous => questionTransition(previous, loaded.result, id));
-        } else setState(previous => transition(previous, id, values));
+          setState(previous => {
+            const nextState = questionTransition(previous, loaded.result, id);
+            if (nextState !== previous) setRefresh(0);
+            return nextState;
+          });
+        } else setState(previous => {
+          const nextState = transition(previous, id, values);
+          if (nextState !== previous) setRefresh(0);
+          return nextState;
+        });
       }, { submit: true });
     } });
 }

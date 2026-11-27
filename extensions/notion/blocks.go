@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -19,12 +20,19 @@ func pageTitle(page notionPage) string {
 			}
 		}
 	}
-	for _, raw := range page.Properties {
+	keys := make([]string, 0, len(page.Properties))
+	for k := range page.Properties {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		var prop struct {
 			Title []richText `json:"title"`
 		}
-		if json.Unmarshal(raw, &prop) == nil && len(prop.Title) > 0 {
-			return plain(prop.Title)
+		if json.Unmarshal(page.Properties[k], &prop) == nil {
+			if title := plain(prop.Title); title != "" {
+				return title
+			}
 		}
 	}
 	return "Untitled"
@@ -110,12 +118,21 @@ func (a *app) readBlocks(ctx context.Context, id string, depth int) ([]string, e
 	return lines, nil
 }
 
-func paragraphBlock(text string) block {
-	return block{Type: "paragraph", Paragraph: richBlock{RichText: []richText{{PlainText: text}}}}
+// Writes send Notion's request objects, not the response types in model.go:
+// Notion rejects response-only fields such as plain_text, and a block that
+// carries any key besides object, type and the body named by type.
+
+// textItems returns a rich text request holding one text item.
+func textItems(text string) []map[string]any {
+	return []map[string]any{{"type": "text", "text": map[string]string{"content": text}}}
 }
 
-func todoBlockFor(text string) block {
-	return block{Type: "to_do", Todo: todoBlock{RichText: []richText{{PlainText: text}}}}
+func paragraphRequest(text string) map[string]any {
+	return map[string]any{"object": "block", "type": "paragraph", "paragraph": map[string]any{"rich_text": textItems(text)}}
+}
+
+func todoRequest(text string) map[string]any {
+	return map[string]any{"object": "block", "type": "to_do", "to_do": map[string]any{"rich_text": textItems(text), "checked": false}}
 }
 
 func validNotionID(id string) error {

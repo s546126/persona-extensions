@@ -14,6 +14,7 @@ import (
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/export"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/memsrc"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/model"
+	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/norm"
 	"github.com/nwverse/persona-extensions/extensions/enkeep-memory/internal/store"
 )
 
@@ -31,16 +32,20 @@ var (
 )
 
 // The forward check (design 2.5, line 3): the user's real choices first seen in a week (a situation, what they chose
-// and what they turned down) are put as two-option questions to a model three times: with the patterns kept before
-// the week, with the scattered entries in the same number of characters, and with no memory. A question is scored by
-// code (the option the user took), never by a model. Patterns resting on a question's own entry or its class are left
-// out of the patterns' memory, and the same entries out of the scattered memory, so neither arm sees the answer.
-// Neither arm carries anything categorised or from a restricted space (what memory.entries never makes standing).
+// and what they turned down) are filtered by code to remove obvious strawman distractors and then screened without
+// memory in both option orders so easy common-sense questions are dropped. The surviving hard questions are put to the
+// model in both option orders under three arms: the patterns kept before the week, scattered entries in the same
+// character budget, and no memory (answered afresh, never reusing the filter pass). Scoring is purely by code (strict
+// 2/2 across both orders to eliminate position bias, with trial rates also noted). Patterns or scattered entries
+// resting on a question's entry, its class, or any of its ref@day units are excluded so no arm sees the answer.
 const (
-	HoldoutMost     = 30
-	holdoutBatch    = 15
-	holdoutMaxTok   = 1500
-	memoryCharsMost = 6000
+	HoldoutMost        = 30
+	holdoutScanMost    = 120
+	holdoutFilterRound = 30
+	holdoutBatch       = 15
+	holdoutMaxTok      = 1500
+	memoryCharsMost    = 6000
+	minOptionRunes     = 6
 )
 
 // Arms of the check.
@@ -50,41 +55,76 @@ const (
 	ArmNone     = "none"
 )
 
-// question is one held-out choice.
+// question is one held-out real choice.
 type question struct {
-	e      *entry.Entry
-	a, b   string
-	answer string // "A" or "B": where the user's choice is
+	e *entry.Entry
 }
 
-// questions are the week's real choices: actions first seen in it with a situation, a choice and what was turned
-// down, of the four facets where a choice is made; at most HoldoutMost, picked by a hash of their ids (no cherry
-// picking), the options' order by the same hash.
+// strawmanCues are phrases that turn a rejected option into an obvious strawman any stranger would turn down without
+// knowing the user. Real trade-offs have plausible alternatives.
+var strawmanCues = []string{
+	"盲目", "草率", "胡乱", "敷衍", "随意", "乱改", "瞎猜",
+	"不验证", "不检查", "不核对", "不确认", "不测试", "跳过测试", "跳过验证", "跳过检查",
+	"直接忽略", "忽略报错", "忽略错误", "无视错误", "掩盖错误",
+	"伪造", "编造", "造假", "欺骗", "泄露", "硬编码", "不看直接",
+	"blindly", "carelessly", "randomly", "ignore error", "ignore fail", "skip test", "skip check",
+	"fabricate", "hardcode", "leak secret",
+}
+
+// strawmanRejected reports whether a choice/rejected pair is too trivial or unbalanced to test personal preference.
+func strawmanRejected(choice, rejected string) bool {
+	c, r := strings.TrimSpace(choice), strings.TrimSpace(rejected)
+	if len([]rune(c)) < minOptionRunes || len([]rune(r)) < minOptionRunes {
+		return true
+	}
+	if norm.Jaccard(c, r) > 0.7 {
+		return true
+	}
+	low := strings.ToLower(r)
+	for _, cue := range strawmanCues {
+		if strings.Contains(low, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+// questions draws real choice candidates first seen in the week (situation, choice, plausible rejected option) across
+// the four choice facets, balanced round-robin in hash order (no cherry picking), up to holdoutScanMost.
 func questions(st *store.State, days []string) []question {
-	var out []question
+	choiceFacets := []entry.Facet{entry.Judgement, entry.Workflow, entry.Tools, entry.Interaction}
+	byFacet := map[entry.Facet][]question{}
 	for _, e := range st.Entries {
 		if !usable(st, e) || e.Grain != entry.Action || e.First < days[0] || e.First > days[6] {
 			continue
 		}
-		switch e.Facet {
-		case entry.Judgement, entry.Workflow, entry.Interaction, entry.Tools:
-		default:
+		if len(e.Cats()) > 0 || e.OriginSpace != "" {
 			continue
 		}
-		if strings.TrimSpace(e.Situation) == "" || strings.TrimSpace(e.Choice) == "" || strings.TrimSpace(e.Rejected) == "" {
+		if !slices.Contains(choiceFacets, e.Facet) {
 			continue
 		}
-		out = append(out, question{e: e})
+		if strings.TrimSpace(e.Situation) == "" || strawmanRejected(e.Choice, e.Rejected) {
+			continue
+		}
+		byFacet[e.Facet] = append(byFacet[e.Facet], question{e: e})
 	}
 	h := func(s string) string { x := sha1.Sum([]byte(s)); return fmt.Sprintf("%x", x) }
-	sort.Slice(out, func(i, j int) bool { return h(out[i].e.ID) < h(out[j].e.ID) })
-	out = out[:min(len(out), HoldoutMost)]
-	for i := range out {
-		q := &out[i]
-		if h(q.e.ID + "/order")[0] < '8' {
-			q.a, q.b, q.answer = q.e.Choice, q.e.Rejected, "A"
-		} else {
-			q.a, q.b, q.answer = q.e.Rejected, q.e.Choice, "B"
+	for _, f := range choiceFacets {
+		qs := byFacet[f]
+		sort.Slice(qs, func(i, j int) bool { return h(qs[i].e.ID) < h(qs[j].e.ID) })
+		byFacet[f] = qs
+	}
+	var out []question
+	for len(out) < holdoutScanMost {
+		took := false
+		for _, f := range choiceFacets {
+			if qs := byFacet[f]; len(qs) > 0 && len(out) < holdoutScanMost {
+				out, byFacet[f], took = append(out, qs[0]), qs[1:], true
+			}
+		}
+		if !took {
+			break
 		}
 	}
 	return out
@@ -107,34 +147,153 @@ type (
 			Pick string `json:"pick"`
 		} `json:"answers"`
 	}
+	askedTrial struct {
+		id        string
+		qIdx      int
+		situation string
+		a, b      string
+		answer    string
+	}
 )
 
-// Holdout checks the patterns of s (kept before the week) against the week's real choices in st. backtest marks a
+// twoOrderTrials builds both AB and BA trials for qs.
+func twoOrderTrials(qs []question) []askedTrial {
+	out := make([]askedTrial, 0, len(qs)*2)
+	for i, q := range qs {
+		out = append(out,
+			askedTrial{id: fmt.Sprintf("q%d_1", i+1), qIdx: i, situation: q.e.Situation, a: q.e.Choice, b: q.e.Rejected, answer: "A"},
+			askedTrial{id: fmt.Sprintf("q%d_2", i+1), qIdx: i, situation: q.e.Situation, a: q.e.Rejected, b: q.e.Choice, answer: "B"},
+		)
+	}
+	return out
+}
+
+// askTrials asks m to answer trials given mem, returning per-question right count (0, 1 or 2) and total right trials.
+func (r *Runner) askTrials(ctx context.Context, run *Run, mem string, nQ int, trials []askedTrial) ([]int, int, int, error) {
+	perQ := make([]int, nQ)
+	totalRight := 0
+	declined := 0
+	for b := 0; b < len(trials); b += holdoutBatch {
+		batch := trials[b:min(len(trials), b+holdoutBatch)]
+		in := predictInput{Memory: mem}
+		for _, t := range batch {
+			in.Questions = append(in.Questions, predictQuestion{ID: t.id, Situation: clip(t.situation, 160),
+				A: clip(t.a, 120), B: clip(t.b, 120)})
+		}
+		var out predictOutput
+		err := r.call(ctx, run, "predict", model.Small, predictPrompt, predictSchema, in, holdoutMaxTok, &out)
+		if errors.Is(err, model.ErrRefused) {
+			declined++
+			continue
+		}
+		if err != nil {
+			return perQ, totalRight, declined, err
+		}
+		picks := map[string]string{}
+		for _, a := range out.Answers {
+			picks[a.ID] = a.Pick
+		}
+		for _, t := range batch {
+			if picks[t.id] == t.answer {
+				perQ[t.qIdx]++
+				totalRight++
+			}
+		}
+	}
+	return perQ, totalRight, declined, nil
+}
+
+// filterHard screens candidates without memory in both option orders and drops any question a stranger gets right both
+// times, stopping once HoldoutMost hard questions are found.
+func (r *Runner) filterHard(ctx context.Context, run *Run, cands []question) (hard []question, scanned, dropped int, err error) {
+	for start := 0; start < len(cands) && len(hard) < HoldoutMost; start += holdoutFilterRound {
+		chunk := cands[start:min(len(cands), start+holdoutFilterRound)]
+		trials := twoOrderTrials(chunk)
+		perQ, _, _, aerr := r.askTrials(ctx, run, "", len(chunk), trials)
+		if aerr != nil {
+			return hard, scanned, dropped, aerr
+		}
+		scanned += len(chunk)
+		for i, q := range chunk {
+			if perQ[i] == 2 {
+				dropped++
+				continue
+			}
+			if len(hard) < HoldoutMost {
+				hard = append(hard, q)
+			}
+		}
+	}
+	return hard, scanned, dropped, nil
+}
+
+// entryUnits returns all ref@day keys under e (walking its evidence tree).
+func entryUnits(st *store.State, e *entry.Entry) []string {
+	var out []string
+	for _, ev := range evidenceOf(st, e, "") {
+		if !slices.Contains(out, ev.key) {
+			out = append(out, ev.key)
+		}
+	}
+	return out
+}
+
+// Holdout checks the patterns of s (kept before the week) against the week's hard real choices in st. backtest marks a
 // check whose patterns were built with a cutoff at the week's start.
 func (r *Runner) Holdout(ctx context.Context, st *store.State, s *State, week string, backtest bool) (*Holdout, error) {
 	days, err := weekDays(week)
 	if err != nil {
 		return nil, err
 	}
-	qs := questions(st, days)
-	h := &Holdout{Week: week, At: stamp(r.now()), Backtest: backtest, N: len(qs), Hits: map[string]int{}, Rate: map[string]float64{},
+	cands := questions(st, days)
+	h := &Holdout{Week: week, At: stamp(r.now()), Backtest: backtest, Hits: map[string]int{}, Rate: map[string]float64{},
 		Chars: map[string]int{}}
-	if len(qs) == 0 {
-		h.Notes = append(h.Notes, "no real choice with a turned-down option was first seen in the week")
+	if len(cands) == 0 {
+		h.Notes = append(h.Notes, "no real choice with a plausible turned-down option was first seen in the week")
 		return h, nil
 	}
-	// What a question's answer is: its entry and its class.
+	run := &Run{}
+	qs, scanned, dropped, err := r.filterHard(ctx, run, cands)
+	if err != nil {
+		h.Calls = run.Calls
+		return h, err
+	}
+	h.Candidates, h.DroppedEasy = scanned, dropped
+	if len(qs) == 0 {
+		// Fall back only if every candidate was easy, and record it plainly.
+		qs = cands[:min(len(cands), HoldoutMost)]
+		h.Notes = append(h.Notes, "all candidates were answered right without memory; fell back to unfiltered candidates")
+	}
+	h.N = len(qs)
+
+	// Anti-leak set: every question's own entry, its parent class, and all entries sharing any of its ref@day units.
 	leak := map[string]bool{}
+	leakUnits := map[string]bool{}
 	for _, q := range qs {
 		leak[q.e.ID] = true
 		if q.e.Parent != "" {
 			leak[q.e.Parent] = true
 		}
+		for _, u := range entryUnits(st, q.e) {
+			leakUnits[u] = true
+		}
 	}
+	hasLeakUnit := func(e *entry.Entry) bool {
+		if e == nil {
+			return false
+		}
+		for _, u := range entryUnits(st, e) {
+			if leakUnits[u] {
+				return true
+			}
+		}
+		return false
+	}
+
 	// The patterns' memory.
 	var lines []string
 	for _, p := range s.Sorted(func(p *Pattern) bool { return p.Used() && !private(p) }) {
-		if slices.ContainsFunc(p.EvidenceIDs, func(id string) bool { return leak[id] }) {
+		if slices.ContainsFunc(p.EvidenceIDs, func(id string) bool { return leak[id] || hasLeakUnit(st.Entries[id]) }) {
 			h.Excluded++
 			continue
 		}
@@ -145,13 +304,13 @@ func (r *Runner) Holdout(ctx context.Context, st *store.State, s *State, week st
 	if strings.TrimSpace(ovMem) == "" {
 		h.Patterns = 0
 	}
-	// The scattered memory: the curated entries in memory.entries' order (standing, rank, newest), first seen before
-	// the week, in as many characters as the patterns took (at least a little, so an empty overview still has a
-	// baseline to compare with).
+
+	// The scattered memory: curated entries in memory.entries' order (standing, rank, newest), first seen before the
+	// week, matching the exact character budget of the patterns (at least 1500 when overview is empty).
 	budget := max(len([]rune(ovMem)), 1500)
 	var pool []*entry.Entry
 	for _, e := range st.Entries {
-		if leak[e.ID] || !memsrc.Pool(st, e) || e.First >= days[0] || len(e.Cats()) > 0 || e.OriginSpace != "" {
+		if leak[e.ID] || hasLeakUnit(e) || !memsrc.Pool(st, e) || e.First >= days[0] || len(e.Cats()) > 0 || e.OriginSpace != "" {
 			continue
 		}
 		pool = append(pool, e)
@@ -178,39 +337,32 @@ func (r *Runner) Holdout(ctx context.Context, st *store.State, s *State, week st
 		}
 	}
 	scMem := fit(lines, budget)
+
 	arms := []struct{ name, mem string }{{ArmOverview, ovMem}, {ArmScatter, scMem}, {ArmNone, ""}}
-	run := &Run{}
+	trials := twoOrderTrials(qs)
+	trialRates := map[string]float64{}
 	for _, arm := range arms {
 		h.Chars[arm.name] = len([]rune(arm.mem))
-		for b := 0; b < len(qs); b += holdoutBatch {
-			batch := qs[b:min(len(qs), b+holdoutBatch)]
-			in := predictInput{Memory: arm.mem}
-			for i, q := range batch {
-				in.Questions = append(in.Questions, predictQuestion{ID: fmt.Sprintf("q%d", b+i+1), Situation: clip(q.e.Situation, 160),
-					A: clip(q.a, 120), B: clip(q.b, 120)})
-			}
-			var out predictOutput
-			err := r.call(ctx, run, "predict", model.Small, predictPrompt, predictSchema, in, holdoutMaxTok, &out)
-			if errors.Is(err, model.ErrRefused) {
-				h.Notes = append(h.Notes, arm.name+": the model declined a batch (counted wrong)")
-				continue
-			}
-			if err != nil {
-				h.Calls = run.Calls
-				return h, err
-			}
-			picks := map[string]string{}
-			for _, a := range out.Answers {
-				picks[a.ID] = a.Pick
-			}
-			for i, q := range batch {
-				if picks[fmt.Sprintf("q%d", b+i+1)] == q.answer {
-					h.Hits[arm.name]++
-				}
+		perQ, totalRight, declined, aerr := r.askTrials(ctx, run, arm.mem, len(qs), trials)
+		if aerr != nil {
+			h.Calls = run.Calls
+			return h, aerr
+		}
+		if declined > 0 {
+			h.Notes = append(h.Notes, fmt.Sprintf("%s: the model declined %d batch(es) (counted wrong)", arm.name, declined))
+		}
+		strictHits := 0
+		for _, c := range perQ {
+			if c == 2 {
+				strictHits++
 			}
 		}
-		h.Rate[arm.name] = float64(h.Hits[arm.name]) / float64(len(qs))
+		h.Hits[arm.name] = strictHits
+		h.Rate[arm.name] = float64(strictHits) / float64(len(qs))
+		trialRates[arm.name] = float64(totalRight) / float64(len(trials))
 	}
+	h.Notes = append(h.Notes, fmt.Sprintf("hard filter: scanned %d, dropped %d easy; strict 2/2 (trial rates: overview %.0f%%, scatter %.0f%%, none %.0f%%)",
+		scanned, dropped, trialRates[ArmOverview]*100, trialRates[ArmScatter]*100, trialRates[ArmNone]*100))
 	h.Calls = run.Calls
 	return h, nil
 }

@@ -337,7 +337,11 @@ func TestUntranscribedVoiceFailureDegradationAndLogPrivacy(t *testing.T) {
 	}
 
 	logText := logs.String()
-	for _, secret := range []string{secretQuery, key64, wrongKey64, "evil.example", "very-private-audio", "https://"} {
+	// Rejected media URLs log sanitized origin-only diagnostics (scheme/host/port) without path, query, keys, or audio.
+	if !strings.Contains(logText, "source=media_url") || !strings.Contains(logText, `host="evil.example"`) {
+		t.Errorf("voice failure logs missing sanitized media_url diagnostic: %q", logText)
+	}
+	for _, secret := range []string{secretQuery, key64, wrongKey64, "voice.silk", "very-private-audio", "https://"} {
 		if strings.Contains(logText, secret) {
 			t.Errorf("voice failure logs leaked %q: %q", secret, logText)
 		}
@@ -564,17 +568,22 @@ func TestUntranscribedVoiceFullURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := (&Bot{}).compose(context.Background(), c, owner, ilink.Message{
-		ID: "message:fullurl",
-		Media: []ilink.Media{{
-			Kind:   ilink.MediaVoice,
-			URL:    "https://novac2c.cdn.weixin.qq.com/v2/voice-blob",
-			KeyB64: key64,
-		}},
-	})
-	if len(got.Files) != 1 || got.Files[0].Name != "voice.silk" || got.Files[0].Mime != "audio/silk" ||
-		got.Files[0].Data != base64.StdEncoding.EncodeToString(silk) {
-		t.Fatalf("full_url voice handed %+v", got)
+	for _, fullURL := range []string{
+		"https://novac2c.cdn.weixin.qq.com/v2/voice-blob",
+		"https://novac2c.cdn.wechat.com/v2/voice-blob",
+	} {
+		got := (&Bot{}).compose(context.Background(), c, owner, ilink.Message{
+			ID: "message:fullurl",
+			Media: []ilink.Media{{
+				Kind:   ilink.MediaVoice,
+				URL:    fullURL,
+				KeyB64: key64,
+			}},
+		})
+		if len(got.Files) != 1 || got.Files[0].Name != "voice.silk" || got.Files[0].Mime != "audio/silk" ||
+			got.Files[0].Data != base64.StdEncoding.EncodeToString(silk) {
+			t.Fatalf("full_url voice (%s) handed %+v", fullURL, got)
+		}
 	}
 }
 

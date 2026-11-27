@@ -5,8 +5,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { connect, type Program } from "@persona/extension";
-import type { Snapshot } from "@persona/extension/ui";
-import { Fixture, interaction, until } from "./fixtures.ts";
+import { Renderer, type Snapshot } from "@persona/extension/ui";
+import { NpmPackages } from "../src/service.ts";
+import { page } from "../src/page.tsx";
+import { downloadsPath, packagePath, searchPath } from "../src/model.ts";
+import { Fixture, interaction, scoped, typescript, until } from "./fixtures.ts";
 async function setup(initialize = true) {
   const bundle = await import(pathToFileURL(resolve("build/npmpackages.mjs")).href);
   const fixture = new Fixture(), frames: any[] = [];
@@ -130,5 +133,111 @@ test("invalid state cannot trigger arbitrary requests; pure snapshots are suppor
     const pure = h.bundle.snapshotPage(local);
     const view = await pure.render({ contribution: "packages", locale: "en", ui_version: 1, hub: {}, state: h.bundle.encodeState({ q: "typescript", found: true }) });
     assert.ok(JSON.stringify(view).includes("typescript@7.0.2"));
+  } finally { h.p.close(); }
+});
+
+test("long scoped package names, duplicate items, and large direct renders stay within CheckView budgets", async () => {
+  const h = await setup();
+  try {
+    const longPkg = `@${"s".repeat(50)}/${"p".repeat(162)}`; // 214 chars (max valid npm package name)
+    const longEntry = { ...scoped, name: longPkg, description: "Long scoped package desc", links: { npm: `https://www.npmjs.com/package/${longPkg}` } };
+    h.fixture.put(searchPath("longpkg", 12), { objects: [{ package: longEntry, downloads: { weekly: 100 } }], total: 1 });
+    h.fixture.put(packagePath(longPkg), longEntry);
+    h.fixture.put(downloadsPath(longPkg), { downloads: 100, start: "2026-11-03", end: "2026-11-09", package: longPkg });
+
+    await h.call("ui.page.mount", { session: "long-v1", params: { contribution: "packages", locale: "en", ui_version: 1, state: h.bundle.encodeState({ q: "longpkg", found: true }) } });
+    const listSnap = await settled(h, "long-v1", "Long scoped package desc");
+    const openBtn = listSnap.view.sections.flatMap(s => s.items).find(item => item.key?.startsWith("open-"));
+    assert.ok(openBtn && openBtn.key);
+    assert.ok(Array.from(openBtn.key).length <= 128, `open key too long: ${Array.from(openBtn.key).length}`);
+    for (const section of listSnap.view.sections) {
+      if (section.key) assert.ok(Array.from(section.key).length <= 128, `section key too long: ${Array.from(section.key).length}`);
+      for (const item of section.items) {
+        if (item.key) assert.ok(Array.from(item.key).length <= 128, `item key too long: ${Array.from(item.key).length}`);
+        if ("action" in item && item.action?.id) assert.ok(Array.from(item.action.id).length <= 128, `action id too long: ${Array.from(item.action.id).length}`);
+      }
+    }
+    await h.call("ui.page.event", { session: "long-v1", ticket: "host-ticket", interaction: interaction(listSnap, openBtn.key) });
+    const detailSnap = await settled(h, "long-v1", `npm install ${longPkg}@8.0.7`);
+    assert.ok(body(detailSnap).includes("npm install " + longPkg));
+
+    // Direct page() render with > 120 packages, duplicates, > 2500-rune descriptions, oversized state.q, and invalid date stays within CheckView limits.
+    const local = new NpmPackages(h.fixture.fetch, {}, { locale: "en", now: () => h.fixture.clock, limits: { gap: 0 } });
+    const manyPkgs = Array.from({ length: 120 }, (_, i) => ({
+      name: i < 2 ? longPkg : `@${"s".repeat(40)}/pkg-${i}-${"p".repeat(120)}`,
+      version: "1.0.0",
+      description: "D".repeat(2500),
+      license: "L".repeat(2500),
+      url: `https://www.npmjs.com/package/pkg-${i}`,
+      published: "not-a-valid-date",
+      weeklyDownloads: i,
+    }));
+    const renderer = new Renderer({ authorize: () => false });
+    try {
+      const rendered = renderer.mount(page({
+        service: local,
+        state: { q: "q".repeat(17000), found: true },
+        loaded: { kind: "results", result: { packages: manyPkgs, total: manyPkgs.length, at: h.fixture.clock } },
+        locale: "en",
+        uiVersion: 7,
+      })).view;
+      const totalItems = rendered.sections.reduce((sum, s) => sum + s.items.length, 0);
+      assert.ok(totalItems <= 300, `expected <= 300 items, got ${totalItems}`);
+      assert.ok(new TextEncoder().encode(rendered.state ?? "").byteLength <= 16384);
+      const keys = new Set<string>();
+      for (const section of rendered.sections) {
+        if (section.key) {
+          assert.ok(Array.from(section.key).length <= 128);
+          assert.ok(!keys.has(section.key), `duplicate section key ${section.key}`);
+          keys.add(section.key);
+        }
+        if (section.title) assert.ok(Array.from(section.title).length <= 2000);
+        if (section.footer) assert.ok(Array.from(section.footer).length <= 2000);
+        for (const item of section.items) {
+          if (item.key) {
+            assert.ok(Array.from(item.key).length <= 128);
+            assert.ok(!keys.has(item.key), `duplicate item key ${item.key}`);
+            keys.add(item.key);
+          }
+          if (item.type === "text") assert.ok(Array.from(item.text).length >= 1 && Array.from(item.text).length <= 2000);
+          if (item.type === "field" && item.value) assert.ok(Array.from(item.value).length <= 2000);
+          if ("action" in item && item.action?.id) assert.ok(Array.from(item.action.id).length <= 128);
+          if ("action" in item && item.action?.push?.state) assert.ok(new TextEncoder().encode(item.action.push.state).byteLength <= 16384);
+        }
+      }
+    } finally { renderer.dispose(); }
+  } finally { h.p.close(); }
+});
+
+test("manual refresh resets after navigating to a new search and RPC rejects explicit limit: 0", async () => {
+  const h = await setup();
+  try {
+    const tsPath = "https://registry.npmjs.org" + searchPath("typescript", 12);
+    const viteSearchPath = searchPath("vite", 12);
+    const viteFullPath = "https://registry.npmjs.org" + viteSearchPath;
+    h.fixture.put(viteSearchPath, { objects: [{ package: { ...typescript, name: "vite", version: "6.0.0", description: "Frontend tooling", links: { npm: "https://www.npmjs.com/package/vite" } } }], total: 1 });
+    await h.call("ui.page.mount", { session: "nav", params: { contribution: "packages", locale: "en", ui_version: 5 } });
+    let snapshot = await settled(h, "nav", "npmpackages-welcome-text");
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "npmpackages-submit", { query: "typescript" }) });
+    snapshot = await settled(h, "nav", "typescript@7.0.2");
+    assert.equal(h.fixture.hits.get(tsPath), 1);
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "npmpackages-submit", { query: "vite" }) });
+    snapshot = await settled(h, "nav", "vite@6.0.0");
+    assert.equal(h.fixture.hits.get(viteFullPath), 1);
+
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "npmpackages-refresh") });
+    await until(async () => h.fixture.hits.get(viteFullPath) ?? 0, count => count === 2);
+    snapshot = await settled(h, "nav", "vite@6.0.0");
+
+    // Navigating back to cached "typescript" must reuse cache (still hit 1).
+    await h.call("ui.page.event", { session: "nav", ticket: "host-ticket", interaction: interaction(snapshot, "npmpackages-submit", { query: "typescript" }) });
+    snapshot = await settled(h, "nav", "typescript@7.0.2");
+    assert.equal(h.fixture.hits.get(tsPath), 1);
+
+    // End-to-end RPC ExactJSON: explicit limit: 0 must be rejected as invalid.
+    const zeroLimit = await h.call("connector.tools.call", { name: "npmpackages_search", args: { query: "typescript", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
   } finally { h.p.close(); }
 });

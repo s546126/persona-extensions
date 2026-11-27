@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 
@@ -30,6 +32,12 @@ const maxQueryChars = 200
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
 	if err := r.DecodeState(&st); err != nil || st.Page < 0 || len(st.Cursor) > 256 || len([]rune(st.Query)) > maxQueryChars || len(st.DocumentID) > 128 || len(st.DraftID) > 128 || len(st.SaveURL) > 8192 {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Location != "" && validLocation(st.Location) != nil {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode != "" && st.Mode != "list" && st.Mode != "detail" && st.Mode != "save" && st.Mode != "review-save" {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -91,6 +99,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err := validDocumentID(st.DocumentID); err != nil {
 			return nil, err
 		}
+		if st.DraftID == "" {
+			return nil, errors.New("the document view expired; reopen it")
+		}
 		out, err := a.doAction(ctx, "ui-move:"+st.DraftID, "readwise_update", []byte(`{"id":`+quote(st.DocumentID)+`,"location":"shortlist"}`))
 		if err != nil {
 			return nil, err
@@ -115,6 +126,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		return reviewSaveView(r, st), nil
 	}
 	if st.Mode == "detail" {
+		if err := validDocumentID(st.DocumentID); err != nil {
+			return nil, err
+		}
 		page, err := a.client.list(ctx, listParams{ID: st.DocumentID, HTML: true})
 		a.record(err)
 		if err != nil {
@@ -130,8 +144,14 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		}
 		return detailView(r, st, item, highlights)
 	}
+	if st.Mode != "" && st.Mode != "list" {
+		return nil, errors.New("invalid reading view")
+	}
 	if st.Location == "" {
 		st.Location = "new"
+	}
+	if err := validLocation(st.Location); err != nil {
+		return nil, err
 	}
 	page, err := a.readQueue(ctx, st)
 	a.record(err)
@@ -168,16 +188,20 @@ const maxViewDocuments = 250
 
 func (a *app) readQueue(ctx context.Context, st pageState) (listPage, error) {
 	var out listPage
-	cursor, seen := "", map[string]bool{}
+	cursor, seenCursors, seenIDs := "", map[string]bool{}, map[string]bool{}
 	for n := 0; n <= st.Page; n++ {
 		page, err := a.client.list(ctx, listParams{Location: st.Location, Cursor: cursor})
 		if err != nil {
 			return listPage{}, err
 		}
 		for _, item := range page.Results {
+			if strings.TrimSpace(item.ID) == "" || seenIDs[item.ID] {
+				continue
+			}
 			if st.Query != "" && !strings.Contains(strings.ToLower(item.Title+" "+item.Author+" "+item.SiteName+" "+item.Notes), strings.ToLower(st.Query)) {
 				continue
 			}
+			seenIDs[item.ID] = true
 			out.Results = append(out.Results, item)
 		}
 		out.Count = len(out.Results)
@@ -185,16 +209,32 @@ func (a *app) readQueue(ctx context.Context, st pageState) (listPage, error) {
 		if page.Cursor == "" {
 			return out, nil
 		}
-		if seen[page.Cursor] {
+		if seenCursors[page.Cursor] {
 			return listPage{}, errors.New("Readwise repeated its pagination cursor")
 		}
-		seen[page.Cursor], cursor = true, page.Cursor
+		seenCursors[page.Cursor], cursor = true, page.Cursor
 	}
 	out.Count = len(out.Results)
-	if st.Query != "" {
-		out.Count = len(out.Results)
-	}
 	return out, nil
+}
+
+func documentKey(id string) string {
+	key := "document-" + id
+	if len(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "document-" + hex.EncodeToString(sum[:])
+}
+
+func clampRatio(value float64) float64 {
+	if math.IsNaN(value) || value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
 }
 
 func documentTitle(item document) string {
@@ -207,12 +247,15 @@ func documentTitle(item document) string {
 }
 
 func documentRow(item document) wire.Component {
-	subtitle := item.SiteName
-	if item.Author != "" {
-		subtitle += " · " + item.Author
+	var parts []string
+	if s := strings.TrimSpace(item.SiteName); s != "" {
+		parts = append(parts, s)
 	}
-	subtitle += fmt.Sprintf(" · %.0f%%", item.ReadingProgress*100)
-	return wire.Component{Type: wire.ComponentRow, Key: "document-" + item.ID, Title: clipText(documentTitle(item), 2000), Subtitle: clipText(subtitle, 2000), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}}
+	if s := strings.TrimSpace(item.Author); s != "" {
+		parts = append(parts, s)
+	}
+	parts = append(parts, fmt.Sprintf("%.0f%%", clampRatio(item.ReadingProgress)*100))
+	return wire.Component{Type: wire.ComponentRow, Key: documentKey(item.ID), Title: clipText(documentTitle(item), 2000), Subtitle: clipText(strings.Join(parts, " · "), 2000), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}}
 }
 
 // httpsLink reports whether a link component can carry raw: the view check refuses the whole view for any other.
@@ -228,11 +271,22 @@ func detailView(r *ext.UIRequest, st pageState, item document, highlights []docu
 		return nil, err
 	}
 	title := documentTitle(item)
-	items := []wire.Component{
-		{Type: wire.ComponentText, Text: item.Author + " · " + item.SiteName, Style: wire.TextStyleSecondary},
-		{Type: wire.ComponentProgress, Label: t.progress, Ratio: &item.ReadingProgress},
-		{Type: wire.ComponentButton, Title: t.move, Action: &wire.Action{ID: "shortlist", Confirm: t.move + "\n" + clipText(title, 500)}},
+	ratio := clampRatio(item.ReadingProgress)
+	var items []wire.Component
+	var meta []string
+	if s := strings.TrimSpace(item.Author); s != "" {
+		meta = append(meta, s)
 	}
+	if s := strings.TrimSpace(item.SiteName); s != "" {
+		meta = append(meta, s)
+	}
+	if len(meta) > 0 {
+		items = append(items, wire.Component{Type: wire.ComponentText, Text: clipText(strings.Join(meta, " · "), wire.StringMost), Style: wire.TextStyleSecondary})
+	}
+	items = append(items,
+		wire.Component{Type: wire.ComponentProgress, Label: fmt.Sprintf(t.progress, ratio*100), Ratio: &ratio},
+		wire.Component{Type: wire.ComponentButton, Title: t.move, Action: &wire.Action{ID: "shortlist", Confirm: t.move + "\n" + clipText(title, 500)}},
+	)
 	if httpsLink(item.SourceURL) {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.open, URL: item.SourceURL})
 	}
@@ -296,8 +350,12 @@ func saveView(r *ext.UIRequest, st pageState) *wire.View {
 
 func reviewSaveView(r *ext.UIRequest, st pageState) *wire.View {
 	t := textsFor(r.Locale)
+	shown := clipText(strings.TrimSpace(st.SaveURL), wire.StringMost)
+	if shown == "" {
+		shown = t.save
+	}
 	return &wire.View{Title: t.review, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentText, Text: st.SaveURL},
+		{Type: wire.ComponentText, Text: shown},
 		{Type: wire.ComponentButton, Title: t.confirm, Action: &wire.Action{ID: "save", Confirm: t.save + "\n" + st.SaveURL}},
 	}}}}
 }

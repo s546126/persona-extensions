@@ -1,0 +1,127 @@
+{
+  "manifest_version": 1,
+  "id": "steam",
+  "name": "Steam",
+  "version": "0.1.0",
+  "icon": "assets/icon.png",
+  "description": "在 Persona 查看 Steam 玩家状态、近两周游玩记录、游戏库、成就进度和公开愿望单的地区价格。只读访问，Steam Web API 密钥加密保存在 Hub。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/steam.md",
+  "tags": ["Steam", "游戏", "成就", "愿望单"],
+  "engines": {"plugin_protocol": 1},
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/steam-linux-amd64",
+      "linux-arm64": "bin/steam-linux-arm64",
+      "darwin-amd64": "bin/steam-darwin-amd64",
+      "darwin-arm64": "bin/steam-darwin-arm64"
+    }
+  },
+  "contributes": {
+    "connectors": [{
+      "id": "steam",
+      "name": "Steam",
+      "capabilities": ["status", "tools"],
+      "hosts": ["store.steampowered.com", "steamcommunity.com"],
+      "agent_tools": ["steam_*"]
+    }],
+    "ui": [
+      {
+        "id": "steam",
+        "title": "Steam",
+        "placement": "nav_page",
+        "icon": "chart",
+        "group": {"id": "personal", "title": "个人"}
+      },
+      {
+        "id": "steam-summary",
+        "title": "Steam 概况",
+        "placement": "overview_card",
+        "opens": "steam"
+      }
+    ]
+  },
+  "configuration": {
+    "type": "object",
+    "required": ["steam_id"],
+    "properties": {
+      "steam_id": {
+        "type": "string",
+        "title": "Steam 玩家标识",
+        "description": "填写 17 位 SteamID64，或 Steam 个人资料自定义链接中的名称。",
+        "minLength": 1,
+        "maxLength": 32
+      },
+      "country_code": {
+        "type": "string",
+        "title": "商店国家或地区",
+        "description": "用于愿望单价格和货币的两位 ISO 3166-1 国家或地区代码，默认为 US。",
+        "default": "US",
+        "pattern": "^[A-Za-z]{2}$"
+      },
+      "inbox_events_enabled": {
+        "type": "boolean",
+        "title": "Steam 收件箱事件",
+        "description": "向收件箱发送愿望单降价、发售、大促和重大更新等事件。收件箱分拣可能消耗 AI Token。默认关闭。",
+        "default": false
+      },
+      "inbox_max_events_per_day": {
+        "type": "integer",
+        "title": "Steam 收件箱每日事件上限",
+        "description": "开启收件箱事件后，每天最多发送的 Steam 事件数。范围 1–50，默认 5。",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 50
+      },
+      "patch_notes_summary_enabled": {
+        "type": "boolean",
+        "title": "重大更新 AI 摘要",
+        "description": "为常玩游戏的重大更新公告生成 AI 摘要，生成时消耗 Token。默认关闭。",
+        "default": false
+      },
+      "sale_roundup_enabled": {
+        "type": "boolean",
+        "title": "愿望单大促汇总",
+        "description": "在大促期间向收件箱发送愿望单优惠汇总。需要同时开启 Steam 收件箱事件，投递后分拣可能消耗 AI Token。默认关闭。",
+        "default": false
+      },
+      "memory_export_enabled": {
+        "type": "boolean",
+        "title": "将游戏偏好导出到助手记忆",
+        "description": "允许通过 memory_sources 向助手提供个人游戏偏好。载入偏好时占用助手上下文 Token。默认关闭。",
+        "default": false
+      },
+      "memory_max_items": {
+        "type": "integer",
+        "title": "导出的游戏偏好条目上限",
+        "description": "开启记忆导出后，最多可导出的个人游戏偏好条目数。范围 1–30，默认 10。",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 30
+      },
+      "discovery_tools_enabled": {
+        "type": "boolean",
+        "title": "Steam 游戏调研工具和技能",
+        "description": "允许调用会占用较多助手上下文的游戏调研工具和技能。关闭后停用这些调研功能。默认开启。",
+        "default": true
+      },
+      "discovery_max_results": {
+        "type": "integer",
+        "title": "单次游戏调研候选上限",
+        "description": "开启游戏调研后，单次游戏检索或调研最多可返回的候选数。范围 1–50，默认 15。",
+        "default": 15,
+        "minimum": 1,
+        "maximum": 50
+      }
+    }
+  },
+  "secrets": [{
+    "name": "steam_api_key",
+    "title": "Steam Web API 密钥",
+    "description": "从 Steam Web API 设置获取密钥。Hub 会加密保存密钥，仅发送给 api.steampowered.com。",
+    "required": true
+  }],
+  "permissions": {
+    "network": ["api.steampowered.com", "store.steampowered.com"]
+  }
+}

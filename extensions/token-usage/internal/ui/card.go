@@ -8,6 +8,14 @@ import (
 	"github.com/nwverse/persona-extensions/extensions/token-usage/internal/usage"
 )
 
+// PageTitle is the navigation page's title and CardTitle the overview card's (persona-extension.json). The hub's
+// settings page lists every UI contribution by its title, so the card's says 「概况」 to tell it from the page's; it
+// is also the card's header on Overview.
+const (
+	PageTitle = "Token 用量"
+	CardTitle = PageTitle + " · 概况"
+)
+
 // Card draws the overview card: today's total against the seven-day daily average, and the model that used the most.
 func (a *App) Card(r *ext.UIRequest) (*wire.View, error) {
 	var view *wire.View
@@ -23,7 +31,7 @@ func (a *App) Card(r *ext.UIRequest) (*wire.View, error) {
 			top = modelName(today.Models[0].Name) + " " + formatTokens(today.Models[0].Total())
 		}
 		view = &wire.View{
-			Title: "Token 用量",
+			Title: CardTitle,
 			Sections: []wire.Section{{Items: []wire.Component{
 				{Type: wire.ComponentMetric, Label: "今天", Value: formatTokens(today.Total.Total()),
 					Detail: "7 日均 " + formatTokens(average) + " · " + text, Tone: tone},

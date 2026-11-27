@@ -182,7 +182,12 @@ func (c *client) states(ctx context.Context, workspace, project string) ([]workf
 		return nil, err
 	}
 	var out []workflowState
-	for cursor := ""; ; {
+	seen := map[string]bool{"": true}
+	const maxStatePages = 20
+	for cursor, pages := "", 0; ; pages++ {
+		if pages >= maxStatePages {
+			return nil, errors.New("Plane returned too many state pages")
+		}
 		if err := validCursor(cursor); err != nil {
 			return nil, err
 		}
@@ -198,9 +203,10 @@ func (c *client) states(ctx context.Context, workspace, project string) ([]workf
 		if !page.NextPageResults {
 			return out, nil
 		}
-		if page.NextCursor == "" || page.NextCursor == cursor {
+		if page.NextCursor == "" || seen[page.NextCursor] {
 			return nil, errors.New("Plane returned a stuck state pagination cursor")
 		}
+		seen[page.NextCursor] = true
 		cursor = page.NextCursor
 	}
 }

@@ -313,7 +313,7 @@ func TestRestoreCold(t *testing.T) {
 		Tool: "claude", State: "remote", DeviceID: "00000000-0000-4000-8000-000000000009"})
 	scripts = nil
 	if _, _, err := RestoreCold(context.Background(), coldRunner(&scripts), st, m, "ffffffffff01", t0); err == nil ||
-		!strings.Contains(err.Error(), "另一台设备") || len(scripts) != 0 {
+		!strings.Contains(err.Error(), "另一台电脑") || len(scripts) != 0 {
 		t.Fatalf("foreign restore: %v %d", err, len(scripts))
 	}
 	if s := restoreScript(ColdEntry{ID: "x", Path: "/home/dev/a b.jsonl"}); strings.Contains(s, "--to") || !strings.Contains(s, "[ -s '/home/dev/a b.jsonl' ]") {
@@ -348,7 +348,7 @@ func TestRestoreCold(t *testing.T) {
 		if err == nil || len(st.History) != 0 || st.Cold[m.ID].Entries[0].State != "archived" {
 			t.Fatalf("%s: err=%v history=%d", name, err, len(st.History))
 		}
-		if name == "backend" && (!strings.Contains(err.Error(), "备份后端连不上") || !strings.Contains(toolErrorText(err), "详情")) {
+		if name == "backend" && (!strings.Contains(err.Error(), "网盘连不上") || !strings.Contains(toolErrorText(err), "详情")) {
 			t.Fatalf("backend err: %v", err)
 		}
 	}
@@ -370,7 +370,7 @@ func TestReferencedCountInHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Referenced != 1 || rec.RefsFound != 3 || !strings.Contains(rec.Summary, "保护 1 个被引用会话") {
+	if rec.Referenced != 1 || rec.RefsFound != 3 || !strings.Contains(rec.Summary, "留下 1 个还在用的对话") || rec.Moved != 1 {
 		t.Fatalf("record: %+v", rec)
 	}
 	if st.Cold[m.ID] == nil || len(st.Cold[m.ID].Entries) != 4 {
@@ -385,7 +385,7 @@ func TestReferencedCountInHistory(t *testing.T) {
 		}
 		return coldRunner(nil)(ctx, mm, s, d)
 	}
-	if _, rec, err := OffloadSessions(context.Background(), run, st, m, false, nil, t0); err == nil || rec != nil || !strings.Contains(err.Error(), "无法列出") {
+	if _, rec, err := OffloadSessions(context.Background(), run, st, m, false, nil, t0); err == nil || rec != nil || !strings.Contains(err.Error(), "列不出") {
 		t.Fatalf("fail closed: err=%v rec=%+v", err, rec)
 	}
 	if len(st.History) != 0 {
@@ -425,12 +425,12 @@ func TestSessionsPageUI(t *testing.T) {
 	}
 
 	res := act(v.State, "cold-refresh", map[string]string{"m": ""})
-	if !strings.Contains(res.Toast, "已开始读取 1 台机器") {
+	if !strings.Contains(res.Toast, "开始检查 1 台电脑") {
 		t.Fatalf("refresh toast: %s", res.Toast)
 	}
 	a.waitJobs()
 	res = act(res.View.State, "search", map[string]string{"q": ""})
-	if j := a.jobSnapshot()["local"]; j.Note != "已读取 4 个会话" || j.Err != "" {
+	if j := a.jobSnapshot()["local"]; j.Note != "检查完了，记下 4 个对话" || j.Err != "" {
 		t.Fatalf("refresh outcome: %+v", j)
 	}
 	rows := rowsOf(res.View)
@@ -439,8 +439,8 @@ func TestSessionsPageUI(t *testing.T) {
 	}
 	r0 := rows[0]
 	if r0.Badge == nil || r0.Badge.Text != LocCloud || r0.Badge.Tone != wire.TonePositive || len(r0.Actions) != 1 ||
-		!strings.Contains(r0.Actions[0].Action.Confirm, "从云端恢复到原路径 /home/dev/.claude/projects/") ||
-		!strings.Contains(r0.Actions[0].Action.Confirm, "claude --resume "+uuidClaude) || !strings.Contains(r0.Subtitle, "Claude Code · shop · 2026-10-20") {
+		!strings.Contains(r0.Actions[0].Action.Confirm, "从网盘拿回来，放回原来的位置 /home/dev/.claude/projects/") ||
+		!strings.Contains(r0.Actions[0].Action.Confirm, "claude --resume "+uuidClaude) || !strings.Contains(r0.Subtitle, "Claude Code · shop · 10月20日 08:00") {
 		t.Fatalf("row: %+v", r0)
 	}
 	for _, r := range rows {
@@ -465,7 +465,7 @@ func TestSessionsPageUI(t *testing.T) {
 		t.Fatal("no offload button for a machine")
 	}
 	res = act(res.View.State, "cold-restore", map[string]string{"m": "local", "id": "aaaaaaaaaaa1"})
-	if !strings.Contains(res.Toast, "已开始恢复") {
+	if !strings.Contains(res.Toast, "拿回来") {
 		t.Fatalf("restore toast: %s", res.Toast)
 	}
 	a.waitJobs()
@@ -477,30 +477,31 @@ func TestSessionsPageUI(t *testing.T) {
 		t.Fatal("restore outcome not on the machine row")
 	}
 	res = act(res.View.State, "cold-offload", map[string]string{"m": "local"})
-	if !strings.Contains(res.Toast, "已开始上传") {
+	if !strings.Contains(res.Toast, "搬到网盘") {
 		t.Fatalf("offload toast: %s", res.Toast)
 	}
 	a.waitJobs()
-	if j := a.jobSnapshot()["local"]; !strings.Contains(j.Note, "冷会话已上云") {
+	if j := a.jobSnapshot()["local"]; !strings.Contains(j.Note, "搬完了") {
 		t.Fatalf("offload outcome: %+v", j)
 	}
 
-	// The main page's 会话与台账 tab has the same search and rows.
+	// The main page no longer draws sessions: a search from the old 会话与台账 tab opens AI 对话
+	// with the query, and that page finds the same rows.
 	main, err := a.action(ctx, &ext.UIRequest{UIParams: wire.UIParams{State: ext.EncodeState(page{Machine: "local", Tab: tabSessions}), Action: "cold-search", Values: map[string]string{"q": "checkout"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	check(main.View)
-	if main.View.Search == nil || main.View.Search.Value != "checkout" || len(rowsWithPrefix(main.View, "cold-")) != 1 {
-		t.Fatalf("main tab: %+v", main.View.Search)
+	if main.Push == nil || main.Push.UI != sessionsUI || len(rowsWithPrefix(main.View, "cold-")) != 0 {
+		t.Fatalf("main tab: %+v", main.Push)
 	}
-	deep, err := a.action(ctx, &ext.UIRequest{UIParams: wire.UIParams{State: main.View.State, Action: "cold-deep", Values: map[string]string{"q": "refund"}}})
+	pushed, err := a.renderSessions(ctx, &ext.UIRequest{UIParams: wire.UIParams{State: main.Push.State}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(deep.View)
-	if len(rowsWithPrefix(deep.View, "cold-")) != 2 {
-		t.Fatal("main tab deep search")
+	check(pushed)
+	if pushed.Search == nil || pushed.Search.Value != "checkout" || len(rowsWithPrefix(pushed, "cold-")) != 1 {
+		t.Fatalf("pushed page: %+v", pushed.Search)
 	}
 }
 
@@ -664,7 +665,7 @@ func TestReferenceProbeShell(t *testing.T) {
 	cmd.Stdin = strings.NewReader(ReferencedSessionsScript)
 	cmd.Env = failEnv
 	out, _ = cmd.Output()
-	if _, err := parseReferences(string(out)); err == nil || !strings.Contains(err.Error(), "无法列出") {
+	if _, err := parseReferences(string(out)); err == nil || !strings.Contains(err.Error(), "列不出") {
 		t.Fatalf("fail closed: %v\n%s", err, out)
 	}
 	item := ScanItem{ID: "sessions-cold-claude", Category: CatColdAgentSession, Path: filepath.Join(home, ".claude", "projects")}
@@ -672,7 +673,7 @@ func TestReferenceProbeShell(t *testing.T) {
 	cmd.Stdin = strings.NewReader(BuildItemCleanScript(item, nil))
 	cmd.Env = failEnv
 	out, _ = cmd.Output()
-	if e := parseSessionRun(string(out)).err(); e == nil || !strings.Contains(e.Error(), "无法列出") {
+	if e := parseSessionRun(string(out)).err(); e == nil || !strings.Contains(e.Error(), "列不出") {
 		t.Fatalf("archive not aborted: %v\n%s", e, out)
 	}
 	if _, err := os.Stat(logf); !os.IsNotExist(err) {
@@ -857,7 +858,7 @@ func TestSessionsPageLongQueryAndForeignRows(t *testing.T) {
 	d := a.drawer(st, &ext.UIRequest{})
 	foreign := ColdHit{ColdEntry: ColdEntry{ID: "x1", State: "remote", Tool: "claude", Path: "/Users/other/.claude/projects/-a/s.jsonl", DeviceID: "dev-2"},
 		MachineID: m.ID, MachineName: "local", Location: LocUnknown}
-	if row := d.coldRow(foreign); len(row.Actions) != 0 || !strings.Contains(row.Subtitle, "来自其他设备") {
+	if row := d.coldRow(foreign); len(row.Actions) != 0 || !strings.Contains(row.Subtitle, "来自另一台电脑") {
 		t.Fatalf("foreign row: %+v", row)
 	}
 	pi := ColdHit{ColdEntry: ColdEntry{ID: "x2", State: "archived", Tool: "pi", Path: "/home/dev/.pi/agent/sessions/s.jsonl", Local: true},

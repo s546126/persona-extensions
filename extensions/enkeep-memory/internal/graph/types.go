@@ -22,11 +22,11 @@ const (
 
 // packOf says which pack each built-in predicate is in. The common types are belongs to (member_of), responsible for
 // (owns), depends on, decides, works with (collaborates_with) and what a term means (means); the work pack adds
-// reports to and mentors; the life pack adds serves (a service provider) and same circle. The other built-ins
-// (blocked_by, waiting_on, decided, about, committed, assigned, allocated) describe work in progress and stay common.
+// reports to and mentors; the life pack adds serves (a service provider). Noise predicates (about, same_circle)
+// are stopped in v0.4.0 and never written.
 var packOf = map[string]string{
 	"reports_to": PackWork, "mentors": PackWork,
-	"serves": PackLife, "same_circle": PackLife,
+	"serves": PackLife,
 }
 
 // extra built-in predicates of v4: the common "means" and the packs' own.
@@ -34,7 +34,6 @@ var extra = []Predicate{
 	{schema.Predicate{Name: "means", Meaning: "the term or code name means (attrs.meaning)", Subject: []string{"topic", "resource", "system", "project"}, Object: []string{"topic", "system", "project", "resource"}}, false},
 	{schema.Predicate{Name: "mentors", Meaning: "mentors, brings up", Subject: []string{"person"}, Object: []string{"person"}}, false},
 	{schema.Predicate{Name: "serves", Meaning: "provides a service to (attrs.service: which)", Subject: []string{"person", "org"}, Object: []string{"person", "org"}}, false},
-	{schema.Predicate{Name: "same_circle", Meaning: "is in the same circle of friends or community as (attrs.circle)", Subject: []string{"person"}, Object: []string{"person"}}, false},
 }
 
 // Packs are the packs a first-run answer starts with: "work" → common + work, "life" → common + life, anything else
@@ -50,19 +49,33 @@ func Packs(use string) []string {
 }
 
 // Uninformative types are never taken from the model: what references, mentions, attended or took part in what
-// (needs v2: "引用了", "参加了").
+// (needs v2: "引用了", "参加了"), plus stopped noise predicates (about, same_circle).
 var uninformative = regexp.MustCompile(`(?i)^(cites?|cited|references?|referenced|refers_to|mentions?|mentioned|links?_to|linked|` +
-	`attends?|attended|participates?_in|participated|joined|took_part|in_meeting|引用|引用了|提到|提到了|参加|参加了|参与|参与了)$`)
+	`attends?|attended|participates?_in|participated|joined|took_part|in_meeting|about|same_circle|引用|引用了|提到|提到了|参加|参加了|参与|参与了)$`)
+
+// stoppedPredicates are legacy high-noise predicates that are no longer written to the graph in v0.4.0.
+var stoppedPredicates = map[string]bool{
+	"about":       true,
+	"same_circle": true,
+}
+
+// IsStoppedPredicate reports whether predicate p is stopped and must not be written or expanded.
+func IsStoppedPredicate(p string) bool {
+	return stoppedPredicates[TypeName(p)]
+}
 
 // Uninformative says whether a proposed type is one that is never kept.
-func Uninformative(name string) bool { return uninformative.MatchString(strings.TrimSpace(name)) }
+func Uninformative(name string) bool {
+	n := strings.TrimSpace(name)
+	return uninformative.MatchString(n) || IsStoppedPredicate(n)
+}
 
 // LearnAfter is how many times a type the model proposed must come up before it joins the user's table.
 const LearnAfter = 2
 
-// learnedEnds are the ends a learned type may join: any entity but a chat, a meeting or a document (a session is never
-// an entity of a relation).
-var learnedEnds = []string{"person", "org", "project", "system", "repo", "resource", "topic", "task", "decision"}
+// learnedEnds are the ends a learned type may join: persistent entity types only (never task, meeting, chat, doc,
+// or decision).
+var learnedEnds = []string{"person", "org", "project", "system", "repo", "resource", "topic"}
 
 // TypeName is the canonical form of a proposed type: lower case, words joined by "_".
 func TypeName(name string) string {

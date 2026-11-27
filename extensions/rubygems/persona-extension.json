@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "rubygems",
   "name": "RubyGems",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "icon": "assets/icon.png",
   "description": "Search Ruby gems on the official RubyGems JSON API. Compare current versions, licenses, runtime dependencies, release dates, download activity, documentation and repository links. Get an exact-version gem install command without executing it.",
   "publisher": "nwverse",
@@ -21,7 +21,7 @@
     "source": {
       "entry": "src/index.ts",
       "bundle": "build/rubygems.mjs",
-      "sha256": "e7afb3e711d682c1cb58d48efd3b7af0cdc16be9c58534a8f3da0387530d6730"
+      "sha256": "34f62a88e40beb9a469df04e24d2b3e062c3e3ee48b2258f5eb4ebd4e7501e7f"
     }
   },
   "contributes": {

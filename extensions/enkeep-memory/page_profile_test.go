@@ -46,7 +46,7 @@ func TestProfilePageSixFacetsSensitiveAndRefresh(t *testing.T) {
 		Facet: entry.Workflow, Grain: entry.Class, Text: "合并前在测试机跑全量门禁", Status: entry.Stable,
 		Count: 3, Last: "2026-11-23", Tagged: true,
 		Impact:   entry.Impact{Moment: "task_start", Action: "run gate"},
-		Evidence: ev(entry.SrcAgent, "2026-11-23", "先跑门禁"),
+		Evidence: ev(entry.SrcAssistant, "2026-11-23", "先跑门禁"),
 	}, "test")
 	a.c.Observe(&entry.Entry{
 		Facet: entry.Persona, Grain: entry.Action, Text: "每晚十一点前休息", Status: entry.Stable,

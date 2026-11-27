@@ -90,12 +90,27 @@ func (c *Curator) RunFast(ctx context.Context) (int, error) {
 		for _, l := range u.Lines {
 			d.Shown[l.N] = true
 		}
+		prevUpdated := make(map[string]string, len(c.St.S.Entries))
+		for id, e := range c.St.S.Entries {
+			prevUpdated[id] = e.Updated
+		}
 		for _, p := range dailyParts(u, d) {
 			if err := c.batch("daily", u, p.d, p.part, 0, run, func(d triage.Decision, part string) error {
 				return c.digest(ctx, metered, b, u, d, part, owner, known, run)
 			}); err != nil {
 				c.logf("fast path: %s: %v", u.Meta.Name, err)
 				break
+			}
+		}
+		// Mark newly observed or updated correction rules from this fast-path pass as temporary hot-slot contracts
+		// (unified design §2.1: TTL 7 days, stands in Bucket 0 until L1 SyncContracts absorbs them).
+		for id, e := range c.St.S.Entries {
+			if prevUpdated[id] == e.Updated || !e.Live() || entry.KindOf(e) != entry.KindRules {
+				continue
+			}
+			if strings.EqualFold(e.Type, "correction") || strings.TrimSpace(e.Rejected) != "" || entry.Hard(e) {
+				entry.SetFastHot(e, day)
+				run.Counts["fast_hot_marked"]++
 			}
 		}
 		n++

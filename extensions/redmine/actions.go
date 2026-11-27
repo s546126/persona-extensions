@@ -9,8 +9,11 @@ import (
 	"unicode"
 )
 
-// maxSubjectChars is the longest issue subject Redmine accepts, counted in characters.
-const maxSubjectChars = 255
+// maxSubjectChars and maxDescriptionChars bound issue drafts, counted in characters.
+const (
+	maxSubjectChars     = 255
+	maxDescriptionChars = 30000
+)
 
 type createArgs struct {
 	ProjectID   int64  `json:"project_id"`
@@ -70,8 +73,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	if _, err := a.client.project(ctx, in.ProjectID); err != nil {
 		return nil, err
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), func() (string, error) {
+	keyData, _ := json.Marshal(in)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), func() (string, error) {
 		item, err := a.client.createIssue(ctx, in.ProjectID, in.Subject, in.Description)
 		if err != nil {
 			return "", err

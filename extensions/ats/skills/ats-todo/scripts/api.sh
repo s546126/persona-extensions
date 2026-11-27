@@ -10,6 +10,14 @@ method=$1
 path=$2
 shift 2
 if [ $# -ge 1 ]; then
+  if [[ $1 == @* ]]; then
+    body_file=${1#@}
+    if [ ! -f "$body_file" ] || [ ! -r "$body_file" ]; then
+      echo "ats: body file does not exist or is not readable: $body_file" >&2
+      exit 1
+    fi
+    exec curl -sS -X "$method" "${ATS_BASE:?}$path" -H 'Content-Type: application/json' --data-binary "@$body_file"
+  fi
   exec curl -sS -X "$method" "${ATS_BASE:?}$path" -H 'Content-Type: application/json' --data-raw "$1"
 fi
 exec curl -sS -X "$method" "${ATS_BASE:?}$path"

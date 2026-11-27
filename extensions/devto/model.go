@@ -1,6 +1,9 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 type article struct {
 	ID             int64                           `json:"id"`
@@ -12,7 +15,7 @@ type article struct {
 	PublishedAt    string                          `json:"published_at"`
 	ReadingMinutes int                             `json:"reading_time_minutes"`
 	TagList        json.RawMessage                 `json:"tag_list"`
-	Tags           []string                        `json:"tags"`
+	Tags           json.RawMessage                 `json:"tags"`
 	BodyMarkdown   string                          `json:"body_markdown"`
 	User           struct{ Name, Username string } `json:"user"`
 }
@@ -30,13 +33,30 @@ type config struct {
 	MinReactions int      `json:"min_reactions"`
 }
 
+// tagNames returns the article tags. DEV sends tag_list and tags in opposite
+// shapes per endpoint (the list has a tag_list array and a comma-separated tags
+// string, a single article swaps them), so either field may be either shape.
 func (a article) tagNames() []string {
-	if len(a.Tags) > 0 {
-		return a.Tags
+	if tags := parseTags(a.Tags); len(tags) > 0 {
+		return tags
 	}
+	return parseTags(a.TagList)
+}
+
+func parseTags(raw json.RawMessage) []string {
 	var list []string
-	if json.Unmarshal(a.TagList, &list) == nil {
-		return list
+	if json.Unmarshal(raw, &list) != nil {
+		var joined string
+		if json.Unmarshal(raw, &joined) != nil {
+			return nil
+		}
+		list = strings.Split(joined, ",")
 	}
-	return nil
+	var out []string
+	for _, tag := range list {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			out = append(out, tag)
+		}
+	}
+	return out
 }

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// The hub gives a UI request about 12 seconds, and anything on the Agent 对话 page that talks to
+// The hub gives a UI request about 12 seconds, and anything on the AI 对话 page that talks to
 // a machine over SSH can take minutes (each refresh script has a three-minute budget, a restore
 // downloads from the backend, an offload scans and uploads). Those actions therefore start a
 // background job and return at once. A job works on a private copy of its machine's state
@@ -28,10 +28,14 @@ const (
 	jobRefresh = "refresh"
 	jobRestore = "restore"
 	jobOffload = "offload"
-	jobInstall = "install"
-	jobBrew    = "brew"
-	jobScan    = "scan"
-	jobClean   = "clean"
+	// The disk_offload point's runs on files, folders and apps (offload.go): not cold sessions,
+	// so a failure there never offers the cold-session upload as its retry.
+	jobFileOffload = "file-offload"
+	jobFileRestore = "file-restore"
+	jobInstall     = "install"
+	jobBrew        = "brew"
+	jobScan        = "scan"
+	jobClean       = "clean"
 )
 
 // brewTimeout bounds a Homebrew install: tap, download and verify.
@@ -46,6 +50,7 @@ type coldJob struct {
 	Note     string    // the outcome
 	Err      string    // why it failed, for people
 	Raw      string    // what the machine or the CLI said, for 详情
+	Command  string    // a command that fixes the failure, shown under the row
 }
 
 func (j coldJob) running() bool { return j.Finished.IsZero() }
@@ -162,7 +167,7 @@ func (a *app) startJob(id, kind, label string, work jobWork) (started bool, cur 
 		}
 	})
 	if err == nil && sc == nil {
-		err = fmt.Errorf("找不到机器 %q", id)
+		err = fmt.Errorf("找不到电脑 %q", id)
 	}
 	if err != nil {
 		a.jobs.mu.Lock()
@@ -192,9 +197,10 @@ func (a *app) startJob(id, kind, label string, work jobWork) (started bool, cur 
 		job.Note = note
 		switch {
 		case werr != nil:
-			job.Err, job.Raw = humanizeErr(werr)
+			job.Err, job.Raw = humanizeErrFor(sc.m, werr)
+			job.Command = errCommand(werr)
 		case uerr != nil:
-			job.Err = "保存结果失败：" + uerr.Error()
+			job.Err = "结果没能保存：" + uerr.Error()
 		}
 		a.jobs.mu.Unlock()
 		if hub := a.hubRef(); hub != nil {
@@ -207,18 +213,18 @@ func (a *app) startJob(id, kind, label string, work jobWork) (started bool, cur 
 // startRefresh refreshes machine id's cold index in the background.
 func (a *app) startRefresh(id string) (bool, coldJob, error) {
 	runner := a.run()
-	return a.startJob(id, jobRefresh, "正在读取会话索引与备份状态", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
+	return a.startJob(id, jobRefresh, "正在检查对话和网盘", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
 		cat, err := RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("已读取 %d 个会话", len(cat.Entries)), nil
+		return fmt.Sprintf("检查完了，记下 %d 个对话", len(cat.Entries)), nil
 	})
 }
 
 // busyNote says that machine name already has a job running.
 func busyNote(name string, j coldJob) string {
-	return fmt.Sprintf("「%s」%s，稍候页面会自动更新", name, cmp.Or(j.Label, "正在处理"))
+	return fmt.Sprintf("「%s」%s，稍等，页面会自动更新", name, cmp.Or(j.Label, "正在处理"))
 }
 
 // coldAction starts a cold-session action that talks to machines and returns the toast; the
@@ -230,6 +236,7 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 	var entry *ColdEntry
 	var offer installOffer
 	var srcName, brew string
+	var notReady *problem
 	err := a.db().read(func(st *State) {
 		if action == "cold-refresh" && (machine == "" || machine == allMachines) {
 			for _, m := range st.Machines {
@@ -261,6 +268,15 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 			if cat := st.cold(m.ID); cat != nil {
 				brew = cat.Brew
 			}
+		case "cold-offload", "archive-sessions":
+			// The page offers the upload on a ready computer only; a stale tap on one known not
+			// to be ready gets the same reason and fix as its row.
+			cat := st.cold(m.ID)
+			switch state := cat.stateCode(); state {
+			case ColdNoCLI, ColdCLIOld, ColdNoBackend:
+				p := coldProblem(st, m, cat, state).problem
+				notReady = &p
+			}
 		}
 	})
 	if err != nil {
@@ -268,9 +284,9 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 	}
 	if len(targets) == 0 {
 		if action == "cold-refresh" {
-			return "没有启用的机器", nil
+			return "还没有电脑", nil
 		}
-		return "", fmt.Errorf("找不到机器 %q", machine)
+		return "", fmt.Errorf("找不到电脑 %q", machine)
 	}
 
 	t := targets[0]
@@ -289,21 +305,24 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 			}
 		}
 		if len(started) == 0 {
-			return "已在读取：" + clip(strings.Join(busy, "、"), 80) + "，稍候页面会自动更新", nil
+			return "已经在检查了：" + clip(strings.Join(busy, "、"), 80) + "，稍等，页面会自动更新", nil
 		}
-		toast := fmt.Sprintf("已开始读取 %d 台机器的会话索引与备份状态，完成后页面自动更新", len(started))
+		toast := fmt.Sprintf("开始检查 %d 台电脑（只读取信息，不搬也不删），完成后页面会自动更新", len(started))
 		if len(busy) > 0 {
 			toast += "；" + clip(strings.Join(busy, "、"), 60) + " 已在进行中"
 		}
 		return toast, nil
 
 	case "cold-offload", "archive-sessions":
-		ok, cur, err := a.startJob(t.id, jobOffload, "正在上传冷会话", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
+		if notReady != nil {
+			return "", fmt.Errorf("「%s」现在还不能把对话搬到网盘：%s", t.name, notReady.message())
+		}
+		ok, cur, err := a.startJob(t.id, jobOffload, "正在把一周没动的 AI 对话搬到网盘", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
 			_, rec, err := OffloadSessions(ctx, runner, sc.st, sc.m, false, nil, now)
 			if err != nil {
 				return "", err
 			}
-			return "冷会话已上云：" + rec.Summary, nil
+			return offloadNote(rec), nil
 		})
 		if err != nil {
 			return "", err
@@ -311,30 +330,30 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 		if !ok {
 			return busyNote(t.name, cur), nil
 		}
-		return "已开始上传「" + t.name + "」的冷会话（读回校验后才删本地），完成后在机器状态里显示结果", nil
+		return "开始把「" + t.name + "」一周没动的 AI 对话搬到网盘（从网盘读回核对无误才删电脑上的），结果会显示在这台电脑那一行", nil
 
 	case "cold-restore":
 		id = strings.TrimSpace(id)
 		if id == "" || strings.HasPrefix(id, "-") || strings.ContainsAny(id, "\r\n\x00") {
-			return "", fmt.Errorf("无效的会话 ID %q", id)
+			return "", fmt.Errorf("对话编号 %q 不对", id)
 		}
 		if entry != nil && !entry.Local {
 			// Refused at once, as RestoreCold would: another device's row belongs to that device.
-			return "", fmt.Errorf("会话 %q 来自另一台设备（%s），原路径属于那台设备；请在原设备上恢复，或在终端运行 disklessly sessions restore %s --to <本机路径>",
-				cmp.Or(entry.Title, entry.ID), cmp.Or(entry.DeviceID, "未知设备"), entry.ID)
+			return "", fmt.Errorf("对话「%s」来自另一台电脑（%s），原来的位置在那台电脑上，请到那台电脑上拿回来。也可以在这台电脑上运行命令：disklessly sessions restore %s --to <放到哪个目录>",
+				cmp.Or(entry.Title, entry.ID), cmp.Or(entry.DeviceID, "不清楚是哪台"), entry.ID)
 		}
 		title := id
 		if entry != nil {
 			title = cmp.Or(entry.Title, entry.SessionID, entry.ID)
 		}
-		ok, cur, err := a.startJob(t.id, jobRestore, "正在恢复会话「"+clipRunes(title, 30)+"」", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
+		ok, cur, err := a.startJob(t.id, jobRestore, "正在把对话「"+clipRunes(title, 30)+"」拿回来", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
 			e, hint, err := RestoreCold(ctx, runner, sc.st, sc.m, id, now)
 			if err != nil {
 				return "", err
 			}
-			note := "已恢复到 " + e.Path
+			note := "已拿回来，放在 " + e.Path
 			if hint != "" {
-				note += "，可运行 " + hint
+				note += "，可以运行 " + hint + " 接着聊"
 			}
 			return note, nil
 		})
@@ -344,22 +363,22 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 		if !ok {
 			return busyNote(t.name, cur), nil
 		}
-		return "已开始恢复「" + clipRunes(title, 30) + "」，完成后在机器状态里显示结果", nil
+		return "开始把「" + clipRunes(title, 30) + "」拿回来，结果会显示在这台电脑那一行", nil
 
 	case "cold-install":
 		if offer.src == nil {
-			return "", errors.New(cmp.Or(offer.reason, "没有可以复制的 disklessly CLI"))
+			return "", errors.New(cmp.Or(offer.reason, "没有可以复制的配套小工具"))
 		}
 		if want := strings.TrimSpace(id); want != "" && want != offer.src.ID {
-			return "", fmt.Errorf("可复制的来源已经变了（现在是 %s），请重新确认", srcName)
+			return "", fmt.Errorf("能复制的来源电脑变了（现在是 %s），请重新确认", srcName)
 		}
 		return a.startInstall(t.id, t.name, offer)
 
 	case "cold-brew":
 		if brew == "" {
-			return "", fmt.Errorf("「%s」上没有找到 Homebrew，没法用 Homebrew 安装；先点「重新检查 %s」，或按页面上的命令手动安装", t.name, t.name)
+			return "", fmt.Errorf("「%s」上没有找到 Homebrew，没法用它装；先点「重新检查 %s」，或者照页面上的命令自己装", t.name, t.name)
 		}
-		ok, cur, err := a.startJob(t.id, jobBrew, "正在用 Homebrew 安装 disklessly", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
+		ok, cur, err := a.startJob(t.id, jobBrew, "正在用 Homebrew 装配套小工具", func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
 			return brewInstall(ctx, runner, sc, now)
 		})
 		if err != nil {
@@ -368,9 +387,27 @@ func (a *app) coldAction(_ context.Context, action, machine, id string) (string,
 		if !ok {
 			return busyNote(t.name, cur), nil
 		}
-		return "已开始在「" + t.name + "」上用 Homebrew 安装 disklessly，装好后自动重新检查", nil
+		return "开始在「" + t.name + "」上用 Homebrew 装配套小工具，装好后会自动重新检查", nil
 	}
-	return "", fmt.Errorf("unknown action %q", action)
+	return "", fmt.Errorf("这个按钮已经不能用了（%q），请刷新页面", action)
+}
+
+// offloadNote says how a cold-session upload ended: how many conversations moved, the space freed
+// and the conversations kept because they are still in use.
+func offloadNote(rec *CleanRecord) string {
+	if rec == nil {
+		return "搬完了"
+	}
+	var note string
+	if rec.Moved > 0 {
+		note = fmt.Sprintf("搬完了：%d 个一周没动的 AI 对话已经放进网盘，电脑上腾出 %s", rec.Moved, FormatBytes(rec.FreedBytes))
+	} else {
+		note = "这次没有需要搬的对话，电脑上什么都没删"
+	}
+	if rec.Referenced > 0 {
+		note += fmt.Sprintf("；%d 个还在用的对话留在电脑上没动", rec.Referenced)
+	}
+	return note + "。"
 }
 
 // startInstall copies the CLI from offer.src to machine id in the background, then refreshes it.
@@ -379,7 +416,7 @@ func (a *app) startInstall(id, name string, offer installOffer) (string, error) 
 	src := *offer.src
 	srcName := machineLabel(&src)
 	ver := cmp.Or(shortVersion(offer.cli.Version), "disklessly")
-	ok, cur, err := a.startJob(id, jobInstall, "正在从 "+srcName+" 复制安装 disklessly "+ver, func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
+	ok, cur, err := a.startJob(id, jobInstall, "正在从 "+srcName+" 复制配套小工具 "+ver, func(ctx context.Context, sc *scratch, now time.Time) (string, error) {
 		return copyInstallWork(ctx, runner, streamer, &src, offer.cli, sc, now)
 	})
 	if err != nil {
@@ -388,7 +425,7 @@ func (a *app) startInstall(id, name string, offer installOffer) (string, error) 
 	if !ok {
 		return busyNote(name, cur), nil
 	}
-	return "已开始从「" + srcName + "」复制安装到「" + name + "」，完成后自动重新检查", nil
+	return "开始从「" + srcName + "」把配套小工具复制到「" + name + "」，装好后会自动重新检查", nil
 }
 
 // copyInstallWork copies cli from src to sc's machine, then re-reads that machine's cold index.
@@ -397,14 +434,14 @@ func copyInstallWork(ctx context.Context, runner Runner, streamer StreamRunner, 
 	ver := cmp.Or(shortVersion(cli.Version), "disklessly")
 	o, err := copyInstall(ctx, streamer, src, sc.m, cli.Home)
 	if err != nil {
-		return "", fmt.Errorf("从 %s 复制安装失败：%w", srcName, err)
+		return "", fmt.Errorf("从 %s 复制配套小工具没有成功：%w", srcName, err)
 	}
-	note := "已从 " + srcName + " 复制安装 " + cmp.Or(o.version, ver)
+	note := "已从 " + srcName + " 复制好配套小工具 " + cmp.Or(o.version, ver)
 	if o.prev != "" {
-		note += "，原来的保留在 " + o.prev
+		note += "，原来的留在 " + o.prev
 	}
 	if o.shadow != "" {
-		note += "；但这台电脑仍先找到 " + o.shadow + "，请删除它或调整 PATH 后再检查"
+		note += "；但这台电脑还是先找到 " + o.shadow + "（另一份），请删掉它或调整 PATH 后再检查"
 	}
 	_, _ = RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
 	return note, nil
@@ -421,10 +458,10 @@ func brewInstall(ctx context.Context, runner Runner, sc *scratch, now time.Time)
 	case !o.ok:
 		return "", brewFailure(name, o)
 	}
-	ver := "disklessly " + cmp.Or(shortVersion(o.version), "（版本未知）")
-	note := "已用 Homebrew " + brewVerb(o.op) + " " + ver
+	ver := "disklessly " + cmp.Or(shortVersion(o.version), "（版本不清楚）")
+	note := "已用 Homebrew " + brewVerb(o.op) + "好配套小工具 " + ver
 	if o.same {
-		note = "Homebrew 里的 " + ver + " 已是最新，没有重新下载"
+		note = "Homebrew 里的配套小工具 " + ver + " 已经是最新的，没有重新下载"
 	}
 	if o.keg != "" {
 		note += "（" + o.keg + "）"
@@ -444,9 +481,9 @@ func brewInstall(ctx context.Context, runner Runner, sc *scratch, now time.Time)
 	switch o.shadow {
 	case "":
 	case "?":
-		note += "；但检查脚本在 PATH 和常见位置都找不到它，把 Homebrew 的 bin 目录加进这台电脑的 PATH 后点「重新检查」"
+		note += "；但在 PATH 和常见位置都找不到它，把 Homebrew 的 bin 目录加进这台电脑的 PATH 后点「重新检查 " + name + "」"
 	default:
-		note += "；但这台电脑仍先找到 " + o.shadow + "（另一份 disklessly），删除它或把 Homebrew 的目录排到 PATH 前面后点「重新检查」"
+		note += "；但这台电脑还是先找到 " + o.shadow + "（另一份 disklessly），删掉它或把 Homebrew 的目录排到 PATH 前面后点「重新检查 " + name + "」"
 	}
 	_, _ = RefreshColdIndex(ctx, runner, sc.st, sc.m, now)
 	return note, nil

@@ -1,7 +1,7 @@
 import { ExtError, noContribution, unknownMethod, withExactParams, type ExactJSON, type Handler } from "@persona/extension";
 import { clip, ReadError, type Entry } from "./model.ts";
 import { errorText, textsFor } from "./i18n.ts";
-import { budget, Wiktionary } from "./service.ts";
+import { budget, checkSignal, Wiktionary } from "./service.ts";
 export function toolsFor(locale = "en") {
   const t = textsFor(locale);
   return [
@@ -14,8 +14,13 @@ function text(entry: Entry): string {
 }
 function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
     for (const token of exact.fieldValues("word")) {
+      if (token.raw === "null") { delete args.word; continue; }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args.word = value;
     }
     return args;
@@ -27,13 +32,15 @@ function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   return value;
 }
 export async function callTool(service: Wiktionary, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
+  if (name !== "wiktionary_lookup") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), request = budget(signal, service.limits.tool);
   try {
-    if (name === "wiktionary_lookup") {
-      if (typeof args.word !== "string") throw new ReadError("invalid");
-      return clip(text(await service.lookup(args.word, false, request.signal)), 29_999);
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    if (typeof args.word !== "string") throw new ReadError("invalid");
+    return clip(text(await service.lookup(args.word, false, request.signal)), 29_999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally { request.dispose(); }
 }
 export function connector(getService: () => Wiktionary): Handler { return withExactParams(async (method, params: unknown, call) => {

@@ -4,8 +4,30 @@ export type ReadCode = "invalid" | "bad_answer" | "not_found" | "rate_limited" |
 export class ReadError extends Error {
   constructor(readonly code: ReadCode, readonly status?: number) { super(code); }
 }
-export const clip = (text: string, most: number) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "…";
+export const clip = (text: string, most: number) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "…";
+};
 export const plain = (text: string) => text.replace(/\s+/gu, " ").trim();
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+export function boundedID(prefix: string, raw: string, most = 128): string {
+  const combined = prefix + raw;
+  if (Array.from(combined).length <= most) return combined;
+  const tag = "~" + fnv1aHex(raw);
+  const keep = Math.max(0, most - Array.from(prefix).length - tag.length);
+  return prefix + Array.from(raw).slice(0, keep).join("") + tag;
+}
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
   return value as Record<string, unknown>;
@@ -42,10 +64,14 @@ export function workKey(value: unknown): string {
   if (typeof value !== "string" || !/^OL[1-9][0-9]{0,9}W$/.test(value)) throw new ReadError("invalid");
   return value;
 }
+function upstreamWorkKey(value: unknown): string {
+  try { return workKey(string(value).replace(/^\/works\//, "")); }
+  catch { throw new ReadError("bad_answer"); }
+}
 export function queryText(value: unknown): string {
   if (typeof value !== "string") throw new ReadError("invalid");
   const text = plain(value);
-  if (!text || Array.from(text).length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (!text || Array.from(text).length > 200 || /[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   return text;
 }
 export function searchPath(query: string, limit = 20): string {
@@ -66,10 +92,10 @@ function identifier(value: unknown): string {
   return id;
 }
 export function parseBook(raw: unknown): Book {
-  const value = object(raw), key = workKey(string(value.key).replace(/^\/works\//, ""));
-  const title = clip(plain(string(value.title)), 500);
+  const value = object(raw), key = upstreamWorkKey(value.key);
+  const title = clip(plain(string(value.title).replace(/[\ud800-\udfff]/gu, "")), 500);
   if (!title) throw new ReadError("bad_answer");
-  const authors = array(value.author_name ?? []).slice(0, 8).map(name => clip(plain(string(name)), 200)).filter(Boolean);
+  const authors = array(value.author_name ?? []).slice(0, 8).map(name => clip(plain(string(name).replace(/[\ud800-\udfff]/gu, "")), 200)).filter(Boolean);
   const year = value.first_publish_year == null ? undefined : integer(value.first_publish_year, 2200);
   const editions = value.edition_count == null ? undefined : integer(value.edition_count);
   const availability = access(value.ebook_access);
@@ -96,15 +122,15 @@ export function parseSearch(raw: unknown, at: number): SearchResult {
 }
 function description(value: unknown): string {
   if (value == null) return "";
-  if (typeof value === "string") return clip(plain(value), 8000);
+  if (typeof value === "string") return clip(plain(value.replace(/[\ud800-\udfff]/gu, "")), 8000);
   const item = object(value);
   if (item.type != null && item.type !== "/type/text") throw new ReadError("bad_answer");
-  return clip(plain(string(item.value)), 8000);
+  return clip(plain(string(item.value).replace(/[\ud800-\udfff]/gu, "")), 8000);
 }
 export function parseWork(raw: unknown, base: Book, at: number): Work {
-  const value = object(raw), key = workKey(string(value.key).replace(/^\/works\//, ""));
-  const title = clip(plain(string(value.title)), 500);
+  const value = object(raw), key = upstreamWorkKey(value.key);
+  const title = clip(plain(string(value.title).replace(/[\ud800-\udfff]/gu, "")), 500);
   if (key !== base.key || !title || title !== base.title) throw new ReadError("bad_answer");
-  const subjects = array(value.subjects ?? []).slice(0, 12).map(item => clip(plain(string(item)), 100)).filter(Boolean);
+  const subjects = array(value.subjects ?? []).slice(0, 12).map(item => clip(plain(string(item).replace(/[\ud800-\udfff]/gu, "")), 100)).filter(Boolean);
   return { ...base, title, description: description(value.description), subjects, at };
 }

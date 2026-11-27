@@ -62,13 +62,12 @@ func instanceURL(raw string) (string, error) {
 	if u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1")) {
 		return "", errors.New("Karakeep requires HTTPS except on the local machine")
 	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	if u.Path == "" {
-		u.Path = "/api"
-	} else if !strings.HasSuffix(u.Path, "/api") {
-		u.Path += "/api"
-	}
-	return strings.TrimRight(u.String(), "/"), nil
+	// Karakeep's REST API is served under /api/v1; accept the instance root
+	// (optionally behind a path prefix) or an address already ending in /api or /api/v1.
+	prefix := strings.TrimRight(u.Path, "/")
+	prefix = strings.TrimSuffix(strings.TrimSuffix(prefix, "/api/v1"), "/api")
+	u.Path, u.RawPath = prefix+"/api/v1", ""
+	return u.String(), nil
 }
 
 func (a *app) record(err error) {

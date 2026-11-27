@@ -3,7 +3,6 @@ package entry
 import (
 	"fmt"
 	"math"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -204,12 +203,14 @@ func (e *Entry) Principle() string {
 // evidence (independent sightings, source kinds, scopes; at most 30) and the user's own signals (said it holds from
 // now on, corrected the assistant, more each day it had to again, wrote or confirmed it, a principle; at most 28), less for a candidate, a dormant or
 // a low-confidence entry. Every part is a field of the entry: no learnt weights.
+const countMost = 15.0
+
 func Score(e *Entry) int {
 	if e.Pinned {
 		return 100
 	}
 	s := float64(reachOf(e))*6.25 + float64(horizonOf(e))*25.0/3
-	s += math.Min(15, 5*math.Log2(1+float64(max(e.Count, 1))))
+	s += math.Min(countMost, 5*math.Log2(1+float64(max(e.Count, 1))))
 	s += math.Min(8, 4*float64(max(len(e.Kinds)-1, 0)))
 	s += math.Min(7, 3.5*float64(max(len(e.Scopes)-1, 0)))
 	u := 0.0
@@ -220,8 +221,7 @@ func Score(e *Entry) int {
 		// Each day the user had to correct it again is a violation (cogpipe's violation_count): 6 the first, up to 20.
 		u += math.Min(20, 6+4*float64(max(correctionDays(e)-1, 0)))
 	}
-	if (e.User != nil && strings.TrimSpace(e.User.Text) != "") || lastUserMark(e) == "right" ||
-		(e.Origin != Behavior && e.Origin != "" && e.Origin != Seed) {
+	if IsTrueUserOwned(e) || lastUserMark(e) == "right" {
 		u += 10
 	}
 	if e.Principle() != "" && KindOf(e) == KindUnderstanding {
@@ -239,9 +239,6 @@ func Score(e *Entry) int {
 		s *= 0.8
 	case Dormant:
 		s *= 0.5
-	}
-	if Hard(e) && e.Status != Dormant {
-		s = math.Max(s, 90)
 	}
 	return int(math.Round(math.Max(0, math.Min(99, s))))
 }
@@ -297,14 +294,16 @@ func isoWeek(day string) string {
 	return fmt.Sprintf("%d-W%02d", y, w)
 }
 
-// hardCue is a ban or plain anger in the user's own correction: from now on, never again, swearing, a row of
-// question marks.
-var hardCue = regexp.MustCompile(`以后(都|一律|别|不要|不许)|一律|永远不|绝不|再也不|别再|不要再|不许|他妈|我操|傻逼|[？?]{3,}|(?i)\bnever (do|ask)|\bstop (doing|asking)`)
-
-// Hard says whether e is a hard rule (0.2.0-beta.52, after cogpipe's 【硬】 and violation_count): a correction of the
-// assistant the user made on two days within a week, or with a ban or anger in their own words. A hard rule stands
-// as soon as it is read (export counts it stable) and scores at least 90.
+// Hard reports whether e carries a multi-day correction signal or explicit user pin for L1 reference (0.4.0 §2).
+// Single-day L0 anger/ban cue auto-promotion has been removed: an entry qualifies here only if explicitly Pinned or
+// corrected by the user's own lines on at least two distinct days within 7 days.
 func Hard(e *Entry) bool {
+	if e == nil {
+		return false
+	}
+	if e.Pinned {
+		return true
+	}
 	if e.Facet != Interaction && e.Facet != Tools {
 		return false
 	}
@@ -315,9 +314,6 @@ func Hard(e *Entry) bool {
 	for _, ev := range e.Evidence {
 		if !selfLine(ev) {
 			continue
-		}
-		if hardCue.MatchString(ev.Quote) {
-			return true
 		}
 		if ev.Day != "" && !slices.Contains(days, ev.Day) {
 			days = append(days, ev.Day)
@@ -332,4 +328,85 @@ func Hard(e *Entry) bool {
 		}
 	}
 	return false
+}
+
+// FlagCoveredBy marks a rule the weekly or daily rule merge found to say what another one says, when it could not be
+// merged away (the assistant's hand-written memory, or the user's own): it stays and is recalled, but does not stand
+// beside the one that covers it (0.2.6). The covering entry's id follows the colon.
+const FlagCoveredBy = "covered_by:"
+
+// CoveredBy is the id of the rule that covers e, "" when none does.
+func CoveredBy(e *Entry) string {
+	for _, f := range e.Flags {
+		if strings.HasPrefix(f, FlagCoveredBy) {
+			return strings.TrimPrefix(f, FlagCoveredBy)
+		}
+	}
+	return ""
+}
+
+// FlagFastHot marks a temporary hard contract extracted by the correction fast path (unified design §2.1):
+// "fast_hot:YYYY-MM-DD". It enters the standing hot slot (TTL 7 days) until L1 contract aggregation absorbs it.
+const FlagFastHot = "fast_hot:"
+
+// FastHotDay returns the latest YYYY-MM-DD day marked by FlagFastHot on e, or "" if none.
+func FastHotDay(e *Entry) string {
+	if e == nil {
+		return ""
+	}
+	best := ""
+	for _, f := range e.Flags {
+		if d, ok := strings.CutPrefix(f, FlagFastHot); ok && d > best {
+			best = d
+		}
+	}
+	return best
+}
+
+// SetFastHot records (or updates) FlagFastHot on e to day (YYYY-MM-DD), removing any older fast_hot flag.
+func SetFastHot(e *Entry, day string) {
+	if e == nil || day == "" {
+		return
+	}
+	e.Flags = slices.DeleteFunc(e.Flags, func(f string) bool { return strings.HasPrefix(f, FlagFastHot) })
+	e.Flags = append(e.Flags, FlagFastHot+day)
+}
+
+// IsFastHot reports whether e is an active (unexpired) fast-path temporary hard contract within ttlDays of now.
+func IsFastHot(e *Entry, now time.Time, ttlDays int) bool {
+	if e == nil || !e.Live() || KindOf(e) != KindRules {
+		return false
+	}
+	day := FastHotDay(e)
+	if day == "" {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return false
+	}
+	if ttlDays <= 0 {
+		ttlDays = 7
+	}
+	return now.Sub(t) <= time.Duration(ttlDays)*24*time.Hour
+}
+
+// ColdStartEligible reports whether e qualifies for L0 cold-start fallback when its standing bucket has no L1 entries
+// yet (unified design §2.1): reach >= cross_project and horizon == lasting with a principle (understanding) or hard/lasting
+// cross-project rule (rules).
+func ColdStartEligible(e *Entry) bool {
+	if e == nil {
+		return false
+	}
+	k := KindOf(e)
+	if k == "" {
+		return false
+	}
+	wideLasting := e.Leverage != nil &&
+		(e.Leverage.Reach == ReachCrossProject || e.Leverage.Reach == ReachEveryTurn) &&
+		e.Leverage.Horizon == HorizonLasting
+	if k == KindRules {
+		return Hard(e) || wideLasting
+	}
+	return wideLasting && e.Principle() != ""
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,7 +34,22 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || len(st.ProjectID) > 128 || len([]rune(st.ProjectName)) > maxProjectNameChars || len(st.WorkItemID) > 128 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len([]rune(st.Description)) > maxDescriptionChars || len(st.History) > 10 {
+	if err := r.DecodeState(&st); err != nil || len(st.ProjectID) > 128 || len([]rune(st.ProjectName)) > maxProjectNameChars || len(st.WorkItemID) > 128 || len(st.DraftID) > 128 || len([]rune(st.Name)) > maxNameChars || len([]rune(st.Description)) > maxDescriptionChars || len(st.History) > 10 || validCursor(st.Cursor) != nil {
+		return pageState{}, errors.New("invalid page state")
+	}
+	switch st.Mode {
+	case "", "items", "create", "review-create", "detail", "edit", "review-edit":
+	default:
+		return pageState{}, errors.New("invalid page state")
+	}
+	seen := map[string]bool{}
+	for _, c := range st.History {
+		if validCursor(c) != nil || seen[c] {
+			return pageState{}, errors.New("invalid page state")
+		}
+		seen[c] = true
+	}
+	if len(st.History) > 0 && seen[st.Cursor] {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -67,14 +83,15 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err := validCursor(st.Cursor); err != nil {
 			return nil, errors.New("no valid next cursor")
 		}
+		nextCursor := r.Values["cursor"]
+		if err := validCursor(nextCursor); err != nil || nextCursor == "" || nextCursor == st.Cursor || slices.Contains(st.History, nextCursor) {
+			return nil, errors.New("invalid next cursor")
+		}
 		st.History = append(st.History, st.Cursor)
 		if len(st.History) > 10 {
 			st.History = st.History[len(st.History)-10:]
 		}
-		st.Cursor = r.Values["cursor"]
-		if err := validCursor(st.Cursor); err != nil || st.Cursor == "" {
-			return nil, errors.New("invalid next cursor")
-		}
+		st.Cursor = nextCursor
 	case "previous":
 		if len(st.History) < 2 {
 			st.Cursor = ""
@@ -108,6 +125,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		st.Name, st.Description, st.Priority, st.StateID, st.TargetDate = in.Name, in.Description, in.Priority, in.StateID, in.TargetDate
 		st.Mode = "review-create"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("work item draft exceeds page state limit; use the plane_create_work_item action")
+		}
 	case "review-edit":
 		in := updateArgs{ProjectID: st.ProjectID, WorkItemID: st.WorkItemID, Priority: r.Values["priority"], StateID: r.Values["state_id"]}
 		if err := in.validate(); err != nil {
@@ -115,6 +135,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		st.Priority, st.StateID, st.Mode = in.Priority, in.StateID, "review-edit"
 	case "confirm-create":
+		if st.DraftID == "" {
+			return nil, errors.New("draft is required")
+		}
 		in := createArgs{ProjectID: st.ProjectID, Name: st.Name, Description: st.Description, Priority: st.Priority, StateID: st.StateID, TargetDate: st.TargetDate}
 		raw, _ := json.Marshal(in)
 		out, err := a.doAction(ctx, "ui-create:"+st.DraftID, "plane_create_work_item", raw)
@@ -123,6 +146,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-edit":
+		if st.DraftID == "" {
+			return nil, errors.New("draft is required")
+		}
 		in := updateArgs{ProjectID: st.ProjectID, WorkItemID: st.WorkItemID, Priority: st.Priority, StateID: st.StateID}
 		raw, _ := json.Marshal(in)
 		out, err := a.doAction(ctx, "ui-edit:"+st.DraftID, "plane_update_work_item", raw)
@@ -139,12 +165,39 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 
 const maxViewRecords = 250
 
+func boundedKey(prefix, id string) string {
+	key := prefix + id
+	if len(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(id))
+	return prefix + hex.EncodeToString(sum[:])
+}
+
+func workItemTitle(item workItem) string {
+	if s := strings.TrimSpace(item.Name); s != "" {
+		return s
+	}
+	if item.SequenceID > 0 {
+		return fmt.Sprintf("#%d", item.SequenceID)
+	}
+	if s := strings.TrimSpace(item.ID); s != "" {
+		return s
+	}
+	return "Work item"
+}
+
 // collectPages reads the pages the view has gone through, the earlier cursors in History and then the current one, so
 // that Load more answers the whole list, longer. It stops at maxViewRecords to keep the view within the SDK's
 // component limit, and the page it returns offers a next page only while the cap is not reached.
 func collectPages[T any](st pageState, fetch func(cursor string) (page[T], error)) (page[T], error) {
 	var out page[T]
-	for _, cursor := range append(slices.Clone(st.History), st.Cursor) {
+	cursors := append(slices.Clone(st.History), st.Cursor)
+	seenCursors := map[string]bool{}
+	for _, cursor := range cursors {
+		seenCursors[cursor] = true
+	}
+	for _, cursor := range cursors {
 		if len(out.Results) >= maxViewRecords {
 			break
 		}
@@ -158,7 +211,7 @@ func collectPages[T any](st pageState, fetch func(cursor string) (page[T], error
 	if len(out.Results) > maxViewRecords {
 		out.Results = out.Results[:maxViewRecords]
 	}
-	if len(out.Results) >= maxViewRecords {
+	if len(out.Results) >= maxViewRecords || out.NextCursor == "" || seenCursors[out.NextCursor] || validCursor(out.NextCursor) != nil {
 		out.NextPageResults = false
 	}
 	return out, nil
@@ -174,7 +227,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if err := validID(st.ProjectID); err != nil {
 			return nil, err
 		}
-	default:
+	case "":
 		page, err := collectPages(st, func(cursor string) (page[project], error) {
 			return a.client.projects(ctx, a.workspace, cursor)
 		})
@@ -184,11 +237,13 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		}
 		v := &wire.View{Title: t.projects, State: ext.EncodeState(st)}
 		section := wire.Section{Title: t.projects}
+		seenProj := map[string]bool{}
 		for _, project := range page.Results {
-			if project.ID == "" || project.Name == "" {
+			if project.ID == "" || project.Name == "" || seenProj[project.ID] {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "project-" + project.ID, Title: clipText(project.Name, 1800), Subtitle: project.Identifier, Action: &wire.Action{ID: "project", Values: map[string]string{"id": project.ID, "name": project.Name, "identifier": project.Identifier}}})
+			seenProj[project.ID] = true
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: boundedKey("project-", project.ID), Title: clipText(project.Name, 1800), Subtitle: clipText(project.Identifier, 200), Action: &wire.Action{ID: "project", Values: map[string]string{"id": project.ID, "name": clipText(project.Name, maxProjectNameChars), "identifier": clipText(project.Identifier, 32)}}})
 		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noProjects})
@@ -198,6 +253,8 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		}
 		v.Sections = []wire.Section{section}
 		return v, nil
+	default:
+		return nil, errors.New("invalid Plane view")
 	}
 	if st.Mode == "create" || st.Mode == "review-create" {
 		return a.createView(ctx, r, st)
@@ -211,13 +268,31 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		v := &wire.View{Title: clipText(st.ProjectName, 1800), State: ext.EncodeState(st)}
-		section := wire.Section{Title: fmt.Sprintf(t.items, len(page.Results))}
+		section := wire.Section{}
+		seenItems := map[string]bool{}
+		seenKeys := map[string]bool{}
 		for _, item := range page.Results {
-			if item.ID == "" || item.Name == "" {
+			if item.ID == "" || item.Name == "" || seenItems[item.ID] {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: itemKey(item.SequenceID), Title: clipText(item.Name, 1800), Subtitle: fmt.Sprintf("#%d · %s · %s", item.SequenceID, clipText(item.State.Name, 100), item.Priority), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
+			seenItems[item.ID] = true
+			key := ""
+			if item.SequenceID > 0 {
+				candidate := fmt.Sprintf("item-%d", item.SequenceID)
+				if !seenKeys[candidate] {
+					key = candidate
+				}
+			}
+			if key == "" {
+				key = boundedKey("item-", item.ID)
+			}
+			if seenKeys[key] {
+				continue
+			}
+			seenKeys[key] = true
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: key, Title: clipText(item.Name, 1800), Subtitle: fmt.Sprintf("#%d · %s · %s", item.SequenceID, clipText(item.State.Name, 100), item.Priority), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 		}
+		section.Title = fmt.Sprintf(t.items, len(section.Items))
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noItems})
 		}
@@ -229,6 +304,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "projects"}},
 		}}}
 		return v, nil
+	}
+	if err := validID(st.WorkItemID); err != nil {
+		return nil, err
 	}
 	item, err := a.client.workItem(ctx, a.workspace, st.ProjectID, st.WorkItemID)
 	a.record(err)
@@ -265,10 +343,10 @@ func (a *app) createView(ctx context.Context, r *ext.UIRequest, st pageState) (*
 		return nil, err
 	}
 	items := []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: st.Name},
-		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.body, Value: st.Description},
+		{Type: wire.ComponentField, Kind: "text", Name: "name", Label: t.name, Value: clipText(st.Name, wire.StringMost)},
+		{Type: wire.ComponentField, Kind: "text", Name: "description", Label: t.body, Value: clipText(st.Description, wire.StringMost)},
 		{Type: wire.ComponentField, Kind: "choice", Name: "priority", Label: t.priority, Value: priorityValue(st.Priority), Choices: priorityChoices(t)},
-		{Type: wire.ComponentField, Kind: "text", Name: "target_date", Label: t.due + " (YYYY-MM-DD)", Value: st.TargetDate},
+		{Type: wire.ComponentField, Kind: "text", Name: "target_date", Label: t.due + " (YYYY-MM-DD)", Value: clipText(st.TargetDate, wire.StringMost)},
 	}
 	if state := stateChoices(states); len(state) > 0 {
 		items = append(items, wire.Component{Type: wire.ComponentField, Kind: "choice", Name: "state_id", Label: t.state, Value: stateValue(st.StateID, states), Choices: state})
@@ -323,7 +401,7 @@ func detailView(r *ext.UIRequest, st pageState, item workItem, link string) *wir
 	} else {
 		sections = append(sections, wire.Section{Title: t.description, Items: []wire.Component{{Type: wire.ComponentText, Text: t.noDescription, Style: wire.TextStyleSecondary}}})
 	}
-	return &wire.View{Title: clipText(item.Name, 1800), State: ext.EncodeState(st), Sections: sections}
+	return &wire.View{Title: clipText(workItemTitle(item), 1800), State: ext.EncodeState(st), Sections: sections}
 }
 
 func stateChoices(states []workflowState) []wire.Choice {

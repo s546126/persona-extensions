@@ -131,3 +131,31 @@ test("invalid state and three-language pure snapshots are supported", async () =
     assert.ok(JSON.stringify(searched).includes("Example Engineering"));
   } finally { h.p.close(); }
 });
+
+test("ExactJSON rejects limit: 0 and show: 0, unknown tool checks before args, and refresh resets on navigation", async () => {
+  const h = await setup();
+  try {
+    const zeroLimit = await h.call("connector.tools.call", { name: "podcasts_search", args: { query: "synthetic", limit: 0 } });
+    assert.equal(zeroLimit.error?.code, "invalid");
+    const zeroEpisodeLimit = await h.call("connector.tools.call", { name: "podcasts_episodes", args: { show: 1860072717, limit: 0 } });
+    assert.equal(zeroEpisodeLimit.error?.code, "invalid");
+    const zeroShow = await h.call("connector.tools.call", { name: "podcasts_episodes", args: { show: 0 } });
+    assert.equal(zeroShow.error?.code, "invalid");
+    const unknownTool = await h.call("connector.tools.call", { name: "podcasts_unknown", args: { limit: "bad" } });
+    assert.equal(unknownTool.error?.code, "unknown_method");
+
+    const searchPath = "/search?term=synthetic&media=podcast&entity=podcast&limit=20";
+    await h.call("ui.page.mount", { session: "refresh-reset", params: { contribution: "podcasts", locale: "en", ui_version: 1 } });
+    let snap = await settled(h, "refresh-reset", "podcast-welcome-text");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "podcast-search-submit", { query: "synthetic" }) });
+    snap = await settled(h, "refresh-reset", "Example Engineering");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "show-1860072717") });
+    snap = await settled(h, "refresh-reset", "A useful conversation");
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "show-refresh") });
+    snap = await settled(h, "refresh-reset", "A useful conversation");
+    const hitsBeforeBack = h.fixture.hits.get(searchPath) ?? 0;
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "host-ticket", interaction: interaction(snap, "show-back") });
+    await settled(h, "refresh-reset", "Another Show");
+    assert.equal(h.fixture.hits.get(searchPath), hitsBeforeBack, "refresh must reset after navigating back");
+  } finally { h.p.close(); }
+});

@@ -1,23 +1,57 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
+// bookmark follows Karakeep's v1 Bookmark schema. Nullable strings decode to "".
 type bookmark struct {
-	ID          string          `json:"id"`
-	Title       string          `json:"title"`
-	Type        string          `json:"type"`
-	URL         string          `json:"url"`
-	Content     string          `json:"content"`
-	Text        string          `json:"text"`
-	Description string          `json:"description"`
-	Note        string          `json:"note"`
-	Summary     string          `json:"summary"`
-	Favourited  bool            `json:"favourited"`
-	Archived    bool            `json:"archived"`
-	CreatedAt   string          `json:"createdAt"`
-	UpdatedAt   string          `json:"updatedAt"`
-	Tags        json.RawMessage `json:"tags"`
+	ID         string          `json:"id"`
+	Title      string          `json:"title"`
+	Note       string          `json:"note"`
+	Summary    string          `json:"summary"`
+	Favourited bool            `json:"favourited"`
+	Archived   bool            `json:"archived"`
+	CreatedAt  string          `json:"createdAt"`
+	ModifiedAt string          `json:"modifiedAt"`
+	Tags       json.RawMessage `json:"tags"`
+	Content    bookmarkContent `json:"content"`
 }
+
+// bookmarkContent holds the fields this extension reads from the link, text
+// and asset variants of the bookmark content union.
+type bookmarkContent struct {
+	Type        string `json:"type"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Text        string `json:"text"`
+	SourceURL   string `json:"sourceUrl"`
+	FileName    string `json:"fileName"`
+}
+
+// displayTitle prefers the user's title, then crawled or file metadata, the
+// bookmarked URL, the first line of a text bookmark and finally its source.
+func (b bookmark) displayTitle() string {
+	firstLine, _, _ := strings.Cut(strings.TrimSpace(b.Content.Text), "\n")
+	for _, s := range []string{b.Title, b.Content.Title, b.Content.FileName, b.Content.URL, clipText(firstLine, 120), b.Content.SourceURL} {
+		if s = strings.TrimSpace(s); s != "" {
+			return s
+		}
+	}
+	return "Untitled"
+}
+
+// link is the bookmarked URL, or the source of a text or asset bookmark.
+func (b bookmark) link() string {
+	if b.Content.URL != "" {
+		return b.Content.URL
+	}
+	return b.Content.SourceURL
+}
+
+func (b bookmark) kind() string { return b.Content.Type }
 
 type bookmarkList struct {
 	ID       string `json:"id"`
@@ -35,10 +69,9 @@ type highlight struct {
 	CreatedAt  string `json:"createdAt"`
 }
 
-type page[T any] struct {
-	Bookmarks  []T     `json:"bookmarks"`
-	Items      []T     `json:"items"`
-	NextCursor *string `json:"nextCursor"`
+type bookmarkPage struct {
+	Bookmarks  []bookmark `json:"bookmarks"`
+	NextCursor *string    `json:"nextCursor"`
 }
 
 type updatePatch struct {

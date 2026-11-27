@@ -6,7 +6,12 @@ export type Texts = typeof en;
 export const textsFor = (locale = ""): Texts => locale.toLowerCase().startsWith("ja") ? ja : locale.toLowerCase().startsWith("zh") ? zh : en;
 export const fmt = (text: string, values: Record<string, string | number>) => text.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? ""));
 export const number = (value: number) => new Intl.NumberFormat("en-US").format(value);
-export const dateText = (value: string) => value ? new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(new Date(value)) : "";
+export function dateText(value: string): string {
+  if (!value) return "";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "";
+  try { return new Intl.DateTimeFormat("en", { dateStyle: "medium", timeZone: "UTC" }).format(parsed); } catch { return ""; }
+}
 export function errorText(error: unknown, locale = ""): string {
   const t = textsFor(locale);
   if (!(error instanceof ReadError)) return t.network;

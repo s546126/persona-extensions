@@ -182,6 +182,7 @@ func (c *Connector) search(ctx context.Context, query, kind string, limit int) (
 }
 
 type comment struct {
+	ID        int64     `json:"id"`
 	User      user      `json:"user"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`

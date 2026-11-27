@@ -28,6 +28,9 @@ func TestPublishedManifestMatchesRuntime(t *testing.T) {
 	if !reflect.DeepEqual(m.Permissions.Network, wechat.Network) {
 		t.Fatal("manifest/runtime network permissions differ")
 	}
+	if !reflect.DeepEqual(m.Permissions.Network, []string{"*.weixin.qq.com", "*.wechat.com"}) {
+		t.Fatalf("unexpected network permissions: %v", m.Permissions.Network)
+	}
 	exttest.CheckConnectors(t, manifest, exttest.Serve(t, program()))
 	exttest.CheckChannels(t, manifest, exttest.Serve(t, program()))
 }

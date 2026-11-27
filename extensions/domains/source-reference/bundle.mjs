@@ -835,7 +835,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "domains", name: "Domains \u57DF\u540D", version: "0.1.4", icon: "assets/icon.png", description: "\u67E5\u8BE2\u5355\u4E2A .com \u6216 .net \u57DF\u540D\u7684\u516C\u5F00 RDAP \u6CE8\u518C\u4FE1\u606F\uFF0C\u67E5\u770B\u6CE8\u518C\u3001\u5230\u671F\u548C\u53D8\u66F4\u65E5\u671F\uFF0C\u4FDD\u7559\u672C\u5730\u6700\u8FD1\u67E5\u8BE2\u3002\u65E0\u9700\u8D26\u53F7\uFF1B\u4E0D\u505A\u6279\u91CF\u626B\u63CF\u3001DNS \u63A2\u6D4B\u6216\u8054\u7CFB\u4EBA\u6536\u96C6\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/domains/README.md", tags: ["\u57DF\u540D", "RDAP", "\u6CE8\u518C\u4FE1\u606F", "\u5230\u671F\u65E5\u671F"], engines: { persona: ">=202611101800", extension_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/domains.mjs", sha256: "" } }, contributes: { connectors: [{ id: "domains", name: "Domains", capabilities: ["status", "tools"], hosts: ["data.iana.org", "rdap.verisign.com"], agent_tools: ["domains_*"] }], ui: [{ id: "domains", title: "\u57DF\u540D\u67E5\u8BE2", placement: "nav_page", icon: "search" }] }, permissions: { network: ["data.iana.org", "rdap.verisign.com"], storage: { keys: ["history"] } } };
+var persona_extension_default = { manifest_version: 1, id: "domains", name: "Domains \u57DF\u540D", version: "0.1.5", icon: "assets/icon.png", description: "\u67E5\u8BE2\u5355\u4E2A .com \u6216 .net \u57DF\u540D\u7684\u516C\u5F00 RDAP \u6CE8\u518C\u4FE1\u606F\uFF0C\u67E5\u770B\u6CE8\u518C\u3001\u5230\u671F\u548C\u53D8\u66F4\u65E5\u671F\uFF0C\u4FDD\u7559\u672C\u5730\u6700\u8FD1\u67E5\u8BE2\u3002\u65E0\u9700\u8D26\u53F7\uFF1B\u4E0D\u505A\u6279\u91CF\u626B\u63CF\u3001DNS \u63A2\u6D4B\u6216\u8054\u7CFB\u4EBA\u6536\u96C6\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/domains/README.md", tags: ["\u57DF\u540D", "RDAP", "\u6CE8\u518C\u4FE1\u606F", "\u5230\u671F\u65E5\u671F"], engines: { persona: ">=202611101800", extension_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/domains.mjs", sha256: "" } }, contributes: { connectors: [{ id: "domains", name: "Domains", capabilities: ["status", "tools"], hosts: ["data.iana.org", "rdap.verisign.com"], agent_tools: ["domains_*"] }], ui: [{ id: "domains", title: "\u57DF\u540D\u67E5\u8BE2", placement: "nav_page", icon: "search" }] }, permissions: { network: ["data.iana.org", "rdap.verisign.com"], storage: { keys: ["history"] } } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 18e3, tool: 18e3, response: 1 << 20, bootstrap: 24 * 60 * 6e4, fresh: 15 * 6e4, cache: 48, cacheBytes: 2 << 20, gap: 350 });
@@ -846,8 +846,15 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => Array.from(text).length <= most ? text : Array.from(text).slice(0, most).join("").trimEnd() + "\u2026";
+var clip = (text, most) => {
+  if (most <= 0) return "";
+  const chars = Array.from(text);
+  if (chars.length <= most) return text;
+  if (most === 1) return chars[0];
+  return chars.slice(0, most - 1).join("").trimEnd() + "\u2026";
+};
 var plain = (text) => text.replace(/\s+/gu, " ").trim();
+var hasLoneSurrogate = (value) => /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(value);
 function object(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ReadError("bad_answer");
   return value;
@@ -861,7 +868,7 @@ function string(value) {
   return value;
 }
 function domainName(raw) {
-  if (typeof raw !== "string" || raw.length > 1024 || /[\u0000- \u007f\\/@#?&=]/u.test(raw)) throw new ReadError("invalid");
+  if (typeof raw !== "string" || raw.length > 1024 || /[\u0000- \u007f\\/@#?&=]/u.test(raw) || hasLoneSurrogate(raw)) throw new ReadError("invalid");
   let unicode;
   try {
     unicode = raw.trim().toLowerCase().replace(/\.$/u, "").normalize("NFC");
@@ -893,7 +900,7 @@ function rdapService(raw, domain) {
       try {
         const url = new URL(string(value));
         if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash || !url.pathname.endsWith("/")) return "";
-        if (url.origin !== "https://rdap.verisign.com" || url.pathname !== `/${suffix}/v1/`) return "";
+        if (url.origin !== "https://rdap.verisign.com" || url.pathname !== `/${suffix}/v1/` || url.toString().length > 4096) return "";
         return url.toString();
       } catch {
         return "";
@@ -919,7 +926,9 @@ function publicLink(value, kind) {
     if (url.origin !== "https://www.iana.org") throw new ReadError("bad_answer");
   } else if (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || !url.hostname.includes(".")) throw new ReadError("bad_answer");
   url.hash = "";
-  return url.toString();
+  const href = url.toString();
+  if (href.length > 4096) throw new ReadError("bad_answer");
+  return href;
 }
 function registrar(raw) {
   if (!Array.isArray(raw)) return void 0;
@@ -927,26 +936,48 @@ function registrar(raw) {
     const item = object(entity), roles = array(item.roles ?? []);
     if (!roles.includes("registrar")) continue;
     const fn = Array.isArray(item.vcardArray) && Array.isArray(item.vcardArray[1]) ? item.vcardArray[1].find((row) => Array.isArray(row) && row[0] === "fn" && typeof row[3] === "string") : void 0;
-    if (fn) return clip(plain(fn[3]), 300);
+    if (fn) {
+      const value = clip(plain(fn[3]), 300);
+      if (value) return value;
+    }
   }
   return void 0;
 }
 function date(value) {
   const raw = string(value);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u.test(raw) || !Number.isFinite(Date.parse(raw))) throw new ReadError("bad_answer");
-  const [y, m, d] = raw.slice(0, 10).split("-").map(Number), parsed = new Date(raw);
-  if (parsed.getUTCFullYear() !== y || parsed.getUTCMonth() !== m - 1 || parsed.getUTCDate() !== d) throw new ReadError("bad_answer");
-  return parsed.toISOString();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|([+-])(\d{2}):(\d{2}))$/u.exec(raw);
+  if (!match) throw new ReadError("bad_answer");
+  const y = Number(match[1]), m = Number(match[2]), d = Number(match[3]);
+  const hh = Number(match[4]), mm = Number(match[5]), ss = Number(match[6]);
+  if (hh > 23 || mm > 59 || ss > 59) throw new ReadError("bad_answer");
+  if (match[7] !== "Z") {
+    const oh = Number(match[9]), om = Number(match[10]);
+    if (oh > 23 || om > 59) throw new ReadError("bad_answer");
+  }
+  const calendar = new Date(Date.UTC(y, m - 1, d));
+  if (calendar.getUTCFullYear() !== y || calendar.getUTCMonth() !== m - 1 || calendar.getUTCDate() !== d) throw new ReadError("bad_answer");
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) throw new ReadError("bad_answer");
+  return new Date(ms).toISOString();
 }
 function parseRegistration(raw, domain, at) {
   const requested = domainName(domain), root2 = object(raw);
   if (root2.objectClassName !== "domain") throw new ReadError("bad_answer");
-  const name = root2.ldhName == null ? requested.ascii : domainName(string(root2.ldhName)).ascii;
+  let name = requested.ascii;
+  if (root2.ldhName != null) {
+    try {
+      name = domainName(string(root2.ldhName)).ascii;
+    } catch {
+      throw new ReadError("bad_answer");
+    }
+  }
   if (name !== requested.ascii) throw new ReadError("bad_answer");
   const statuses = array(root2.status ?? []).slice(0, 32).map((value) => clip(plain(string(value)), 160)).filter(Boolean);
   const events = array(root2.events ?? []).slice(0, 32).map((value) => {
     const item = object(value);
-    return { action: clip(plain(string(item.eventAction)), 80), at: date(item.eventDate) };
+    const action = clip(plain(string(item.eventAction)), 80);
+    if (!action) throw new ReadError("bad_answer");
+    return { action, at: date(item.eventDate) };
   });
   const self = array(root2.links ?? []).slice(0, 32).find((link) => object(link).rel === "self");
   const url = publicLink(object(self ?? {}).href, "self");
@@ -1095,7 +1126,22 @@ function errorText(error, locale = "") {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 function readTime(at, timeZone = "Local", locale = "en") {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? void 0 : timeZone }).format(new Date(at));
+  const value = new Date(at);
+  if (Number.isNaN(value.getTime())) return "";
+  const tz = timeZone === "Local" ? void 0 : timeZone;
+  try {
+    return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: tz }).format(value);
+  } catch {
+  }
+  try {
+    return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }).format(value);
+  } catch {
+  }
+  try {
+    return new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }).format(value);
+  } catch {
+  }
+  return value.toISOString().slice(0, 10);
 }
 
 // src/service.ts
@@ -1136,13 +1182,19 @@ var Domains = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    return item && this.monotonic() - item.used < fresh ? { raw: item.raw, at: item.at } : void 0;
+    if (!item || this.monotonic() - item.used >= fresh) return void 0;
+    this.cache.delete(path);
+    this.cache.set(path, item);
+    return { raw: item.raw, at: item.at };
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
     this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
@@ -1160,6 +1212,21 @@ var Domains = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1176,7 +1243,8 @@ var Domains = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
@@ -1197,9 +1265,6 @@ var Domains = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
@@ -1211,6 +1276,7 @@ var Domains = class {
     const cached = this.cached(path, fresh);
     if (cached) return cached;
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
       if (again) return again;
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
@@ -1237,13 +1303,18 @@ var Domains = class {
         this.lastError = void 0;
         return { raw, at };
       } catch (error) {
-        if (request.signal.aborted) {
-          const reason = request.signal.reason;
-          if (reason instanceof Error && reason.name === "AbortError") throw reason;
-          throw new DOMException("Cancelled", "AbortError");
+        if (signal?.aborted) {
+          const reason = signal.reason;
+          if (reason instanceof ReadError) {
+            if (reason.code !== "not_found") this.lastError = { code: reason.code, status: reason.status, at: this.monotonic() };
+            throw reason;
+          }
+          throw reason instanceof Error && reason.name === "AbortError" ? reason : new DOMException("Cancelled", "AbortError");
         }
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        const failure = error instanceof ReadError ? error : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1268,7 +1339,7 @@ var Domains = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async bootstrap(signal) {
@@ -1299,12 +1370,25 @@ function toolsFor(locale = "en") {
   return [{ name: "domains_lookup", description: t.toolLookup, input_schema: { type: "object", required: ["domain"], properties: { domain: { type: "string", description: t.domain } } } }];
 }
 var tools = toolsFor();
-async function callTool(service, name, raw = {}, signal) {
-  if (name !== "domains_lookup") throw unknownMethod(`connector.tools.${name}`);
+function domainArg(raw, exact) {
+  if (exact) {
+    const trimmed = exact.raw.trim();
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
+    const fields2 = [...exact.fieldValues("domain")];
+    if (fields2.length !== 1) throw new ReadError("invalid");
+    const parsed = JSON.parse(fields2[0].raw);
+    if (typeof parsed !== "string") throw new ReadError("invalid");
+    return parsed;
+  }
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || typeof raw.domain !== "string") throw new ReadError("invalid");
+  return raw.domain;
+}
+async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "domains_lookup") throw unknownMethod(`connector.tools.${name}`);
+  const domain = domainArg(raw, exact);
   const request = budget(signal, service.limits.tool), t = textsFor(service.locale);
   try {
-    const result = await service.lookup(raw.domain, false, request.signal);
+    const result = await service.lookup(domain, false, request.signal);
     return clip([
       `${result.domain.unicode} (${result.name})`,
       result.url,
@@ -1314,6 +1398,9 @@ async function callTool(service, name, raw = {}, signal) {
       `${t.source}: ${result.source}`,
       t.attribution
     ].join("\n"), 29999);
+  } catch (error) {
+    if (!signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1330,15 +1417,11 @@ function connector(getService, getHistory) {
     if (method === "tools.call") {
       if (typeof p.name !== "string") throw new ExtError(errorText(new ReadError("invalid"), service.locale), "invalid");
       try {
-        const exact = call?.params?.field("args"), domain = exact ? (() => {
-          const fields2 = [...exact.fieldValues("domain")];
-          if (fields2.length !== 1) throw new ReadError("invalid");
-          return JSON.parse(fields2[0].raw);
-        })() : p.args?.domain;
-        const text = await callTool(service, p.name, { domain });
-        if (p.name === "domains_lookup" && typeof domain === "string") {
+        const exact = call?.params?.field("args");
+        const text = await callTool(service, p.name, p.args, void 0, exact);
+        if (p.name === "domains_lookup") {
           try {
-            await getHistory().add(domain);
+            await getHistory().add(domainArg(p.args, exact));
           } catch {
           }
         }
@@ -1358,6 +1441,60 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { v: "lookup", q: "" };
+var STATE_MAX = 16384;
+var ITEMS_MAX = 300;
+var utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
+function hash64(value) {
+  let hash = 0xcbf29ce484222325n;
+  const mask = (1n << 64n) - 1n;
+  for (const byte of new TextEncoder().encode(value)) {
+    hash ^= BigInt(byte);
+    hash = hash * 0x100000001b3n & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = `${prefix}${value}`;
+  if (full.length <= max) return full;
+  const suffix = `~${hash64(value)}`;
+  const keep = Math.max(0, max - prefix.length - suffix.length);
+  return `${prefix}${value.slice(0, keep)}${suffix}`;
+}
+var domainActionID = (domain) => boundedID("domain:", domain, 128);
+function uniqueKey(used, prefix, value) {
+  let candidate = boundedID(prefix, value, 128);
+  let attempt = 1;
+  while (used.has(candidate)) {
+    candidate = boundedID(prefix, `${value}#${attempt++}`, 128);
+  }
+  used.add(candidate);
+  return candidate;
+}
+function safeLinkURL(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || !url.hostname.includes(".")) return void 0;
+    url.hash = "";
+    const href = url.toString();
+    return href.length <= 4096 ? href : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function safeState(state) {
+  if (!state || typeof state !== "object") return initialState;
+  const v = state.v === "result" || state.v === "history" ? state.v : "lookup";
+  const q = typeof state.q === "string" ? clip(state.q.trim(), 253) : "";
+  const message = state.message === "cleared" ? "cleared" : void 0;
+  if (v === "result") {
+    try {
+      return { v: "result", q: domainName(q).ascii };
+    } catch {
+      return initialState;
+    }
+  }
+  return { v, q, ...message ? { message } : {} };
+}
 function readState(raw) {
   if (typeof raw !== "string" || raw.length > 2e3) return initialState;
   try {
@@ -1365,13 +1502,18 @@ function readState(raw) {
     if (!value || Array.isArray(value)) return initialState;
     const q = typeof value.q === "string" ? clip(value.q.trim(), 253) : "";
     const v = ["result", "history"].includes(String(value.v)) ? value.v : "lookup";
-    if (v === "result") domainName(q);
+    if (v === "result") return { v, q: domainName(q).ascii, ...value.message === "cleared" ? { message: "cleared" } : {} };
     return { v, q, ...value.message === "cleared" ? { message: "cleared" } : {} };
   } catch {
     return initialState;
   }
 }
-var encodeState = (state) => JSON.stringify(state);
+function encodeState(state) {
+  const clean = safeState(state);
+  const encoded = JSON.stringify(clean);
+  if (utf8Bytes(encoded) <= STATE_MAX) return encoded;
+  return JSON.stringify(initialState);
+}
 function transition(state, id, values = {}) {
   if (id === "lookup") return { v: "lookup", q: "" };
   if (id === "history") return { v: "history", q: "" };
@@ -1417,57 +1559,62 @@ async function loadPage(service, history, state, refresh, signal) {
     return { kind: "empty" };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
-  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && (props.uiVersion ?? 0) >= 3 ? { id, push: { ui: "domains", state: encodeState(next), ...title ? { title } : {} } } : { id });
+  const { service, loaded } = props, state = safeState(props.state), locale = props.locale ?? service.locale, t = textsFor(locale), tz = props.tz ?? "Local";
+  const act = (id, next, title) => props.action?.(id, next, title) ?? (next && (props.uiVersion ?? 0) >= 3 ? { id, push: { ui: "domains", state: encodeState(next), ...title ? { title: clip(title, 200) } : {} } } : { id });
   const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 1800), style }, key);
-  const form = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "domain", label: t.search, kind: "text", placeholder: t.hint, value: state.q }, "domain-input"),
-    /* @__PURE__ */ jsx(Button, { title: t.action, action: act("search") }, "domain-submit")
+  const form = /* @__PURE__ */ jsxs(Section, { title: clip(t.search, 200), children: [
+    /* @__PURE__ */ jsx(Field, { name: "domain", label: clip(t.search, 200), kind: "text", placeholder: clip(t.hint, 200), value: state.q }, "domain-input"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.action, 200), action: act("search") }, "domain-submit")
   ] }, "domain-form");
   const nav = /* @__PURE__ */ jsxs(Section, { children: [
-    /* @__PURE__ */ jsx(Button, { title: t.lookup, action: act("lookup") }, "domain-home"),
-    /* @__PURE__ */ jsx(Button, { title: t.history, action: act("history") }, "domain-history")
+    /* @__PURE__ */ jsx(Button, { title: clip(t.lookup, 200), action: act("lookup") }, "domain-home"),
+    /* @__PURE__ */ jsx(Button, { title: clip(t.history, 200), action: act("history") }, "domain-history")
   ] }, "domain-navigation");
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.lookup, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: clip(t.lookup, 200), state: encodeState(state), children: [
     form,
     nav,
-    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "domain-loading-indicator") }, "domain-loading")
+    /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: clip(t.loading, 200) }, "domain-loading-indicator") }, "domain-loading")
   ] }, "domains");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.lookup, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: clip(t.lookup, 200), state: encodeState(state), children: [
     form,
     nav,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text("domain-error-message", errorText(loaded.error, props.locale ?? service.locale)),
-      /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "domain-retry")
+      text("domain-error-message", errorText(loaded.error, locale)),
+      /* @__PURE__ */ jsx(Button, { title: clip(t.retry, 200), action: act("refresh") }, "domain-retry")
     ] }, "domain-error")
   ] }, "domains");
   if (state.v === "result") {
     if (loaded.kind !== "result") throw new ReadError("invalid");
     const result = loaded.result;
-    return /* @__PURE__ */ jsxs(View, { title: result.domain.unicode, state: encodeState(state), children: [
+    const used = /* @__PURE__ */ new Set();
+    const safeRecordURL = safeLinkURL(result.url);
+    const safeEvents = result.events.slice(0, Math.min(32, ITEMS_MAX - 20));
+    const readLabel = readTime(result.at, tz, locale);
+    const footerText = clip(`${fmt(t.readAt, { at: readLabel })}${result.stale ? ` \xB7 ${errorText(result.stale, locale)}` : ""}`, 1e3);
+    return /* @__PURE__ */ jsxs(View, { title: clip(result.domain.unicode, 200), state: encodeState(state), children: [
       form,
       nav,
-      /* @__PURE__ */ jsxs(Section, { title: fmt(t.result, { domain: result.domain.unicode }), children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(fmt(t.result, { domain: result.domain.unicode }), 200), children: [
         text("registered-name", `${t.registeredName}: ${result.name}`, "body"),
         result.registrar ? text("registrar", `${t.registrar}: ${result.registrar}`, "body") : null
       ] }, "registration"),
-      /* @__PURE__ */ jsxs(Section, { title: t.statuses, children: [
+      /* @__PURE__ */ jsxs(Section, { title: clip(t.statuses, 200), children: [
         text("registration-status-values", result.statuses.join(" \xB7 ") || t.noStatus, "body"),
-        /* @__PURE__ */ jsx(Link, { title: t.statusGlossary, url: statusURL }, "status-glossary")
+        /* @__PURE__ */ jsx(Link, { title: clip(t.statusGlossary, 200), url: statusURL }, "status-glossary")
       ] }, "registration-status"),
-      /* @__PURE__ */ jsx(Section, { title: t.events, children: result.events.length ? result.events.map((event, index) => /* @__PURE__ */ jsx(Row, { title: event.action, subtitle: readTime(event.at, tz, props.locale ?? service.locale) }, `event-${index}`)) : text("no-events", t.noEvents) }, "registration-events"),
-      /* @__PURE__ */ jsxs(Section, { title: t.source, children: [
+      /* @__PURE__ */ jsx(Section, { title: clip(t.events, 200), children: safeEvents.length ? safeEvents.map((event, index) => /* @__PURE__ */ jsx(Row, { title: clip(event.action, 200), subtitle: clip(readTime(event.at, tz, locale), 300) }, uniqueKey(used, "event-", String(index)))) : text("no-events", t.noEvents) }, "registration-events"),
+      /* @__PURE__ */ jsxs(Section, { title: clip(t.source, 200), children: [
         text("source-name", result.source, "body"),
-        /* @__PURE__ */ jsx(Link, { title: t.openRecord, url: result.url }, "registration-open"),
-        /* @__PURE__ */ jsx(Button, { title: t.lookup, action: act("back") }, "registration-back")
+        safeRecordURL ? /* @__PURE__ */ jsx(Link, { title: clip(t.openRecord, 200), url: safeRecordURL }, "registration-open") : null,
+        /* @__PURE__ */ jsx(Button, { title: clip(t.lookup, 200), action: act("back") }, "registration-back")
       ] }, "registration-source"),
-      /* @__PURE__ */ jsx(Section, { footer: `${fmt(t.readAt, { at: readTime(result.at, tz, props.locale ?? service.locale) })}${result.stale ? ` \xB7 ${errorText(result.stale, props.locale ?? service.locale)}` : ""}`, children: /* @__PURE__ */ jsx(Button, { title: t.refresh, action: act("refresh") }, "registration-refresh") }, "registration-footer"),
+      /* @__PURE__ */ jsx(Section, { footer: footerText, children: /* @__PURE__ */ jsx(Button, { title: clip(t.refresh, 200), action: act("refresh") }, "registration-refresh") }, "registration-footer"),
       /* @__PURE__ */ jsxs(Section, { children: [
         text("status-note", t.statusHint, "caption"),
         text("registration-attribution", t.attribution, "caption")
@@ -1476,17 +1623,19 @@ function page(props) {
   }
   if (state.v === "history") {
     if (loaded.kind !== "history") throw new ReadError("invalid");
-    return /* @__PURE__ */ jsxs(View, { title: t.history, state: encodeState(state), children: [
+    const used = /* @__PURE__ */ new Set();
+    const domains = loaded.domains.slice(0, Math.min(20, ITEMS_MAX - 10));
+    return /* @__PURE__ */ jsxs(View, { title: clip(t.history, 200), state: encodeState(state), children: [
       nav,
       state.message === "cleared" ? /* @__PURE__ */ jsx(Section, { children: text("history-cleared-text", t.cleared, "body") }, "history-cleared") : null,
-      /* @__PURE__ */ jsxs(Section, { title: t.history, children: [
-        loaded.domains.length ? loaded.domains.map((domain) => /* @__PURE__ */ jsx(Row, { title: domain, action: act(`domain:${domain}`, { v: "result", q: domain }, domain) }, `history-${domain}`)) : text("history-empty", t.historyEmpty),
-        loaded.domains.length ? /* @__PURE__ */ jsx(Button, { title: t.clearHistory, action: act("clear") }, "history-clear") : null
+      /* @__PURE__ */ jsxs(Section, { title: clip(t.history, 200), children: [
+        domains.length ? domains.map((domain) => /* @__PURE__ */ jsx(Row, { title: clip(domain, 200), action: act(domainActionID(domain), { v: "result", q: domain }, clip(domain, 200)) }, uniqueKey(used, "history-", domain))) : text("history-empty", t.historyEmpty),
+        domains.length ? /* @__PURE__ */ jsx(Button, { title: clip(t.clearHistory, 200), action: act("clear") }, "history-clear") : null
       ] }, "history-list"),
       /* @__PURE__ */ jsx(Section, { children: text("history-note-text", t.historyHint, "caption") }, "history-note")
     ] }, "domains");
   }
-  return /* @__PURE__ */ jsxs(View, { title: t.lookup, state: encodeState(state), children: [
+  return /* @__PURE__ */ jsxs(View, { title: clip(t.lookup, 200), state: encodeState(state), children: [
     form,
     nav,
     /* @__PURE__ */ jsx(Section, { children: text("domain-welcome-text", t.attribution, "body") }, "domain-welcome")
@@ -1497,16 +1646,18 @@ function page(props) {
 function Root(options) {
   const [state, setState] = useState(() => readState(options.state));
   const [refresh, setRefresh] = useState(0);
+  const [revision, setRevision] = useState(0);
   const [result, setResult] = useState(void 0);
-  const identity = `${state.v}:${state.q}:${refresh}`;
+  const identity = `${state.v}:${state.q}:${state.message ?? ""}:${revision}:${refresh}`;
   useLoadEffect(async (signal) => {
     const loaded = await loadPage(options.service, options.history, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded) ? previous : { service: options.service, identity, loaded });
   }, [options.service, identity]);
+  const current = result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" };
   return page({
     ...options,
     state,
-    loaded: result?.service === options.service && result.identity === identity ? result.loaded : { kind: "loading" },
+    loaded: current,
     action: (id, next, title) => {
       if (next && (options.uiVersion ?? 0) >= 3) {
         const push = { ui: "domains", state: encodeState(next), ...title ? { title } : {} };
@@ -1519,15 +1670,26 @@ function Root(options) {
         }
         if (id === "clear") {
           await options.history.clear();
+          setRefresh(0);
+          setRevision((previous) => previous + 1);
           setState({ v: "history", q: "", message: "cleared" });
           return;
         }
         if (id.startsWith("domain:")) {
-          const domain = id.slice(7);
-          if (result?.loaded.kind === "history" && result.loaded.domains.includes(domain)) setState({ v: "result", q: domain });
+          if (current.kind === "history") {
+            const matched = current.domains.find((domain) => id === domainActionID(domain) || id === `domain:${domain}`);
+            if (matched) {
+              setRefresh(0);
+              setState({ v: "result", q: matched });
+            }
+          }
           return;
         }
-        setState((previous) => transition(previous, id, values));
+        setState((previous) => {
+          const nextState = transition(previous, id, values);
+          if (nextState !== previous) setRefresh(0);
+          return nextState;
+        });
       }, { submit: true });
     }
   });
@@ -1550,7 +1712,9 @@ function decodeHistory(value) {
   const values = raw.domains;
   if (values.length > 20 || new Set(values).size !== values.length) throw new ReadError("storage");
   try {
-    return { schema_version: 1, domains: values.map((value2) => domainName(value2).ascii) };
+    const domains = values.map((value2) => domainName(value2).ascii);
+    if (new Set(domains).size !== domains.length) throw new ReadError("storage");
+    return { schema_version: 1, domains };
   } catch {
     throw new ReadError("storage");
   }

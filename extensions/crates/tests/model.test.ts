@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crateName, cratePath, parseCrate, parseSearch, queryText, ReadError, searchPath } from "../src/model.ts";
+import { clip, crateName, cratePath, parseCrate, parseSearch, queryText, ReadError, searchPath } from "../src/model.ts";
+import { dateText } from "../src/i18n.ts";
 import { crateTransition, encodeState, initialState, readState, transition } from "../src/page.tsx";
 import { detailResponse, other, serde } from "./fixtures.ts";
 
@@ -10,7 +11,23 @@ test("official JSON requests bound queries and crate names", () => {
   assert.equal(url.searchParams.get("per_page"), "12");
   assert.equal(cratePath("serde"), "/api/v1/crates/serde");
   for (const value of ["", "a/b", "serde json", "a\n", "../secret", 42]) assert.throws(() => crateName(value), ReadError);
-  for (const value of ["", "x\n", 42, "x".repeat(101)]) assert.throws(() => queryText(value), ReadError);
+  for (const value of ["", "x\n", 42, "x".repeat(101), "\uD800", "\uDC00", "a\uD800b"]) assert.throws(() => queryText(value), ReadError);
+  assert.equal(queryText("🦀"), "🦀");
+});
+
+test("clip enforces exact code-point limits and dateText tolerates invalid dates", () => {
+  assert.equal(Array.from(clip("a".repeat(20), 10)).length, 10);
+  assert.equal(clip("a".repeat(20), 10), "aaaaaaaaa…");
+  assert.equal(Array.from(clip("🦀".repeat(10), 5)).length, 5);
+  assert.equal(clip("🦀".repeat(10), 5), "🦀🦀🦀🦀…");
+  assert.equal(clip("hello", 1), "h");
+  assert.equal(clip("hello", 0), "");
+  assert.equal(clip("hello", -5), "");
+  assert.equal(clip("hello", Number.NaN), "");
+  assert.equal(Array.from(clip("hello", 3.9)).length, 3);
+  assert.equal(dateText("not-a-date"), "");
+  assert.equal(dateText(""), "");
+  assert.ok(dateText("2026-07-18T23:05:13.266456Z").includes("2026"));
 });
 
 test("search keeps bounded metadata and rejects duplicate or invalid crates", () => {
@@ -31,6 +48,8 @@ test("search keeps bounded metadata and rejects duplicate or invalid crates", ()
   assert.equal(parsed.crates[0].homepage, undefined);
   assert.equal(parsed.crates[0].documentation, undefined);
   assert.equal(parsed.crates[0].url, "https://crates.io/crates/serde");
+  const overlongLink = parseSearch({ crates: [{ ...serde, repository: "https://github.com/serde-rs/" + "a".repeat(4100) }], meta: { total: 1 } }, 0);
+  assert.equal(overlongLink.crates[0].repository, undefined);
 });
 
 test("default version selects exactly one matching release with its license and yanked state", () => {
@@ -59,5 +78,8 @@ test("page state accepts only validated search results and HTTPS metadata", () =
   assert.equal(transition(state, "crate:serde"), state);
   assert.deepEqual(readState(encodeState(detail)), detail);
   assert.deepEqual(readState(encodeState({ ...detail, crate: { ...detail.crate!, repository: "javascript:alert(1)" } })), initialState);
+  assert.deepEqual(readState(encodeState({ ...detail, crate: { ...detail.crate!, repository: "https://github.com/a/" + "x".repeat(4100) } })), initialState);
+  assert.deepEqual(readState(JSON.stringify({ q: "\uD800", found: true })), initialState);
   assert.equal(transition(state, "search", { query: "serde" }).found, true);
+  assert.equal(transition(initialState, "search", { query: "\uD800" }).found, false);
 });

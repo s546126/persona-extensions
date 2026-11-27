@@ -40,6 +40,12 @@ func (a *app) init(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any,
 	return nil, nil
 }
 
+func (a *app) config() config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg
+}
+
 func (a *app) record(err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

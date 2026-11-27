@@ -122,6 +122,10 @@ func (EntriesProvider) Items(st *store.State) []CandidateItem {
 		if targetFacet == entry.World {
 			weight += contactScore[e.Person] / 10
 		}
+		originSpace := e.OriginSpace
+		if len(cats) == 0 && entry.IsWorkMethodFacet(e.Facet) {
+			originSpace = ""
+		}
 		out = append(out, CandidateItem{
 			ID:          e.ID,
 			Facet:       targetFacet,
@@ -131,7 +135,7 @@ func (EntriesProvider) Items(st *store.State) []CandidateItem {
 			Priority:    grainRank(e),
 			Weight:      weight,
 			Categories:  cats,
-			OriginSpace: e.OriginSpace,
+			OriginSpace: originSpace,
 			Subjects:    collectEntrySubjects(st, e),
 			IsFocus:     e.Type == "current_focus",
 			Own:         own(e),
@@ -212,16 +216,58 @@ func groupOf(f entry.Facet) string {
 	}
 }
 
-// entryCategories returns all sensitive categories an entry carries (its own Cats plus any space defaults).
+// entryCategories returns the Payload-First sensitive categories of e (v0.4.0 §1.6):
+//   - Work-methodology facets (interaction, tools, workflow, judgement) carry ONLY explicit ByUser categories and
+//     genuine privacy disclosures matched by entry.PayloadCategories on e's own payload (never topic/tone or
+//     OriginSpace contagion), guaranteeing 0 work rules leak into profile:cat:emotion / profile:cat:health.
+//   - Non-work facets (persona, world, people) retain ByUser, BySpaceDefault, SpaceDefaults, and payload-supported
+//     categories.
 func entryCategories(e *entry.Entry) []string {
-	cats := slices.Clone(e.Cats())
-	for _, c := range entry.SpaceDefaults(e.OriginSpace) {
-		if !slices.Contains(cats, c) && !slices.Contains(e.CatsRemoved, c) {
-			cats = append(cats, c)
+	var cats []string
+	add := func(c string) {
+		if cn := entry.CategoryOf(c); cn != "" && !slices.Contains(cats, cn) && !slices.Contains(e.CatsRemoved, cn) {
+			cats = append(cats, cn)
+		}
+	}
+	ownPayload := entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
+	for _, c := range ownPayload {
+		add(c)
+	}
+	workMethod := entry.IsWorkMethodFacet(e.Facet)
+	for _, c := range e.Categories {
+		cn := entry.CategoryOf(c.Name)
+		if cn == "" {
+			continue
+		}
+		if c.By == entry.ByUser {
+			add(cn)
+		} else if !workMethod {
+			add(cn)
+		}
+	}
+	if !workMethod {
+		if cn := entry.CategoryOf(e.Sensitive); cn != "" {
+			add(cn)
+		}
+		for _, c := range entry.SpaceDefaults(e.OriginSpace) {
+			add(c)
 		}
 	}
 	sort.Strings(cats)
 	return cats
+}
+
+// isS3S4Only reports whether e has evidence and every piece comes solely from S3/S4 agent/tool sessions.
+func isS3S4Only(e *entry.Entry) bool {
+	if e == nil || entry.IsTrueUserOwned(e) || len(e.Evidence) == 0 {
+		return false
+	}
+	for _, ev := range e.Evidence {
+		if ev.Source != entry.SrcAgent && ev.Source != entry.SrcTools {
+			return false
+		}
+	}
+	return true
 }
 
 // ownTypes are the ⑥ types that say what the user is doing or keeping an eye on now (the prompt's keys and the
@@ -236,8 +282,15 @@ func own(e *entry.Entry) bool {
 }
 
 // eligible says whether an entry may enter the profile summary at all (general or sensitive).
+// Excludes S6 assistant notes, ephemeral status/meeting chatter, and S3/S4-only persona hallucinations (v0.4.0 §1.2/§1.3).
 func eligible(st *store.State, e *entry.Entry) bool {
 	if e == nil || !e.Live() || !export.Stable(e) {
+		return false
+	}
+	if entry.IsAssistantNote(e.Origin) || entry.IsEphemeral(e) {
+		return false
+	}
+	if e.Facet == entry.Persona && isS3S4Only(e) {
 		return false
 	}
 	if e.Origin == entry.Seed && !entry.On(st.Switches, entry.K21Seeds) {
@@ -474,9 +527,11 @@ func BuildWith(st *store.State, src InputProvider, now time.Time, lang string) *
 				cats = append(cats, cn)
 			}
 		}
-		for _, c := range entry.SpaceDefaults(it.OriginSpace) {
-			if !slices.Contains(cats, c) {
-				cats = append(cats, c)
+		if !entry.IsWorkMethodFacet(it.Facet) {
+			for _, c := range entry.SpaceDefaults(it.OriginSpace) {
+				if !slices.Contains(cats, c) {
+					cats = append(cats, c)
+				}
 			}
 		}
 		sort.Strings(cats)

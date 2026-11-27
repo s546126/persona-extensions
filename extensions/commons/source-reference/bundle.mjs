@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "commons", name: "Wikimedia Commons \u56FE\u7247\u68C0\u7D22", version: "0.1.4", icon: "assets/icon.png", description: "\u641C\u7D22 Wikimedia Commons \u56FE\u7247\uFF0C\u67E5\u770B\u4F5C\u8005\u3001\u8BB8\u53EF\u3001\u7F29\u7565\u56FE\u548C\u539F\u59CB\u8BF4\u660E\u9875\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/commons/README.md", tags: ["\u56FE\u7247", "Wikimedia Commons", "\u8BB8\u53EF"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/commons.mjs", sha256: "" } }, contributes: { connectors: [{ id: "commons", name: "Wikimedia Commons", capabilities: ["status", "tools"], hosts: ["commons.wikimedia.org", "upload.wikimedia.org", "thumb.wikimedia.org"], agent_tools: ["commons_*"] }], ui: [{ id: "search", title: "\u56FE\u7247\u68C0\u7D22", placement: "nav_page", icon: "doc" }] }, permissions: { network: ["commons.wikimedia.org", "upload.wikimedia.org", "thumb.wikimedia.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "commons", name: "Wikimedia Commons \u56FE\u7247\u68C0\u7D22", version: "0.1.5", icon: "assets/icon.png", description: "\u641C\u7D22 Wikimedia Commons \u56FE\u7247\uFF0C\u67E5\u770B\u4F5C\u8005\u3001\u8BB8\u53EF\u3001\u7F29\u7565\u56FE\u548C\u539F\u59CB\u8BF4\u660E\u9875\u3002\u5185\u5BB9\u7531 hub \u901A\u8FC7\u516C\u5F00 API \u83B7\u53D6\uFF0C\u65E0\u9700\u8D26\u53F7\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/commons/README.md", tags: ["\u56FE\u7247", "Wikimedia Commons", "\u8BB8\u53EF"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/commons.mjs", sha256: "" } }, contributes: { connectors: [{ id: "commons", name: "Wikimedia Commons", capabilities: ["status", "tools"], hosts: ["commons.wikimedia.org", "upload.wikimedia.org", "thumb.wikimedia.org"], agent_tools: ["commons_*"] }], ui: [{ id: "search", title: "\u56FE\u7247\u68C0\u7D22", placement: "nav_page", icon: "doc" }] }, permissions: { network: ["commons.wikimedia.org", "upload.wikimedia.org", "thumb.wikimedia.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 2 << 20, fresh: 60 * 6e4, cache: 30, cacheBytes: 2 << 20, gap: 200 });
@@ -779,7 +779,14 @@ var ReadError = class extends Error {
     this.status = status;
   }
 };
-var clip = (text, most) => text.length <= most ? text : text.slice(0, most).trimEnd() + "\u2026";
+var clip = (text, most) => {
+  const limit = Math.floor(most);
+  if (!(limit > 0)) return "";
+  const chars = Array.from(text);
+  if (chars.length <= limit) return text;
+  if (limit === 1) return chars[0];
+  return chars.slice(0, limit - 1).join("").trimEnd() + "\u2026";
+};
 var oneLine = (text) => text.replace(/\s+/gu, " ").trim();
 function plain(text) {
   let out = "";
@@ -804,14 +811,14 @@ function plain(text) {
     }
     out += text[i++];
   }
-  return oneLine(out);
+  return oneLine(out.replace(/[\ud800-\udfff]/gu, ""));
 }
 function validCodepoint(n) {
   return n >= 32 && n <= 1114111 && !(n >= 55296 && n <= 57343) && n !== 65534 && n !== 65535;
 }
 function queryText(value) {
   if (typeof value !== "string") throw new ReadError("invalid");
-  if (/[\u0000-\u001f\u007f]/u.test(value)) throw new ReadError("invalid");
+  if (/[\u0000-\u001f\u007f\ud800-\udfff]/u.test(value)) throw new ReadError("invalid");
   const query = oneLine(value);
   if (!query || Array.from(query).length > 160) throw new ReadError("invalid");
   return query;
@@ -859,10 +866,11 @@ function uploadURL(value) {
   if (url.protocol !== "https:" || !["upload.wikimedia.org", "thumb.wikimedia.org"].includes(url.hostname) || url.username || url.password || !url.pathname.startsWith("/wikipedia/commons/")) throw new ReadError("bad_answer");
   url.search = "";
   url.hash = "";
+  if (url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
 function commonsURL(value, title) {
-  const raw = value == null ? `https://commons.wikimedia.org/wiki/${title.replaceAll(" ", "_")}` : string(value);
+  const raw = value == null ? `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(title.slice("File:".length).replaceAll(" ", "_"))}` : string(value);
   let url;
   try {
     url = new URL(raw);
@@ -872,13 +880,14 @@ function commonsURL(value, title) {
   if (url.protocol !== "https:" || url.hostname !== "commons.wikimedia.org" || url.username || url.password || !url.pathname.startsWith("/wiki/File:")) throw new ReadError("bad_answer");
   url.search = "";
   url.hash = "";
+  if (url.href.length > 4096) throw new ReadError("bad_answer");
   return url.href;
 }
-function metadata(value, name) {
+function metadata(value, _name) {
   if (value == null) return "";
   const item = object(value);
   if (item.value == null) return "";
-  return clip(plain(string(item.value)), 4e3);
+  return clip(plain(string(item.value)), 2e3);
 }
 var licenseHosts = /* @__PURE__ */ new Set(["creativecommons.org", "www.gnu.org", "gnu.org", "opensource.org"]);
 function licenseLink(text) {
@@ -890,14 +899,25 @@ function licenseLink(text) {
     return void 0;
   }
   if (url.protocol === "http:" && licenseHosts.has(url.hostname)) url.protocol = "https:";
-  return url.protocol === "https:" && !url.username && !url.password ? url.href : void 0;
+  return url.protocol === "https:" && !url.username && !url.password && url.href.length <= 4096 ? url.href : void 0;
 }
 function parseImages(raw, at) {
-  const query = object(object(raw).query), pages = object(query.pages);
+  const root2 = object(raw);
+  if (root2.query == null) {
+    if (root2.error == null && "batchcomplete" in root2 && (typeof root2.batchcomplete === "string" || typeof root2.batchcomplete === "boolean")) {
+      return { images: [], at };
+    }
+    throw new ReadError("bad_answer");
+  }
+  const query = object(root2.query), pages = object(query.pages);
+  const seen = /* @__PURE__ */ new Set();
   const images = Object.entries(pages).slice(0, 20).map(([id, rawPage]) => {
     if (!/^[1-9][0-9]{0,9}$/.test(id)) throw new ReadError("bad_answer");
     const page2 = object(rawPage), title = string(page2.title);
-    if (!/^File:[^<>{}\[\]|#\u0000-\u001f]{1,255}$/.test(title)) throw new ReadError("bad_answer");
+    if (!/^File:[^<>{}\[\]|#\u0000-\u001f\ud800-\udfff]{1,255}$/u.test(title)) throw new ReadError("bad_answer");
+    const pageID = integer(page2.pageid ?? Number(id), 1e9);
+    if (pageID < 1 || seen.has(pageID)) throw new ReadError("bad_answer");
+    seen.add(pageID);
     const infos = array(page2.imageinfo);
     if (!infos.length) throw new ReadError("bad_answer");
     const info = object(infos[0]), meta = object(info.extmetadata ?? {});
@@ -909,7 +929,7 @@ function parseImages(raw, at) {
     const width = info.thumbwidth == null ? void 0 : integer(info.thumbwidth, 640);
     const height = info.thumbheight == null ? void 0 : integer(info.thumbheight, 1e5);
     return {
-      id: integer(page2.pageid ?? Number(id), 1e9),
+      id: pageID,
       title: clip(title, 300),
       description,
       artist,
@@ -1026,7 +1046,25 @@ function errorText(error, locale = "") {
   return error.code === "http" ? fmt(t.http, { 0: error.status ?? 0 }) : t[error.code];
 }
 function readTime(at, timeZone = "Local", locale = "en") {
-  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: timeZone === "Local" ? void 0 : timeZone }).format(at);
+  if (!Number.isFinite(at) || Number.isNaN(new Date(at).getTime())) return "";
+  const loc = locale || "en";
+  const tz = timeZone && timeZone !== "Local" ? timeZone : void 0;
+  const opts = { year: "numeric", month: "short", day: "numeric" };
+  try {
+    return new Intl.DateTimeFormat(loc, { ...opts, timeZone: tz }).format(at);
+  } catch {
+  }
+  if (tz) {
+    try {
+      return new Intl.DateTimeFormat(loc, { ...opts, timeZone: "UTC" }).format(at);
+    } catch {
+    }
+  }
+  try {
+    return new Intl.DateTimeFormat("en", { ...opts, timeZone: tz }).format(at);
+  } catch {
+  }
+  return new Intl.DateTimeFormat("en", { ...opts, timeZone: "UTC" }).format(at);
 }
 
 // src/service.ts
@@ -1071,9 +1109,12 @@ var Commons = class {
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path);
-    if (old) this.bytes -= old.bytes;
+    if (old) {
+      this.bytes -= old.bytes;
+      this.cache.delete(path);
+    }
+    if (bytes > this.limits.cacheBytes) return;
     this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
@@ -1096,6 +1137,21 @@ var Commons = class {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
     }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
     let length = 0;
@@ -1103,7 +1159,8 @@ var Commons = class {
       void reader.cancel().catch(() => {
       });
     };
-    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         checkSignal(signal);
@@ -1112,11 +1169,15 @@ var Commons = class {
         if (chunk.done) break;
         length += chunk.value.byteLength;
         if (length > this.limits.response) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {
+          });
           throw new ReadError("bad_answer");
         }
         chunks.push(chunk.value);
       }
+    } catch (error) {
+      checkSignal(signal);
+      throw error instanceof ReadError ? error : new ReadError("network");
     } finally {
       signal.removeEventListener("abort", cancel);
       reader.releaseLock();
@@ -1133,22 +1194,20 @@ var Commons = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
       throw new ReadError("bad_answer");
     }
   }
-  async read(path, fresh, signal) {
+  async read(path, fresh, signal, parse) {
     checkSignal(signal);
     const cached = this.cached(path, fresh);
-    if (cached) return cached;
+    if (cached) return { value: parse(cached.raw, cached.at) };
     const run = this.queue.then(async () => {
+      checkSignal(signal);
       const again = this.cached(path, fresh);
-      if (again) return again;
+      if (again) return { value: parse(again.raw, again.at) };
       const pause = Math.max(0, this.limits.gap - (this.monotonic() - this.lastRequest));
       if (pause) await new Promise((resolve, reject) => {
         const cancel = () => {
@@ -1167,14 +1226,19 @@ var Commons = class {
       try {
         const raw = await this.response(path, request.signal);
         const at = this.now();
+        const value = parse(raw, at);
         this.save(path, raw, at);
         this.lastOK = at;
         this.lastError = void 0;
-        return { raw, at };
+        return { value };
       } catch (error) {
-        if (request.signal.aborted) throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
-        const failure = error instanceof ReadError ? error : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
-        if (failure instanceof ReadError) this.lastError = { code: failure.code, at: this.monotonic() };
+        if (signal?.aborted && !(signal.reason instanceof ReadError)) {
+          throw error instanceof Error && error.name === "AbortError" ? error : new DOMException("Cancelled", "AbortError");
+        }
+        const failure = error instanceof ReadError ? error : signal?.aborted && signal.reason instanceof ReadError ? signal.reason : request.signal.aborted ? request.signal.reason instanceof ReadError ? request.signal.reason : new ReadError("slow") : error instanceof Error && error.name === "AbortError" ? error : new ReadError("network");
+        if (failure instanceof ReadError && failure.code !== "not_found") {
+          this.lastError = { code: failure.code, status: failure.status, at: this.monotonic() };
+        }
         throw failure;
       } finally {
         this.lastRequest = this.monotonic();
@@ -1189,7 +1253,9 @@ var Commons = class {
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
       const old = this.cached(path, Infinity);
-      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) return { ...old, stale: error instanceof ReadError ? error : new ReadError("network") };
+      if (old && (!(error instanceof ReadError) || error.code !== "not_found")) {
+        return { value: parse(old.raw, old.at), stale: error instanceof ReadError ? error : new ReadError("network") };
+      }
       throw error;
     }
   }
@@ -1199,12 +1265,12 @@ var Commons = class {
       state: this.lastError ? this.lastError.code === "rate_limited" ? "rate_limited" : "error" : "ok",
       account: t.account,
       ...this.lastOK === void 0 ? {} : { last_sync: new Date(this.lastOK).toISOString() },
-      ...this.lastError ? { error: t[this.lastError.code] } : {}
+      ...this.lastError ? { error: errorText(new ReadError(this.lastError.code, this.lastError.status), this.locale) } : {}
     };
   }
   async search(query, limit = 20, refresh = false, signal) {
-    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal);
-    return { ...parseImages(rd.raw, rd.at), stale: rd.stale };
+    const rd = await this.read(searchPath(query, limit), refresh ? 0 : this.limits.fresh, signal, (raw, at) => parseImages(raw, at));
+    return { ...rd.value, stale: rd.stale };
   }
   cacheStats() {
     return { entries: this.cache.size, bytes: this.bytes };
@@ -1230,14 +1296,36 @@ ${image.description ? `   ${clip(image.description, 800)}
 }
 function argsFrom(raw, exact) {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args = {};
     for (const token of exact.fieldValues("query")) {
+      if (token.raw === "null") {
+        delete args.query;
+        continue;
+      }
+      if (!token.raw.startsWith('"')) throw new ReadError("invalid");
       const value2 = JSON.parse(token.raw);
       if (typeof value2 !== "string") throw new ReadError("invalid");
       args.query = value2;
     }
-    const limit = exact.int64Fields(["limit"]).limit;
-    if (limit !== 0n) args.limit = limit;
+    let hasLimit = false;
+    let limit = 0n;
+    for (const token of exact.fieldValues("limit")) {
+      if (token.raw === "null") {
+        hasLimit = false;
+        limit = 0n;
+        continue;
+      }
+      try {
+        limit = token.int64(limit);
+      } catch {
+        throw new ReadError("invalid");
+      }
+      hasLimit = true;
+    }
+    if (hasLimit) args.limit = limit;
     return args;
   }
   if (raw == null) return {};
@@ -1248,16 +1336,26 @@ function argsFrom(raw, exact) {
   return value;
 }
 async function callTool(service, name, raw = {}, signal, exact) {
+  if (name !== "commons_search") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
-    if (name === "commons_search") {
-      if (typeof args.query !== "string") throw new ReadError("invalid");
-      const limit = args.limit == null ? 10 : Number(args.limit);
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new ReadError("invalid");
-      const result = await service.search(args.query, limit, false, request.signal);
-      return clip(result.images.length ? result.images.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29999);
+    if (typeof args.query !== "string") throw new ReadError("invalid");
+    let limit = 10;
+    if (args.limit != null) {
+      if (typeof args.limit === "bigint") {
+        if (args.limit < 1n || args.limit > 20n) throw new ReadError("invalid");
+        limit = Number(args.limit);
+      } else {
+        if (typeof args.limit !== "number" || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 20) throw new ReadError("invalid");
+        limit = args.limit;
+      }
     }
-    throw unknownMethod(`connector.tools.${name}`);
+    const result = await service.search(args.query, limit, false, request.signal);
+    return clip(result.images.length ? result.images.map(line).join("\n").trim() : fmt(t.results, { query: args.query }) + "\n" + t.empty, 29999);
+  } catch (error) {
+    checkSignal(signal);
+    if (!(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally {
     request.dispose();
   }
@@ -1290,13 +1388,46 @@ var jsxs = createElement;
 
 // src/page.tsx
 var initialState = { q: "", found: false };
+var MAX_VIEW_ITEMS = 300;
+var RESULT_CHROME_ITEMS = 5;
+var MAX_RESULT_ITEMS = MAX_VIEW_ITEMS - RESULT_CHROME_ITEMS;
+var MAX_VIEW_IMAGES = 50;
+var MAX_RESULT_BYTES = 512 * 1024;
+var encoder3 = new TextEncoder();
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function boundedID(prefix, value, max = 128) {
+  const full = prefix + value;
+  if (Array.from(full).length <= max) return full;
+  const suffix = "~" + shortHash(value);
+  const keep = max - Array.from(prefix).length - suffix.length;
+  return prefix + Array.from(value).slice(0, Math.max(0, keep)).join("") + suffix;
+}
+function validHTTPS(raw, maxLen = 4096) {
+  if (!raw || raw.length > maxLen) return void 0;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password ? url.href : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function validDimension(value) {
+  return value !== void 0 && Number.isSafeInteger(value) && value >= 1 && value <= 8192;
+}
 function readState(raw) {
   if (typeof raw !== "string" || raw.length > 2e3) return initialState;
   try {
     const value = JSON.parse(raw);
     if (!value || Array.isArray(value) || typeof value.q !== "string" || typeof value.found !== "boolean") return initialState;
-    const q = clip(value.q.trim(), 160);
-    return q ? { q, found: value.found } : initialState;
+    if (!value.q.trim()) return initialState;
+    return { q: queryText(value.q), found: value.found };
   } catch {
     return initialState;
   }
@@ -1314,8 +1445,12 @@ function transition(state, id, values = {}) {
   if (!values || typeof values !== "object" || Array.isArray(values)) return state;
   fields2 = values;
   if (id === "search") {
-    const query = typeof fields2.query === "string" ? clip(fields2.query.trim(), 160) : "";
-    return query ? { q: query, found: true } : state;
+    if (typeof fields2.query !== "string") return state;
+    try {
+      return { q: queryText(fields2.query), found: true };
+    } catch {
+      return state;
+    }
   }
   if (id === "home") return initialState;
   return state;
@@ -1327,46 +1462,88 @@ async function loadPage(service, state, refresh, signal) {
     return { kind: "result", result: await service.search(state.q, 20, refresh, request.signal) };
   } catch (error) {
     checkSignal(signal);
-    return { kind: "error", error };
+    return { kind: "error", error: !(error instanceof ReadError) && request.signal.aborted && request.signal.reason instanceof ReadError ? request.signal.reason : error };
   } finally {
     request.dispose();
   }
 }
 function page(props) {
-  const { service, state, loaded, uiVersion = 0 } = props, t = textsFor(props.locale ?? service.locale), tz = props.tz ?? "Local";
+  const { service, state, loaded, uiVersion = 0 } = props, locale = props.locale || service.locale, t = textsFor(locale), tz = props.tz || "Local";
+  const safeState = { q: clip(state.q, 160), found: Boolean(state.found) };
+  const encodedState = encodeState(safeState);
   const act = (id, next, title) => props.action?.(id, next, title) ?? (next && uiVersion >= 3 ? { id, push: { ui: "search", state: encodeState(next), ...title ? { title } : {} } } : { id });
-  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 4e3), style }, key);
+  const text = (key, value, style = "secondary") => /* @__PURE__ */ jsx(Text, { text: clip(value, 2e3), style }, key);
   const search = /* @__PURE__ */ jsxs(Section, { title: t.search, children: [
-    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: state.q }, "commons-query"),
+    /* @__PURE__ */ jsx(Field, { name: "query", label: t.search, kind: "text", placeholder: t.searchHint, value: safeState.q }, "commons-query"),
     /* @__PURE__ */ jsx(Button, { title: t.searchAction, action: act("search") }, "commons-submit")
   ] }, "commons-search");
-  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "loading") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: /* @__PURE__ */ jsx(Loading, { title: t.loading }, "commons-loading-indicator") }, "commons-loading")
   ] }, "commons");
-  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "error") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsxs(Section, { children: [
-      text("commons-error-message", errorText(loaded.error, props.locale ?? service.locale)),
+      text("commons-error-message", errorText(loaded.error, locale)),
       /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "commons-retry")
     ] }, "commons-error")
   ] }, "commons");
-  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodeState(state), children: [
+  if (loaded.kind === "empty") return /* @__PURE__ */ jsxs(View, { title: t.search, state: encodedState, children: [
     search,
     /* @__PURE__ */ jsx(Section, { children: text("commons-welcome-text", t.welcome, "body") }, "commons-welcome"),
     /* @__PURE__ */ jsx(Section, { children: text("commons-license", t.attribution, "caption") }, "commons-attribution")
   ] }, "commons");
   const result = loaded.result;
-  return /* @__PURE__ */ jsxs(View, { title: fmt(t.results, { query: clip(state.q, 100) }), state: encodeState(state), children: [
+  const cards = [];
+  const usedKeys = /* @__PURE__ */ new Set();
+  const uniqueID = (prefix, value) => {
+    let key = boundedID(prefix, value);
+    for (let n = 1; usedKeys.has(key); n++) key = boundedID(prefix, `${value}~${n}`);
+    usedKeys.add(key);
+    return key;
+  };
+  let remainingItems = MAX_RESULT_ITEMS;
+  let remainingImages = MAX_VIEW_IMAGES;
+  let remainingBytes = MAX_RESULT_BYTES;
+  for (const image of result.images) {
+    const idStr = String(image.id);
+    const thumbURL = validHTTPS(image.thumbnailURL, 4096);
+    const showImage = Boolean(thumbURL && remainingImages > 0);
+    const pageURL = validHTTPS(image.pageURL, 4096);
+    const licenseURL = validHTTPS(image.licenseURL, 4096);
+    const cardItems = 2 + (showImage ? 1 : 0) + (pageURL ? 1 : 0) + (licenseURL ? 1 : 0);
+    if (cardItems > remainingItems) break;
+    const title = clip(image.title, 2e3);
+    const artistText = clip(`${t.artist}: ${image.artist || t.noDescription}`, 2e3);
+    const licenseText = clip(`${t.license}: ${image.license || t.licenseUnknown}`, 2e3);
+    const alt = clip(image.description || image.title || t.search, 200);
+    const caption = clip(image.description || t.noDescription, 1e3);
+    const bothDims = image.width !== void 0 && image.height !== void 0;
+    const dims = bothDims ? validDimension(image.width) && validDimension(image.height) ? { width: image.width, height: image.height } : {} : { ...validDimension(image.width) ? { width: image.width } : {}, ...validDimension(image.height) ? { height: image.height } : {} };
+    const sectionKey = uniqueID("image-card-", idStr);
+    const pictureKey = showImage ? uniqueID("picture-", idStr) : "";
+    const artistKey = uniqueID("artist-", idStr);
+    const licenseKey = uniqueID("license-", idStr);
+    const pageKey = pageURL ? uniqueID("page-", idStr) : "";
+    const licenseLinkKey = licenseURL ? uniqueID("license-link-", idStr) : "";
+    const cardBytes = encoder3.encode(JSON.stringify([sectionKey, title, pictureKey, thumbURL, alt, caption, artistKey, artistText, licenseKey, licenseText, pageKey, pageURL, licenseLinkKey, licenseURL])).byteLength;
+    if (cardBytes > remainingBytes) break;
+    cards.push(/* @__PURE__ */ jsxs(Section, { title, children: [
+      showImage && thumbURL ? /* @__PURE__ */ jsx(Image, { src: { url: thumbURL, ...dims }, alt, caption, aspect: "landscape" }, pictureKey) : null,
+      text(artistKey, artistText, "body"),
+      text(licenseKey, licenseText),
+      pageURL ? /* @__PURE__ */ jsx(Link, { title: t.open, url: pageURL }, pageKey) : null,
+      licenseURL ? /* @__PURE__ */ jsx(Link, { title: t.licenseLink, url: licenseURL }, licenseLinkKey) : null
+    ] }, sectionKey));
+    remainingItems -= cardItems;
+    if (showImage) remainingImages -= 1;
+    remainingBytes -= cardBytes;
+  }
+  const footer = clip(`${fmt(t.readAt, { at: readTime(result.at, tz, locale) })}${result.stale ? ` \xB7 ${errorText(result.stale, locale)}` : ""}`, 2e3);
+  return /* @__PURE__ */ jsxs(View, { title: clip(fmt(t.results, { query: clip(safeState.q, 100) }), 2e3), state: encodedState, children: [
     search,
-    result.images.length ? result.images.map((image) => /* @__PURE__ */ jsxs(Section, { title: image.title, children: [
-      image.thumbnailURL ? /* @__PURE__ */ jsx(Image, { src: { url: image.thumbnailURL, width: image.width, height: image.height }, alt: clip(image.description || image.title, 199), caption: clip(image.description || t.noDescription, 1e3), aspect: "landscape" }, `picture-${image.id}`) : null,
-      text(`artist-${image.id}`, `${t.artist}: ${image.artist || t.noDescription}`, "body"),
-      text(`license-${image.id}`, `${t.license}: ${image.license || t.licenseUnknown}`),
-      /* @__PURE__ */ jsx(Link, { title: t.open, url: image.pageURL }, `page-${image.id}`),
-      image.licenseURL ? /* @__PURE__ */ jsx(Link, { title: t.licenseLink, url: image.licenseURL }, `license-link-${image.id}`) : null
-    ] }, `image-card-${image.id}`)) : /* @__PURE__ */ jsx(Section, { children: text("commons-empty-text", t.empty) }, "commons-empty"),
-    /* @__PURE__ */ jsxs(Section, { footer: `${fmt(t.readAt, { at: readTime(result.at, tz, props.locale ?? service.locale) })}${result.stale ? ` \xB7 ${errorText(result.stale, props.locale ?? service.locale)}` : ""}`, children: [
+    cards.length ? cards : /* @__PURE__ */ jsx(Section, { children: text("commons-empty-text", t.empty) }, "commons-empty"),
+    /* @__PURE__ */ jsxs(Section, { footer, children: [
       /* @__PURE__ */ jsx(Button, { title: t.retry, action: act("refresh") }, "commons-refresh"),
       /* @__PURE__ */ jsx(Button, { title: t.search, action: act("home") }, "commons-home")
     ] }, "commons-footer"),
@@ -1376,10 +1553,10 @@ function page(props) {
 
 // src/root.tsx
 function Root(options) {
-  const [state, setState] = useState(() => readState(options.state));
-  const [refresh, setRefresh] = useState(0);
+  const [view, setView] = useState(() => ({ state: readState(options.state), refresh: 0 }));
+  const { state, refresh } = view;
   const [result, setResult] = useState(void 0);
-  const identity = `${state.q}:${state.found}:${refresh}`;
+  const identity = JSON.stringify([state.q, state.found, refresh]);
   useLoadEffect(async (signal) => {
     const loaded = await loadPage(options.service, state, refresh > 0, signal);
     if (!signal.aborted) setResult((previous) => previous?.service === options.service && previous.identity === identity && JSON.stringify(previous.loaded) === JSON.stringify(loaded) ? previous : { service: options.service, identity, loaded });
@@ -1394,8 +1571,11 @@ function Root(options) {
         return callback(() => ({ push }), { push });
       }
       return callback((values) => {
-        if (id === "refresh") setRefresh((previous) => previous + 1);
-        else setState((previous) => transition(previous, id, values));
+        if (id === "refresh") setView((previous) => ({ state: previous.state, refresh: previous.refresh + 1 }));
+        else setView((previous) => {
+          const nextState = transition(previous.state, id, values);
+          return nextState.q === previous.state.q && nextState.found === previous.state.found ? previous : { state: nextState, refresh: 0 };
+        });
       }, { submit: true });
     }
   });

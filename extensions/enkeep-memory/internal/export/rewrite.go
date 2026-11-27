@@ -357,9 +357,8 @@ func (c *compiler) emptiness(ctx context.Context, ws []want, out []string, withh
 	}
 }
 
-// ownWords: what the user said or wrote themself, or pinned: it goes out as the user put it, without the empty-talk
-// question.
+// ownWords delegates to entry.IsTrueUserOwned (0.4.0 §1.2): only genuinely user-authored/pinned entries bypass the
+// empty-talk question; S6 assistant notes do not.
 func ownWords(e *entry.Entry) bool {
-	return e.Origin == entry.FromOnboarding || e.Origin == entry.SelfReport || e.Origin == entry.Handwritten || e.Pinned ||
-		(e.User != nil && e.User.Text != "")
+	return entry.IsTrueUserOwned(e)
 }

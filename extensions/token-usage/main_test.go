@@ -11,10 +11,15 @@ import (
 	"github.com/nwverse/persona/sdk/go/wire"
 
 	"github.com/nwverse/persona-extensions/extensions/token-usage/internal/mcp"
+	"github.com/nwverse/persona-extensions/extensions/token-usage/internal/ui"
 )
 
 type manifestDoc struct {
 	Contributes struct {
+		UI []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"ui"`
 		MCP []struct {
 			ID       string   `json:"id"`
 			Requires []string `json:"requires"`
@@ -32,6 +37,32 @@ func TestConformance(t *testing.T) {
 func TestManifest(t *testing.T) {
 	if err := wire.ValidateJSON("Manifest", manifest); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The hub's settings page lists every UI contribution by its title: the page carries the extension's name, the
+// overview card the name and 「 · 概况」, so the two never read as a duplicate.
+func TestUITitlesDiffer(t *testing.T) {
+	var d manifestDoc
+	if err := json.Unmarshal(manifest, &d); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"token-usage": ui.PageTitle, "token-usage-card": ui.CardTitle}
+	if ui.CardTitle != "Token 用量 · 概况" {
+		t.Errorf("card title %q", ui.CardTitle)
+	}
+	seen := map[string]string{}
+	for _, u := range d.Contributes.UI {
+		if u.Title != want[u.ID] {
+			t.Errorf("ui %s title %q, want %q", u.ID, u.Title, want[u.ID])
+		}
+		if other, ok := seen[u.Title]; ok {
+			t.Errorf("%s and %s are both titled %q", other, u.ID, u.Title)
+		}
+		seen[u.Title] = u.ID
+	}
+	if len(seen) != len(want) {
+		t.Errorf("ui contributions %v, want %v", seen, want)
 	}
 }
 

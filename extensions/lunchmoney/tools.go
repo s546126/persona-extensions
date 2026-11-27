@@ -60,9 +60,10 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 	if err := decode(raw, &in); err != nil {
 		return "", err
 	}
+	cl := a.currentClient()
 	switch name {
 	case "lunchmoney_transactions":
-		page, err := a.client.transactions(ctx, in.StartDate, in.EndDate, in.CategoryID, in.Offset)
+		page, err := cl.transactions(ctx, in.StartDate, in.EndDate, in.CategoryID, in.Offset)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -85,7 +86,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if in.Kind == "" {
 			in.Kind = "manual_accounts"
 		}
-		items, err := a.client.accounts(ctx, in.Kind)
+		items, err := cl.accounts(ctx, in.Kind)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -96,7 +97,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return clipText(b.String(), 90000), nil
 	case "lunchmoney_categories":
-		items, err := a.client.categories(ctx)
+		items, err := cl.categories(ctx)
 		a.record(err)
 		if err != nil {
 			return "", err

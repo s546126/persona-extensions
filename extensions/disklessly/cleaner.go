@@ -30,10 +30,10 @@ type CleanPlan struct {
 // includeReview is true or a review category/item was explicitly requested.
 func BuildCleanPlan(m *Machine, scan *Scan, categories []string, itemIDs []string, includeReview bool) (*CleanPlan, error) {
 	if m == nil {
-		return nil, errors.New("未指定目标机器")
+		return nil, errors.New("没有指定电脑")
 	}
 	if scan == nil {
-		return nil, fmt.Errorf("机器 %s 尚未扫描，请先执行扫描", m.Name)
+		return nil, fmt.Errorf("「%s」还没检查过，请先点「检查」", machineLabel(m))
 	}
 	wantCat := map[string]bool{}
 	for _, c := range categories {
@@ -329,7 +329,7 @@ func ExecuteClean(
 		runner = DefaultRunner
 	}
 	if m == nil {
-		return nil, nil, errors.New("找不到目标机器")
+		return nil, nil, errors.New("找不到这台电脑")
 	}
 	scan := st.Scans[m.ID]
 	if scan == nil {
@@ -347,7 +347,7 @@ func ExecuteClean(
 		return plan, nil, nil
 	}
 	if len(plan.Items) == 0 {
-		return plan, nil, errors.New("当前没有符合条件的可清理项")
+		return plan, nil, errors.New("现在没有可以删的东西")
 	}
 
 	beforeAvail := scan.Mount.AvailableBytes
@@ -379,16 +379,16 @@ func ExecuteClean(
 			}
 			if err := sessionRun.err(); err != nil {
 				res.Error = err.Error()
-				res.Note = "未归档：" + err.Error()
+				res.Note = "没有搬：" + err.Error()
 				firstErr = cmp.Or(firstErr, err)
 				failed++
 			} else {
 				n, bytes := sessionRun.report.archivedUnder(it.Path, it.RealPath)
 				skipped, referenced := sessionRun.report.skippedUnder(it.Path, it.RealPath)
 				res.FreedBytes = bytes
-				res.Note = fmt.Sprintf("已上传 %d 个冷会话到备份后端（%s）", n, FormatBytes(bytes))
+				res.Note = fmt.Sprintf("已把 %d 个一周没动的对话搬到网盘（%s）", n, FormatBytes(bytes))
 				if skipped > 0 {
-					res.Note += fmt.Sprintf("，跳过 %d 个（其中 %d 个被引用）", skipped, referenced)
+					res.Note += fmt.Sprintf("，跳过 %d 个（其中 %d 个还在用）", skipped, referenced)
 				}
 				totalFreed += bytes
 			}
@@ -408,7 +408,7 @@ func ExecuteClean(
 			freed = it.Bytes
 		}
 		if len(outcome.busy) > 0 {
-			res.Note = fmt.Sprintf("跳过 %d 个占用中项", len(outcome.busy))
+			res.Note = fmt.Sprintf("跳过 %d 个正在用的", len(outcome.busy))
 		}
 		res.FreedBytes = freed
 		res.SkippedInUse = outcome.busy
@@ -425,9 +425,9 @@ func ExecuteClean(
 		}
 		if n, bytes := sessionRun.report.archivedOutside(dirs); n > 0 {
 			itemResults = append(itemResults, CleanItemResult{
-				ID: "sessions-cold-other", Category: CatColdAgentSession, Title: "其他 Agent 冷会话",
+				ID: "sessions-cold-other", Category: CatColdAgentSession, Title: "其他 AI 助手的旧对话",
 				Safety: SafetySafe, FreedBytes: bytes,
-				Note: fmt.Sprintf("同一次 disklessly 运行还上传了 %d 个其他 Agent 的冷会话（%s）", n, FormatBytes(bytes)),
+				Note: fmt.Sprintf("这一次还顺带搬走了 %d 个其他 AI 助手的旧对话（%s）", n, FormatBytes(bytes)),
 			})
 			totalFreed += bytes
 		}
@@ -484,8 +484,12 @@ func ExecuteClean(
 	if sessionRun != nil && sessionRun.err() == nil {
 		rec.Referenced = sessionRun.report.referenced()
 		rec.RefsFound = sessionRun.refsFound
+		rec.Moved = len(sessionRun.report.Archived)
+		if rec.Moved > 0 {
+			rec.Summary += fmt.Sprintf(" · 搬走 %d 个对话", rec.Moved)
+		}
 		if rec.Referenced > 0 {
-			rec.Summary += fmt.Sprintf(" · 保护 %d 个被引用会话", rec.Referenced)
+			rec.Summary += fmt.Sprintf(" · 留下 %d 个还在用的对话", rec.Referenced)
 		}
 	}
 	st.History = slices.Insert(st.History, 0, rec)

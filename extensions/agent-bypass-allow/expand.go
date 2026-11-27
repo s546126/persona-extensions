@@ -2,6 +2,7 @@ package main
 
 import (
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -55,6 +56,12 @@ func expandInto(rs []rune, out *[]string, work *int) {
 		return
 	}
 	*work -= len(rs) + 1
+	if slices.Index(rs, braceOpen) < 0 {
+		if len(rs) > 0 { // the shell drops a word expansion leaves empty
+			*out = append(*out, string(rs))
+		}
+		return
+	}
 	// match[i] is the index of the brace that closes the one opened at i (-1 when none does)
 	match := make([]int, len(rs))
 	var open []int
@@ -165,8 +172,13 @@ func braceRange(in string) []string {
 	return out
 }
 
+var braceRestorer = strings.NewReplacer(string(braceOpen), "{", string(braceClose), "}", string(braceComma), ",")
+
 func restoreBraces(w string) string {
-	return strings.NewReplacer(string(braceOpen), "{", string(braceClose), "}", string(braceComma), ",").Replace(w)
+	if !strings.ContainsAny(w, "\uE000\uE001\uE002") {
+		return w
+	}
+	return braceRestorer.Replace(w)
 }
 
 // ansiQuote reads the $'…' quote whose ' is at rs[i]: its text with the backslash escapes decoded as bash does, and

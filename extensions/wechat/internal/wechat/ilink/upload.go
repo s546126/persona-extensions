@@ -88,7 +88,7 @@ func uploadURL(full, param, fileKey string) (string, error) {
 	if full != "" {
 		u, err := url.Parse(full)
 		if err != nil || u.Scheme != "https" || u.User != nil || (u.Port() != "" && u.Port() != "443") || !tencentHost(u.Hostname()) {
-			return "", &Error{Code: CodeProtocol, Msg: "upload URL is not a Tencent HTTPS URL"}
+			return "", &Error{Code: CodeProtocol, Msg: "upload URL is not a Tencent HTTPS URL (" + formatURLDiag("upload_url", u, err, false) + ")"}
 		}
 		return u.String(), nil
 	}

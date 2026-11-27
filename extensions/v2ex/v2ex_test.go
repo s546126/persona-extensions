@@ -49,8 +49,6 @@ type fakeSite struct {
 	all     *answer       // answer everything with this when set
 	delay   time.Duration // before answering; a request that ends stops the wait
 	hits    map[string]int
-	agents  []string
-	times   []time.Time
 }
 
 func newFakeSite(t *testing.T) *fakeSite {
@@ -62,8 +60,6 @@ func newFakeSite(t *testing.T) *fakeSite {
 		}
 		f.mu.Lock()
 		f.hits[key]++
-		f.agents = append(f.agents, r.Header.Get("User-Agent"))
-		f.times = append(f.times, time.Now())
 		a, ok := f.answers[key]
 		if f.all != nil {
 			a, ok = *f.all, true

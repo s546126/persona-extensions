@@ -17,6 +17,6 @@
   ],
   "tool": {
     "name": "ats_api",
-    "description": "读 ATS 任务队列（GET /tasks、/tasks/{id}、/tasks/{id}/evidence），或给待办派一个任务（POST /tasks，每次都要用户确认）。"
+    "description": "读 ATS 任务队列（GET /tasks[/<id>[/evidence]]），或给待办派任务（POST /tasks，每次需用户确认）。"
   }
 }

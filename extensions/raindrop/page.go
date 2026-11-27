@@ -22,9 +22,17 @@ type pageState struct {
 	Save       saveArgs `json:"s,omitempty"`
 }
 
+const (
+	maxQueryChars    = 500
+	maxViewBookmarks = 250
+)
+
 func (a *app) readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Collection < -1 || st.Bookmark < 0 || st.Pages < 0 || st.Pages > 5 {
+	if err := r.DecodeState(&st); err != nil || st.Collection < -1 || st.Bookmark < 0 || st.Pages < 0 || st.Pages > 5 || len([]rune(st.Query)) > maxQueryChars {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.Mode != "" && st.Mode != "list" && st.Mode != "detail" && st.Mode != "form" && st.Mode != "review" {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -48,7 +56,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Pages, st.Bookmark, st.Mode = r.Values["q"], 0, 0, "list"
+		st.Query, st.Pages, st.Bookmark, st.Mode = clipText(strings.TrimSpace(r.Values["q"]), maxQueryChars), 0, 0, "list"
 	case "collection":
 		id, err := strconv.ParseInt(r.Values["collection"], 10, 64)
 		if err != nil || id < -1 {
@@ -77,6 +85,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 			return nil, err
 		}
 		st.Save, st.Mode = args, "review"
+		if len(ext.EncodeState(st)) > wire.StateMost {
+			return nil, errors.New("bookmark draft exceeds page state limit; use the raindrop_save action")
+		}
 	case "save":
 		return a.saveFromPage(ctx, r, st)
 	default:
@@ -93,11 +104,17 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	case "review":
 		return a.reviewSaveView(ctx, r, st)
 	case "detail":
+		if st.Bookmark <= 0 {
+			return nil, errors.New("invalid bookmark ID")
+		}
 		item, err := a.read(ctx, func() (raindrop, error) { return a.api.bookmark(ctx, st.Bookmark) })
 		if err != nil {
 			return nil, err
 		}
 		return a.detailView(r, st, item), nil
+	case "", "list":
+	default:
+		return nil, errors.New("invalid bookmark view")
 	}
 	if !a.hasToken() {
 		return errorView(textsFor(r.Locale).missingToken), nil
@@ -107,47 +124,78 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if err != nil {
 		return nil, err
 	}
-	v := &wire.View{Title: t.recent, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.placeholders.search, Value: st.Query, Action: wire.Action{ID: "search"}}}
+	v := &wire.View{Title: t.recent, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.placeholders.search, Value: clipText(st.Query, maxQueryChars), Action: wire.Action{ID: "search"}}}
 	if cols, err := a.listCollections(ctx); err == nil {
 		choices := []wire.Choice{{Value: "0", Title: t.all}, {Value: "-1", Title: t.unsorted}}
-		selected := false
+		seenCol := map[int64]bool{0: true, -1: true}
+		selected := st.Collection <= 0
 		for _, c := range cols {
-			selected = selected || c.ID == st.Collection
-			choices = append(choices, wire.Choice{Value: strconv.FormatInt(c.ID, 10), Title: clipText(c.Title, 60)})
-			if len(choices) == 20 {
-				break
+			if c.ID <= 0 || seenCol[c.ID] {
+				continue
 			}
+			seenCol[c.ID] = true
+			title := strings.TrimSpace(c.Title)
+			if title == "" {
+				title = "#" + strconv.FormatInt(c.ID, 10)
+			}
+			choice := wire.Choice{Value: strconv.FormatInt(c.ID, 10), Title: clipText(title, 60)}
+			switch {
+			case len(choices) < 20:
+				choices = append(choices, choice)
+			case c.ID == st.Collection:
+				choices[len(choices)-1] = choice
+			}
+			selected = selected || c.ID == st.Collection
 		}
-		if selected || st.Collection <= 0 {
+		if selected {
 			v.Filter = &wire.Filter{Name: "collection", Title: t.collection, Value: strconv.FormatInt(st.Collection, 10), Choices: choices, Action: wire.Action{ID: "collection"}}
 		}
 	}
 	section := wire.Section{Title: fmt.Sprintf(t.results, result.Count), Items: []wire.Component{{
 		Type: wire.ComponentButton, Title: t.save, Action: &wire.Action{ID: "save-form", Push: &wire.Push{State: ext.EncodeState(pageState{Mode: "form", DraftID: randomID()}), Title: t.save}},
 	}}}
+	seenIDs := map[int64]bool{}
+	rendered := 0
 	for _, item := range result.Items {
+		if item.ID <= 0 || seenIDs[item.ID] {
+			continue
+		}
+		seenIDs[item.ID] = true
 		section.Items = append(section.Items, bookmarkRow(item))
+		rendered++
+		if rendered >= maxViewBookmarks {
+			break
+		}
 	}
 	// The page reads st.Pages+1 pages, so Load more is offered only while search can read one more.
-	if len(result.Items) == 50*(st.Pages+1) && len(result.Items) < result.Count && st.Pages+1 < searchPagesMost {
+	if len(result.Items) == 50*(st.Pages+1) && len(result.Items) < result.Count && st.Pages+1 < searchPagesMost && rendered < maxViewBookmarks {
 		section.More = &wire.More{Title: t.more, Action: wire.Action{ID: "more"}}
 	}
-	if len(result.Items) == 0 {
+	if rendered == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.none})
 	}
 	v.Sections = []wire.Section{section}
 	return v, nil
 }
 
+func bookmarkTitle(item raindrop) string {
+	for _, candidate := range []string{item.Title, item.Link, item.Domain} {
+		if s := strings.TrimSpace(candidate); s != "" {
+			return s
+		}
+	}
+	return "#" + strconv.FormatInt(item.ID, 10)
+}
+
 func bookmarkRow(item raindrop) wire.Component {
 	subtitle := clipText(item.Domain+" · "+strings.Join(item.Tags, ", ")+"\n"+clipText(item.Excerpt, 180), 2000)
-	return wire.Component{Type: wire.ComponentRow, Key: "bookmark-" + strconv.FormatInt(item.ID, 10), Title: clipText(item.Title, 2000),
+	return wire.Component{Type: wire.ComponentRow, Key: "bookmark-" + strconv.FormatInt(item.ID, 10), Title: clipText(bookmarkTitle(item), 2000),
 		Subtitle: subtitle, Action: &wire.Action{ID: "detail", Values: map[string]string{"id": strconv.FormatInt(item.ID, 10)}}}
 }
 
 func (a *app) detailView(r *ext.UIRequest, st pageState, item raindrop) *wire.View {
 	t := textsFor(r.Locale)
-	v := &wire.View{Title: clipText(item.Title, 2000), State: ext.EncodeState(st), Sections: []wire.Section{{
+	v := &wire.View{Title: clipText(bookmarkTitle(item), 2000), State: ext.EncodeState(st), Sections: []wire.Section{{
 		Title: t.detail, Items: compactComponents(
 			textComponent(item.Domain, wire.TextStyleSecondary),
 			wire.Component{Type: wire.ComponentLink, Title: t.open, URL: item.Link},
@@ -155,8 +203,14 @@ func (a *app) detailView(r *ext.UIRequest, st pageState, item raindrop) *wire.Vi
 			wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 		),
 	}}}
-	if len(item.Tags) > 0 {
-		v.Sections[0].Items = append(v.Sections[0].Items, wire.Component{Type: wire.ComponentText, Text: clipText(strings.Join(item.Tags, ", "), 2000)})
+	var cleanTags []string
+	for _, tag := range item.Tags {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			cleanTags = append(cleanTags, tag)
+		}
+	}
+	if len(cleanTags) > 0 {
+		v.Sections[0].Items = append(v.Sections[0].Items, wire.Component{Type: wire.ComponentText, Text: clipText(strings.Join(cleanTags, ", "), 2000)})
 	}
 	used := len(v.Sections[0].Items)
 	if item.Note != "" {
@@ -187,17 +241,39 @@ func (a *app) saveView(ctx context.Context, r *ext.UIRequest, st pageState) (*wi
 		return nil, err
 	}
 	items := []wire.Component{
-		{Type: wire.ComponentField, Name: "url", Label: "URL", Value: st.Save.URL, Placeholder: t.placeholders.url},
-		{Type: wire.ComponentField, Name: "title", Label: t.detail, Value: st.Save.Title, Placeholder: t.placeholders.title},
-		{Type: wire.ComponentField, Name: "tags", Label: t.tags, Value: strings.Join(st.Save.Tags, ", "), Placeholder: t.placeholders.tags},
-		{Type: wire.ComponentField, Name: "note", Label: t.note, Value: st.Save.Note, Placeholder: t.placeholders.note},
-	}
-	choices := []wire.Choice{{Value: "-1", Title: t.unsorted}}
-	for _, c := range cols {
-		choices = append(choices, wire.Choice{Value: strconv.FormatInt(c.ID, 10), Title: clipText(c.Title, 80)})
+		{Type: wire.ComponentField, Kind: "text", Name: "url", Label: "URL", Value: clipText(st.Save.URL, wire.StringMost), Placeholder: t.placeholders.url},
+		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.detail, Value: clipText(st.Save.Title, wire.StringMost), Placeholder: t.placeholders.title},
+		{Type: wire.ComponentField, Kind: "text", Name: "tags", Label: t.tags, Value: clipText(strings.Join(st.Save.Tags, ", "), wire.StringMost), Placeholder: t.placeholders.tags},
+		{Type: wire.ComponentField, Kind: "text", Name: "note", Label: t.note, Value: clipText(st.Save.Note, wire.StringMost), Placeholder: t.placeholders.note},
 	}
 	selected := st.Save.CollectionID
 	if selected == 0 {
+		selected = -1
+	}
+	choices := []wire.Choice{{Value: "-1", Title: t.unsorted}}
+	seenCol := map[int64]bool{-1: true}
+	selectedFound := selected == -1
+	for _, c := range cols {
+		if c.ID <= 0 || seenCol[c.ID] {
+			continue
+		}
+		seenCol[c.ID] = true
+		title := strings.TrimSpace(c.Title)
+		if title == "" {
+			title = "#" + strconv.FormatInt(c.ID, 10)
+		}
+		choice := wire.Choice{Value: strconv.FormatInt(c.ID, 10), Title: clipText(title, 80)}
+		switch {
+		case len(choices) < 100:
+			choices = append(choices, choice)
+		case c.ID == selected:
+			choices[len(choices)-1] = choice
+		}
+		if c.ID == selected {
+			selectedFound = true
+		}
+	}
+	if !selectedFound {
 		selected = -1
 	}
 	items = append(items, wire.Component{Type: wire.ComponentField, Kind: "choice", Name: "collection", Label: t.collection, Value: strconv.FormatInt(selected, 10), Choices: choices})
@@ -211,10 +287,14 @@ func (a *app) reviewSaveView(ctx context.Context, r *ext.UIRequest, st pageState
 	if err != nil {
 		return nil, err
 	}
+	shownURL := clipText(strings.TrimSpace(st.Save.URL), wire.StringMost)
+	if shownURL == "" {
+		shownURL = t.save
+	}
 	items := []wire.Component{
-		{Type: wire.ComponentText, Text: st.Save.URL},
-		{Type: wire.ComponentText, Text: t.collection + ": " + collectionName(strconv.FormatInt(st.Save.CollectionID, 10), cols, t)},
-		{Type: wire.ComponentText, Text: t.tags + ": " + strings.Join(st.Save.Tags, ", ")},
+		{Type: wire.ComponentText, Text: shownURL},
+		{Type: wire.ComponentText, Text: clipText(t.collection+": "+collectionName(strconv.FormatInt(st.Save.CollectionID, 10), cols, t), wire.StringMost)},
+		{Type: wire.ComponentText, Text: clipText(t.tags+": "+strings.Join(st.Save.Tags, ", "), wire.StringMost)},
 	}
 	if st.Save.Title != "" {
 		items = append(items, capComponents(textComponents(st.Save.Title), maxTitleItems)...)

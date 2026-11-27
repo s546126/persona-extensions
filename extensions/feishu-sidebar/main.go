@@ -1,5 +1,5 @@
-// Command feishu-sidebar is a Persona extension (extensions/feishu-sidebar) that opens the user's Persona web from
-// a Feishu sidebar (docs/extensions/feishu-sidebar.md):
+// Command feishu-sidebar is a Persona extension (extensions/feishu-sidebar) that opens the user's Persona web in
+// Feishu's desktop navigation (docs/extensions/feishu-sidebar.md):
 //
 //   - ui (nav_page "feishu-sidebar"): a page that shows the Feishu applink for the hub's public address and the
 //     default path from the settings, to open in Feishu or copy; when the address is not set, it says what to do.

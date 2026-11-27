@@ -40,10 +40,12 @@ const (
 	KindTodos  = "todos"  // S5: id the to-do's
 	KindAbout  = "about"  // S7: id "me"
 	KindMemory = "memory" // S6: id the file's name
+	KindLedger = "ledger" // S12: id "<day>" or "<space>/<day>"
+	KindSent   = "sent"   // S13: sent-as-user provenance on S8 kb.day (not a standalone DayKind)
 )
 
 // Kinds lists them.
-var Kinds = []string{KindAgents, KindAsks, KindTodos, KindAbout, KindMemory}
+var Kinds = []string{KindAgents, KindAsks, KindTodos, KindAbout, KindMemory, KindLedger}
 
 // DayKind says whether a unit kind is one of this package's (read with Day("<kind>/<id>", day)).
 func DayKind(kind string) bool { return slices.Contains(Kinds, kind) }
@@ -62,6 +64,7 @@ const (
 	SpeakerTodo    = "待办"
 	SpeakerDecide  = "决定"
 	SpeakerMemory  = "助手记忆"
+	SpeakerLedger  = "台账"
 	// SpeakerRelayCand is a claim of the user's words inside a task prompt or a relay (relay.Quotes), not yet
 	// verified: curate's verifyRelays makes it the user's line (relay.RelayedMark) or drops it.
 	SpeakerRelayCand = "转达待核"
@@ -106,6 +109,9 @@ type Source struct {
 	decided  map[string][]hubapi.Decision
 	about    string
 	memories map[string]hubapi.MemoryFile
+	ledgers  map[string][]hubapi.LedgerEntry
+	sentSeen map[int64]bool
+	sentNoID map[string]bool
 	private  map[string]bool // recordings marked private
 	srcOf    map[string]string
 	days     map[string]wire.KBDayResult
@@ -141,6 +147,9 @@ func (s *Source) reset() {
 	s.todos = map[string]hubapi.Todo{}
 	s.decided = map[string][]hubapi.Decision{}
 	s.memories = map[string]hubapi.MemoryFile{}
+	s.ledgers = map[string][]hubapi.LedgerEntry{}
+	s.sentSeen = map[int64]bool{}
+	s.sentNoID = map[string]bool{}
 	s.private = map[string]bool{}
 	s.srcOf = map[string]string{}
 	s.days = map[string]wire.KBDayResult{}
@@ -295,6 +304,7 @@ func (s *Source) End(st *store.State, day string, units int) {
 var baseRows = [][2]string{
 	{entry.SrcAssistant, "persona"}, {entry.SrcAsk, KindAsks}, {entry.SrcAgent, KindAgents}, {entry.SrcTools, "segments"},
 	{entry.SrcTodo, KindTodos}, {entry.SrcMemory, KindMemory}, {entry.SrcAbout, KindAbout}, {entry.SrcRecording, "recordings"},
+	{entry.SrcLedger, KindLedger}, {entry.SrcSent, KindSent},
 }
 
 // Status is a copy of the ledger as it stands in this pass (for tests and the replay report).
@@ -326,6 +336,7 @@ func (s *Source) note(code, name string, err error) {
 	st := s.statusOf(code, name)
 	st.LastRead = time.Now().UTC().Format(time.RFC3339)
 	var w *hubapi.WaitingHub
+	var ld *hubapi.LedgerDenied
 	switch {
 	case err == nil:
 		st.Available, st.Missing, st.Waiting = true, "", ""
@@ -334,7 +345,7 @@ func (s *Source) note(code, name string, err error) {
 		if st.Units == 0 {
 			st.Available, st.Missing = false, "waiting_hub"
 		}
-	case errors.Is(err, hubapi.ErrNoScope), errors.Is(err, convsrc.ErrNoAccess):
+	case errors.Is(err, hubapi.ErrNoScope), errors.Is(err, convsrc.ErrNoAccess), errors.As(err, &ld):
 		st.Available, st.Missing, st.Waiting = false, "no_scope", ""
 	case errors.Is(err, hubapi.ErrNotConnected):
 		st.Available, st.Missing, st.Waiting = false, "not_connected", ""
@@ -411,6 +422,7 @@ func (s *Source) Recent(ctx context.Context, since, until time.Time) ([]wire.KBE
 	out = append(out, s.todoEntries(ctx, since, end)...)
 	out = append(out, s.aboutEntries(ctx, since)...)
 	out = append(out, s.memoryEntries(ctx, since, end)...)
+	out = append(out, s.ledgerEntries(ctx, day, since, end)...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Updated.After(out[j].Updated) })
 	return out, nil
 }
@@ -524,12 +536,20 @@ func (s *Source) Get(ctx context.Context, kind, id string) (wire.KBDetail, error
 	case KindAbout:
 		meta["code"], meta["origin"], meta["name"] = entry.SrcAbout, string(entry.SelfReport), "关于我"
 	case KindMemory:
-		meta["code"], meta["origin"], meta["name"] = entry.SrcMemory, string(entry.Handwritten), "助手记忆 · "+id
+		meta["code"], meta["origin"], meta["name"] = entry.SrcMemory, string(entry.OriginAssistantNote), "助手记忆 · "+id
 		s.mu.Lock()
 		if m, ok := s.memories[id]; ok && m.Description != "" {
 			meta["note"] = m.Description
 		}
 		s.mu.Unlock()
+	case KindLedger:
+		sp := ledgerUnitSpace(id)
+		dayPart := id
+		if sp != "" {
+			_, dayPart, _ = strings.Cut(id, "/")
+			meta["space"] = sp
+		}
+		meta["code"], meta["name"] = entry.SrcLedger, ledgerUnitName(sp, dayPart)
 	}
 	raw, _ := json.Marshal(meta)
 	return wire.KBDetail{Kind: kind, ID: id, Meta: raw}, nil
@@ -569,6 +589,7 @@ func (s *Source) Day(ctx context.Context, chat, day string) (wire.KBDayResult, e
 		r, err := s.Source.Day(ctx, chat, day)
 		if err == nil {
 			s.countDay(chat, day, r)
+			s.recordSent(chat, day, r)
 		}
 		return r, err
 	}
@@ -594,6 +615,8 @@ func (s *Source) Day(ctx context.Context, chat, day string) (wire.KBDayResult, e
 		lines = s.aboutDay(day)
 	case KindMemory:
 		lines = s.memoryDay(id, day)
+	case KindLedger:
+		lines = s.ledgerDay(id, day)
 	}
 	if err != nil {
 		return wire.KBDayResult{}, err

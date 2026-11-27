@@ -111,7 +111,7 @@ func Settle(s *store.State, e *entry.Entry, t Tally, today string) (d Decision, 
 	confirmed := e.Pinned || userConfirmed(e)
 	limit := dormantLimit(e, t)
 	if quietDays(s, e.Last, today) >= limit {
-		if confirmed || e.Origin != entry.Behavior {
+		if confirmed || e.Origin == entry.SelfReport || e.Origin == entry.FromOnboarding {
 			return Decision{e.Status, "quiet, confirmed: ask once"}, !slices.Contains(e.Flags, flagAskedDormant)
 		}
 		// A core principle (evidence in four ISO weeks, or a lasting cross-project principle) is not said again and
@@ -137,8 +137,8 @@ func Settle(s *store.State, e *entry.Entry, t Tally, today string) (d Decision, 
 		}
 		return Decision{entry.Candidate, "a seed waiting for the user's own records"}, false
 	}
-	if e.Origin != entry.Behavior && e.Origin != "" {
-		return Decision{entry.Stable, "the user's own words or hand-written memory"}, false
+	if e.Origin == entry.SelfReport || e.Origin == entry.FromOnboarding {
+		return Decision{entry.Stable, "the user's own words"}, false
 	}
 	if e.Pinned {
 		return Decision{entry.Stable, "pinned"}, false

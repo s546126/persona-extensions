@@ -145,6 +145,10 @@ func (m *fakeModel) Complete(_ context.Context, r model.Request) (model.Response
 		out = m.predict(in)
 	case "overview_merge":
 		out = mergeOutput{Groups: []mergeGroup{}}
+	case "overview_profile_core":
+		out = profileCoreOutput{}
+	case "overview_reconcile":
+		out = reconcileOutput{}
 	case "overview_audit":
 		var in auditInput
 		_ = json.Unmarshal([]byte(r.User), &in)
@@ -637,16 +641,136 @@ func TestPolesText(t *testing.T) {
 	}
 }
 
-// A pattern scores on the entries' scale: at most 70 however wide, core above scoped, nothing unless used.
+// A pattern scores by multi-dimensional leverage (unified design §2.1): cross-scene/user-owned/check hard contracts
+// score highest with progressive CoveredIDs weight, single-scene non-owned contracts are capped at 70, regular
+// contracts and principles reward spread/owned/decision-attention/judgement-workflow/poles, and unused patterns score 0.
 func TestPatternScoreScale(t *testing.T) {
-	wide := &Pattern{Lifecycle: Core, ScenesCount: 50, SourcesCount: 50, ActiveWeeks: []string{"a", "b", "c", "d", "e", "f"}}
-	if s := Score(wide); s != 70 {
-		t.Errorf("wide %d", s)
+	hard := &Pattern{Facet: "interaction", Kind: KindContract, Lifecycle: Core, Hard: true, Polarity: PolarityCheck,
+		ViolationCount: 5, ScenesCount: 3, UniqueQuotes: 6, CoveredIDs: []string{"i-hand"}}
+	if s := Score(hard); s != 80+20+18+12+15+6 {
+		t.Errorf("hard contract score = %d, want %d", s, 151)
 	}
-	if Score(&Pattern{Lifecycle: Core, ScenesCount: 2}) <= Score(&Pattern{Lifecycle: Scoped, ScenesCount: 2}) {
+	multiOwned := &Pattern{Facet: "interaction", Kind: KindContract, Lifecycle: Core, Hard: true, Polarity: PolarityRoute,
+		ViolationCount: 1, ScenesCount: 1, UniqueQuotes: 6, CoveredIDs: []string{"h1", "h2", "h3", "h4", "h5", "h6"}}
+	if s := Score(multiOwned); s != 80+4+6+12+30 {
+		t.Errorf("multi-owned hard contract score = %d, want %d", s, 132)
+	}
+	narrowHard := &Pattern{Facet: "interaction", Kind: KindContract, Lifecycle: Core, Hard: true, ViolationCount: 10, ScenesCount: 1, UniqueQuotes: 10}
+	if s := Score(narrowHard); s != 70 {
+		t.Errorf("single-scene non-owned hard contract score = %d, want 70 cap", s)
+	}
+	reg := &Pattern{Facet: "interaction", Kind: KindContract, Lifecycle: Core, ScenesCount: 3, UniqueQuotes: 4, ActiveWeeks: []string{"w1", "w2"}}
+	if s := Score(reg); s != 30+18+8+8 {
+		t.Errorf("regular contract score = %d, want %d", s, 64)
+	}
+	prin := &Pattern{Facet: "judgement", Kind: KindPrinciple, Lifecycle: Core, Dimension: "decision", ScenesCount: 5, UniqueQuotes: 10,
+		ActiveWeeks: []string{"w1", "w2", "w3", "w4", "w5"}, Exception: "only for hotfixes", CoveredIDs: []string{"j-hand"}}
+	if s := Score(prin); s != 30+25+20+15+10+18+8+6 {
+		t.Errorf("principle score = %d, want %d", s, 132)
+	}
+	if Score(&Pattern{Facet: "judgement", Kind: KindPrinciple, Lifecycle: Core, Dimension: "decision", ScenesCount: 2}) <=
+		Score(&Pattern{Facet: "persona", Kind: KindPrinciple, Lifecycle: Core, Dimension: "thinking", ScenesCount: 2}) {
+		t.Error("actionable decision/judgement principle not above static persona/thinking observation")
+	}
+	if Score(&Pattern{Facet: "judgement", Kind: KindPrinciple, Lifecycle: Core, ScenesCount: 2}) <=
+		Score(&Pattern{Facet: "judgement", Kind: KindPrinciple, Lifecycle: Scoped, ScenesCount: 2}) {
 		t.Error("core not above scoped")
 	}
-	if Score(&Pattern{Lifecycle: Candidate, ScenesCount: 9}) != 0 {
+	if Score(&Pattern{Facet: "judgement", Kind: KindPrinciple, Lifecycle: Candidate, ScenesCount: 9}) != 0 {
 		t.Error("an unused pattern scored")
+	}
+}
+
+// Audit quotes sample round-robin across EvidenceIDs so one large class cannot crowd out the others.
+func TestAuditQuotesRoundRobin(t *testing.T) {
+	var all []*entry.Entry
+	var bigMembers []*entry.Entry
+	for i := 0; i < 10; i++ {
+		a := action(fmt.Sprintf("big%d", i), entry.Workflow, "alpha", entry.SrcAssistant, "2026-11-10", fmt.Sprintf("big quote %d", i))
+		all = append(all, a)
+		bigMembers = append(bigMembers, a)
+	}
+	big := class("cbig", entry.Workflow, "big class", bigMembers...)
+	other := action("other1", entry.Workflow, "beta", entry.SrcAgent, "2026-11-18", "second evidence quote")
+	all = append(all, big, other)
+	st := state(all...)
+	p := &Pattern{ID: "ov:rr", Facet: string(entry.Workflow), EvidenceIDs: []string{"cbig", "other1"}}
+	qs := quotes(st, p, 4)
+	if len(qs) != 4 {
+		t.Fatalf("got %d quotes: %v", len(qs), qs)
+	}
+	if !slices.ContainsFunc(qs, func(s string) bool { return strings.Contains(s, "second evidence quote") }) {
+		t.Fatalf("second evidence id crowded out: %v", qs)
+	}
+}
+
+// Hard holdout drops strawman distractors and easy candidates a no-memory model gets right in both orders.
+func TestHoldoutHardFilter(t *testing.T) {
+	st := fixture()
+	s := newState()
+	if _, err := runner(&fakeModel{}).Weekly(context.Background(), st, s, "2026-W47", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Strawman distractor: filtered out before any model call.
+	straw := action("qstraw", entry.Judgement, "alpha", entry.SrcAsk, "2026-11-24", "check logs")
+	straw.Situation, straw.Choice, straw.Rejected = "a service fails", "inspect logs before restarting", "blindly ignore errors and restart"
+	// Easy question: fake model answers right without memory in both orders -> dropped by filterHard.
+	easy := action("qeasy", entry.Judgement, "alpha", entry.SrcAsk, "2026-11-24", "easy choice")
+	easy.Situation, easy.Choice, easy.Rejected = "picking a colour", "choose obvious option", "choose odd option"
+	// Hard question: fake model only gets it right when memory mentions "pilot".
+	hard := action("qhard", entry.Judgement, "alpha", entry.SrcAsk, "2026-11-25", "pilot rollout")
+	hard.Situation, hard.Choice, hard.Rejected = "rolling out a change", "pilot with a small batch first", "roll out to all users at once"
+	st.Entries["qstraw"], st.Entries["qeasy"], st.Entries["qhard"] = straw, easy, hard
+
+	m := &fakeModel{predict: func(in predictInput) predictOutput {
+		var o predictOutput
+		for _, q := range in.Questions {
+			pick := "B"
+			switch {
+			case strings.Contains(q.A, "obvious"):
+				pick = "A"
+			case strings.Contains(q.B, "obvious"):
+				pick = "B"
+			case strings.Contains(in.Memory, "pilot"):
+				if strings.Contains(q.A, "pilot") {
+					pick = "A"
+				} else {
+					pick = "B"
+				}
+			}
+			o.Answers = append(o.Answers, struct {
+				ID   string `json:"id"`
+				Pick string `json:"pick"`
+			}{q.ID, pick})
+		}
+		return o
+	}}
+	h, err := runner(m).Holdout(context.Background(), st, s, "2026-W48", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.N != 1 || h.DroppedEasy != 1 || h.Candidates != 2 {
+		t.Fatalf("expected 1 hard question (1 dropped easy, 2 scanned, strawman excluded): %+v", h)
+	}
+	if h.Rate[ArmOverview] != 1 || h.Rate[ArmNone] != 0 {
+		t.Fatalf("unexpected rates: %+v", h)
+	}
+}
+
+func TestEnrichSubjects(t *testing.T) {
+	p := &Pattern{
+		ID: "ov:tp1", Facet: string(entry.Tools), Lifecycle: Core,
+		Text:      "用 task_plan 派运维写操作时，带 supervisor 并设 user_requested=true，估时间不按人工期。",
+		Exception: "涉及 1Password 时改用 secret_env",
+		Subjects:  []string{"existing-tag"},
+	}
+	got := EnrichSubjects(p)
+	if len(got) > memsrc.MaxSubjects {
+		t.Fatalf("enriched subjects exceeded MaxSubjects: %d %v", len(got), got)
+	}
+	for _, want := range []string{"existing-tag", "task_plan", "1Password", "派活", "排期", "密钥", "工具"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("missing expected enriched subject %q in %v", want, got)
+		}
 	}
 }

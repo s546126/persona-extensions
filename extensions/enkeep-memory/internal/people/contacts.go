@@ -145,6 +145,28 @@ func mentionsName(body, name string) bool {
 	return name != "" && !voice.Generic(name) && (strings.Contains(body, "@"+name) || strings.Contains(body, "@ "+name))
 }
 
+// CanonicalName strips leading "person:"/"people:" prefixes and normalizes surrounding whitespace.
+func CanonicalName(name string) string {
+	s := strings.TrimSpace(name)
+	for {
+		lower := strings.ToLower(s)
+		stripped := false
+		for _, p := range []string{"person:", "people:", "person：", "people："} {
+			if strings.HasPrefix(lower, p) {
+				if rest := strings.TrimSpace(s[len(p):]); rest != "" {
+					s = rest
+					stripped = true
+				}
+				break
+			}
+		}
+		if !stripped {
+			break
+		}
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func add(list map[string]*entry.Contact, who, name, source, tie, day string) {
 	c := list[who]
 	if c == nil {
@@ -154,8 +176,8 @@ func add(list map[string]*entry.Contact, who, name, source, tie, day string) {
 	if c.Ties == nil {
 		c.Ties = map[string]int{}
 	}
-	if name != "" {
-		c.Name = name
+	if clean := CanonicalName(name); clean != "" {
+		c.Name = clean
 	}
 	if c.Source == "" {
 		c.Source = sourceOf(who, source)
@@ -238,7 +260,8 @@ func Commitments(list map[string]*entry.Contact, entries map[string]*entry.Entry
 	}
 }
 
-// On says whether a person is on the list: dealt with and not removed by the user, or added by the user.
+// On says whether a person is on the list: dealt with and not removed by the user (and not a generic nameless
+// placeholder like "HR" or "对方"), or explicitly added by the user.
 func On(list map[string]*entry.Contact, who string) bool {
 	c := list[who]
 	if c == nil {
@@ -250,12 +273,16 @@ func On(list map[string]*entry.Contact, who string) bool {
 	case Removed:
 		return false
 	}
+	if c.Name != "" && entry.IsGenericPersonName(c.Name) {
+		return false
+	}
 	return c.Score > 0
 }
 
 // Set records the user's choice for a person (Added, Removed, or "" to go back to the counts). The counts go on
 // being kept; the choice wins over them.
 func Set(list map[string]*entry.Contact, who, name, choice, day string) {
+	name = CanonicalName(name)
 	c := list[who]
 	if c == nil {
 		c = &entry.Contact{Person: who, Name: name, Ties: map[string]int{}, First: day, Last: day, Source: sourceOf(who, "")}
@@ -268,7 +295,7 @@ func Set(list map[string]*entry.Contact, who, name, choice, day string) {
 }
 
 // Ranked is the list in order: most dealings first (the user's additions with them), then the latest, then id.
-// Removed people are left out.
+// Removed people and generic placeholders are left out.
 func Ranked(list map[string]*entry.Contact) []*entry.Contact {
 	var out []*entry.Contact
 	for who, c := range list {
@@ -292,8 +319,9 @@ func Ranked(list map[string]*entry.Contact) []*entry.Contact {
 func Names(list map[string]*entry.Contact) []string {
 	var out []string
 	for who, c := range list {
-		if On(list, who) && c.Name != "" && !slices.Contains(out, c.Name) {
-			out = append(out, c.Name)
+		clean := CanonicalName(c.Name)
+		if On(list, who) && clean != "" && !entry.IsGenericPersonName(clean) && !slices.Contains(out, clean) {
+			out = append(out, clean)
 		}
 	}
 	sort.Strings(out)

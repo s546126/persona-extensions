@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from larkx_persona.connector import DM_UNKNOWN, KEEP_DAYS, Connector, mention_request  # noqa: E402
+from larkx_persona.connector import DM_UNKNOWN, KEEP_DAYS, Connector, _channel_routing, mention_request  # noqa: E402
 from larkx_persona.real import normalize  # noqa: E402
 from larkx_persona.store import Store  # noqa: E402
 from larkx_persona.wire import RpcError  # noqa: E402
@@ -35,6 +35,8 @@ class Backend:
         self.send_result = "m_new"
         self.send_error = None
         self.chats = {}
+        self.members = {}
+        self.chat_members_calls = []
         self.chat_info_calls = []
         self.older = {}
         self.restored = []
@@ -101,6 +103,10 @@ class Backend:
 
     def user_name(self, user, chat):
         return {"u_a": "小明", "7001": "小明"}.get(user)
+
+    def chat_members(self, chat, limit=100):
+        self.chat_members_calls.append((chat, limit))
+        return list(self.members.get(chat, []))[:limit]
 
     def download(self, msg_id, chat, key, most):
         return "image/png", b"png"
@@ -236,6 +242,96 @@ class ConnectorTest(unittest.TestCase):
         self.assertEqual(thing["extra"]["rule_tier"], "noise")
         self.assertEqual(thing["rules"], self.c.rules)
 
+    def test_opted_in_product_question_and_followup_reach_model_triage(self):
+        self.sign_in()
+        self.c.inbox_triage_chats = {"g1"}
+        self.c.rules = "Questions about the reports I own need my attention."
+        self.backend.chats["g1"] = {"name": "Reports", "mute": "unknown"}
+        question = message("q1", "g1", 1, kind="group", text="Does the report support nightly builds?")
+        question["mentions"] = [{"label": "@HelpBot"}]
+        self.c.on_message(question)
+        first = self.thing("g1")
+        self.assertNotIn("tier", first)
+        self.assertEqual(first["extra"]["rule_tier"], "noise")
+        self.assertEqual(first["rules"], self.c.rules)
+        self.assertIn("@HelpBot", first["context"])
+
+        self.c.store.mute_chat("g1", "muted", time.time())
+        self.c.on_message(message("a1", "g1", 2, kind="group", text="Anyone bringing lunch?", root="lunch"))
+        self.c.on_message(message("q2", "g1", 3, kind="group", text="Could you add support?", root="q1"))
+        followup = self.thing("g1:q1")
+        self.assertNotIn("tier", followup)
+        self.assertEqual(followup["extra"]["rule_tier"], "noise")
+        self.assertEqual(followup["last"], "3")
+        self.assertIn("Does the report support nightly builds?", followup["context"])
+        self.assertIn("最新消息：", followup["context"])
+        self.assertNotIn("lunch", followup["context"])
+        self.assertIn("Could you add support?", followup["preview"])
+        self.assertNotIn("g1", {t["thread"] for t in self.c.inbox_collect({})["things"]})
+
+        unrelated = self.thing("g1:lunch")
+        self.assertNotIn("tier", unrelated)
+        self.assertEqual(unrelated["extra"]["rule_tier"], "noise")
+        self.assertNotIn("the report", unrelated["context"])
+        self.c.on_message(message("u1", "g2", 1, kind="group", text="Anyone bringing lunch?"))
+        self.assertEqual(self.thing("g2")["tier"], "noise")
+
+    def test_topic_mention_context_ends_with_the_preview_body(self):
+        self.sign_in()
+        text = "Please check the coverage report for tomorrow."
+        latest = message("q1", "g1", 1, kind="group", root="q1", at_me=True, text=text)
+        latest["mentions"] = [{"label": "@Owner"}]
+        self.c.on_message(latest)
+
+        thing = self.thing("g1:q1")
+        self.assertEqual(thing["kind"], "mention")
+        self.assertEqual(thing["preview"], text)
+        self.assertIn("提及：@Owner", thing["context"])
+        # The hub requires the preview at the end of the context to rule out a clipped preview.
+        self.assertTrue(thing["context"].strip().endswith(thing["preview"].strip()))
+
+    def test_only_same_topic_reply_settles_even_after_interleaved_activity(self):
+        self.sign_in()
+        self.c.on_message(message("q1", "g1", 1, kind="group", at_me=True, root="q1"))
+        self.c.on_message(message("q2", "g1", 2, kind="group", at_me=True, root="q2"))
+        self.c.on_message(message("mine", "g1", 3, kind="group", sender=ME, root="q2"))
+        for position in range(4, 14):
+            self.c.on_message(message("other%d" % position, "g1", position, kind="group"))
+        self.assertEqual(self.thing("g1:q1")["kind"], "mention")
+        self.assertNotIn("done", self.thing("g1:q1"))
+        settled = self.thing("g1:q2")
+        self.assertEqual(settled["done"], "replied")
+        self.assertNotIn("last", settled)
+        self.assertNotIn("done", self.thing("g1"))
+        self.c.on_message(message("answer", "g1", 14, kind="group", sender=ME, root="q1"))
+        self.assertEqual(self.thing("g1:q1")["done"], "replied")
+
+    def test_inbox_topic_reply_and_legacy_group_reply_keep_their_routes(self):
+        self.sign_in()
+        self.c.on_message(message("q1", "g1", 1, kind="group", root="q1"))
+        self.c.on_message(message("q2", "g1", 2, kind="group", root="q2"))
+        self.c.on_message(message("q3", "g1", 3, kind="group", root="q1"))
+        thread = self.thing("g1:q1")["thread"]
+        page = self.c.thread_page({"thread": thread, "limit": 1})
+        self.assertEqual([m["id"] for m in page["messages"]], ["q3"])
+        older = self.c.thread_page({"thread": thread, "before": page["before"]})
+        self.assertEqual([m["id"] for m in older["messages"]], ["q1"])
+        self.assertEqual(self.c.thread_page({"thread": "g1"})["chat"]["reply"], "larkx_send")
+        for _ in range(2):
+            self.c.inbox_reply({"thread": thread, "text": "Topic answer", "client_id": "one"})
+        self.c.inbox_reply({"thread": "g1", "text": "Group answer", "client_id": "two"})
+        self.assertEqual(self.backend.sent, [("g1", "Topic answer", "q1"), ("g1", "Group answer", None)])
+
+    def test_topic_group_root_opens_a_topic_before_a_reply_exists(self):
+        self.sign_in()
+        normalized = normalize({"msg_id": "q1", "chat_id": "g1", "chat_type": 2, "scope": "topic",
+                                "msg_type_name": "TEXT", "position": 1, "content": "Can you help?",
+                                "at_me": True}, lambda *_: "")
+        self.c.on_message(normalized)
+        self.assertEqual(self.thing("g1:q1")["last"], "1")
+        self.c.on_message(message("q2", "g1", 2, kind="group", root="q1"))
+        self.assertEqual(self.thing("g1:q1")["last"], "2")
+
     def test_a_stale_mute_state_is_refreshed_and_a_failure_falls_back_to_unknown(self):
         self.sign_in()
         self.backend.chats["g1"] = {"name": "项目群", "last_position": 0, "mute": "normal"}
@@ -352,6 +448,154 @@ class ConnectorTest(unittest.TestCase):
             self.c.channel_send({"ref": "r1", "reply_to": "m1", "text": "@小明 请确认"})
         self.assertEqual(self.backend.sent[0][3], [{"id": "7001", "name": "小明"}])
 
+    def test_larkx_members_lists_group_bots_and_humans_and_caches_names(self):
+        self.sign_in()
+        self.backend.members["g1"] = [
+            {"id": "7001", "name": "小明", "real_name": "小明", "kind": "user"},
+            {"id": "7002", "name": "Example Bot", "real_name": "Example Bot", "kind": "bot"},
+        ]
+        out = self.c.tools_call({"name": "larkx_members", "args": {"chat": "g1"}})
+        self.assertIn("7001  小明〔成员〕", out["text"])
+        self.assertIn("7002  Example Bot〔BOT〕", out["text"])
+        self.assertEqual(self.c.store.name("7002"), "Example Bot")
+        # Cached within ttl: second call does not hit backend again.
+        self.c.tools_call({"name": "larkx_members", "args": {"chat": "g1"}})
+        self.assertEqual(len(self.backend.chat_members_calls), 1)
+
+    def test_an_agent_reply_mentions_silent_group_bots_and_skips_ambiguous_names(self):
+        self.sign_in()
+        self.backend.members["g1"] = [
+            {"id": "7002", "name": "Bot Alpha", "real_name": "Bot Alpha", "kind": "bot"},
+            {"id": "7003", "name": "Bot Nick", "real_name": "Bot Beta", "kind": "bot"},
+            {"id": "7004", "name": "DupName", "real_name": "DupName", "kind": "user"},
+            {"id": "7005", "name": "DupName", "real_name": "DupName", "kind": "user"},
+        ]
+        m = message("m1", "g1", 1, sender=ME, text="/agent 打招呼", kind="group")
+        self.c.on_message(m)
+        self.c.channel_send({"ref": "r1", "reply_to": "m1", "text": "@Bot Alpha @Bot Beta @DupName 你好"})
+        got = {x["id"]: x["name"] for x in self.backend.sent[0][3]}
+        self.assertEqual(got, {"7002": "Bot Alpha", "7003": "Bot Beta"})
+
+    def test_an_agent_reply_resolves_bot_ids_from_historical_mentions(self):
+        self.sign_in()
+        prev = message("m0", "g1", 1, sender="7001", text="@HistoryBot 查一下", kind="group")
+        prev["mentions"] = [{"id": "7099", "start": 0, "end": 11, "label": "@HistoryBot"}]
+        self.c.on_message(prev)
+        req = message("m1", "g1", 2, sender=ME, text="/agent 问一下机器人", kind="group")
+        self.c.on_message(req)
+        self.c.channel_send({"ref": "r1", "reply_to": "m1", "text": "@HistoryBot 你好"})
+        self.assertEqual(self.backend.sent[0][3], [{"id": "7099", "name": "HistoryBot"}])
+
+    def test_members_cache_refetches_for_larger_limit_and_reuses_complete_roster(self):
+        self.sign_in()
+        # 80-member group: _agent_context (limit=60) must not truncate later limit=200 callers.
+        self.backend.members["g1"] = [
+            {"id": str(8000 + i), "name": "成员%d" % i, "real_name": "成员%d" % i, "kind": "user"}
+            for i in range(80)
+        ]
+        m = message("m1", "g1", 1, sender=ME, text="/agent 打招呼", kind="group")
+        self.c.on_message(m)
+        self.c._agent_context(m)
+        self.assertEqual(self.backend.chat_members_calls, [("g1", 60)])
+
+        self.c.channel_send({"ref": "r1", "reply_to": "m1", "text": "@成员70 你好"})
+        self.assertEqual(self.backend.chat_members_calls, [("g1", 60), ("g1", 200)])
+        self.assertEqual(self.backend.sent[0][3], [{"id": "8070", "name": "成员70"}])
+
+        # Subsequent larkx_members(limit=200) and smaller limit=50 both hit the complete 200-limit cache.
+        out = self.c.tools_call({"name": "larkx_members", "args": {"chat": "g1", "limit": 200}})
+        self.assertEqual(len(out["text"].splitlines()), 80)
+        self.assertEqual(len(self.backend.chat_members_calls), 2)
+        small = self.c._chat_members_cached("g1", limit=50)
+        self.assertEqual(len(small), 50)
+        self.assertEqual(len(self.backend.chat_members_calls), 2)
+
+        # Small group (<60): cached 60-limit fetch is already complete, so limit=200 hits without refetching.
+        self.backend.members["g2"] = [
+            {"id": str(9000 + i), "name": "小组员%d" % i, "real_name": "小组员%d" % i, "kind": "user"}
+            for i in range(10)
+        ]
+        self.assertEqual(len(self.c._chat_members_cached("g2", limit=60)), 10)
+        self.assertEqual(len(self.c._chat_members_cached("g2", limit=200)), 10)
+        self.assertEqual([c for c in self.backend.chat_members_calls if c[0] == "g2"], [("g2", 60)])
+
+    def test_context_mentions_require_boundary_and_prevent_prefix_collisions(self):
+        self.sign_in()
+        self.backend.members["g1"] = [
+            {"id": "8007", "name": "成员7", "real_name": "成员7", "kind": "user"},
+            {"id": "8001", "name": "张三", "real_name": "张三", "kind": "user"},
+            {"id": "8010", "name": "Bot", "real_name": "Bot", "kind": "bot"},
+            {"id": "8011", "name": "Bot Pro", "real_name": "Bot Pro", "kind": "bot"},
+            {"id": "8012", "name": "Bot Pro", "real_name": "Bot Pro", "kind": "bot"},
+        ]
+        m = message("m1", "g1", 1, sender=ME, text="/agent 通知", kind="group")
+        self.c.on_message(m)
+
+        # Unknown longer @names must NOT fall back to shorter prefix candidates.
+        self.c.channel_send({"ref": "r1", "reply_to": "m1", "text": "@成员70 @张三丰 你好"})
+        self.assertEqual(len(self.backend.sent[0]), 3)  # no mentions attached
+
+        # Ambiguous longer candidate (@Bot Pro) must NOT be hijacked by shorter @Bot.
+        self.c.channel_send({"ref": "r2", "reply_to": "m1", "text": "@Bot Pro 你好"})
+        self.assertEqual(len(self.backend.sent[1]), 3)
+
+        # Boundary-terminated @name alongside a longer unknown @name resolves only the real target,
+        # and mention_parts leaves the longer @word untouched as plain text.
+        self.c.channel_send({"ref": "r3", "reply_to": "m1", "text": "@成员70 和 @成员7，@张三：请看"})
+        got = {x["id"]: x["name"] for x in self.backend.sent[2][3]}
+        self.assertEqual(got, {"8007": "成员7", "8001": "张三"})
+        from larkx_persona.real import mention_parts
+        parts = mention_parts("@成员70 和 @成员7，@张三：请看", self.backend.sent[2][3])
+        self.assertEqual(parts[0], ("text", "@成员70 和 "))
+        self.assertEqual(parts[1], ("at", {"id": "8007", "name": "成员7"}))
+        self.assertEqual(parts[3], ("at", {"id": "8001", "name": "张三"}))
+
+    def test_group_nicknames_do_not_overwrite_global_canonical_names(self):
+        self.sign_in()
+        self.c.store.set_name("7001", "张三")
+        self.backend.members["g1"] = [
+            {"id": "7001", "name": "张总", "real_name": "张三", "kind": "user"},
+            {"id": "7002", "name": "仅群昵称", "real_name": "", "kind": "user"},
+            {"id": "7003", "name": "群名机器人", "real_name": "RealBot", "kind": "bot"},
+        ]
+        self.c._chat_members_cached("g1", limit=100)
+        # Canonical global name stays intact; nickname-only user does not pollute global store;
+        # missing canonical real_name can still be backfilled with real_name (never nickname).
+        self.assertEqual(self.c.store.name("7001"), "张三")
+        self.assertEqual(self.c.store.name("7002"), "")
+        self.assertEqual(self.c.store.name("7003"), "RealBot")
+
+        # Inside g1, both group nickname and real name still resolve to real mentions.
+        m = message("m1", "g1", 1, sender=ME, text="/agent 提醒", kind="group")
+        self.c.on_message(m)
+        self.c.channel_send({"ref": "r1", "reply_to": "m1", "text": "@张总 和 @仅群昵称 请看"})
+        got = {x["id"]: x["name"] for x in self.backend.sent[0][3]}
+        self.assertEqual(got, {"7001": "张总", "7002": "仅群昵称"})
+
+    def test_empty_members_are_not_cached_and_logout_drops_inflight_roster(self):
+        self.sign_in()
+        # Transient empty response must not be cached.
+        self.backend.members["g_empty"] = []
+        self.assertEqual(self.c._chat_members_cached("g_empty", limit=100), [])
+        self.backend.members["g_empty"] = [{"id": "7010", "name": "恢复后成员", "real_name": "恢复后成员", "kind": "user"}]
+        got = self.c._chat_members_cached("g_empty", limit=100)
+        self.assertEqual([x["id"] for x in got], ["7010"])
+
+        # An in-flight chat_members fetch must not repopulate _members_cache after logout.
+        orig = self.backend.chat_members
+
+        def slow_members(chat, limit=100):
+            self.c.logout({})
+            return [{"id": "7099", "name": "旧账号成员", "real_name": "旧账号成员", "kind": "user"}]
+
+        self.backend.chat_members = slow_members
+        try:
+            self.assertEqual(self.c._chat_members_cached("g_race", limit=100), [])
+        finally:
+            self.backend.chat_members = orig
+        self.assertNotIn("g_race", self.c._members_cache)
+        self.assertEqual(self.c.store.name("7099"), "")
+
     def test_a_send_that_may_have_gone_out_is_never_repeated(self):
         self.sign_in()
         self.backend.send_result = None
@@ -409,7 +653,7 @@ class ConnectorTest(unittest.TestCase):
         self.assertNotIn("parent=", lines[4])
 
         # Inbox context keeps _line(m) clean without raw message or topic ids.
-        context = self.thing("g1")["context"]
+        context = self.thing("g1:m1")["context"]
         self.assertIn("周五开会吗", context)
         self.assertIn("我也行", context)
         self.assertNotIn("[id=", context)
@@ -1046,6 +1290,64 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(image["media"], [{"kind": "image", "key": "k"}])
         document = normalize({"msg_type_name": "FILE", "content_data": {"key": "k", "name": "a.pdf"}}, self.key)
         self.assertEqual(document["media"], [{"kind": "file", "name": "a.pdf"}])
+
+    def test_routing_topic_id_extraction(self):
+        dm = normalize({"msg_id": "10", "chat_id": "c_dm", "chat_type": 1, "root_id": "9", "scope": "chat", "anchor": ""}, self.key)
+        self.assertEqual((dm["chat_kind"], dm["topic_id"]), ("dm", ""))
+
+        reg = normalize({"msg_id": "11", "chat_id": "g1", "chat_type": 2, "root_id": "0", "scope": "chat", "anchor": ""}, self.key)
+        self.assertEqual((reg["chat_kind"], reg["topic_id"]), ("group", ""))
+
+        reply = normalize({"msg_id": "12", "chat_id": "g1", "chat_type": 2, "root_id": "11", "scope": "topic", "anchor": "11"}, self.key)
+        self.assertEqual((reply["chat_kind"], reply["topic_id"]), ("group", "11"))
+
+        topic_group_root = normalize({"msg_id": "13", "chat_id": "g_topic", "chat_type": 3, "msg_type_name": "TEXT", "root_id": "0"}, self.key)
+        self.assertEqual((topic_group_root["chat_kind"], topic_group_root["topic_id"]), ("group", "13"))
+
+        dispatched_topic_root = normalize({"msg_id": "14", "chat_id": "g_topic2", "chat_type": 2, "scope": "topic", "anchor": "14"}, self.key)
+        self.assertEqual((dispatched_topic_root["chat_kind"], dispatched_topic_root["topic_id"]), ("group", "14"))
+
+        # Synthetic defensive fallback cases: pinned LarkAgentX (97ad48e) folds threadId into anchor and does not
+        # emit a top-level thread_id key, so these verify normalize() stays safe if a future payload/fixture adds one.
+        explicit_thread = normalize({"msg_id": "15", "chat_id": "g1", "chat_type": 2, "thread_id": "omt_99", "root_id": "11"}, self.key)
+        self.assertEqual((explicit_thread["chat_kind"], explicit_thread["topic_id"]), ("group", "omt_99"))
+
+        chat_scope_zero_root = normalize(
+            {"msg_id": "16", "chat_id": "g1", "chat_type": 2, "scope": "chat", "root_id": "0", "thread_id": "omt_99"}, self.key
+        )
+        self.assertEqual((chat_scope_zero_root["chat_kind"], chat_scope_zero_root["topic_id"]), ("group", "omt_99"))
+        self.assertEqual(_channel_routing(chat_scope_zero_root), {"chat_id": "g1", "chat_kind": "topic", "topic_id": "omt_99"})
+
+        chat_scope_empty_root = normalize(
+            {"msg_id": "17", "chat_id": "g1", "chat_type": 2, "scope": "chat", "root_id": "", "thread_id": "omt_100"}, self.key
+        )
+        self.assertEqual((chat_scope_empty_root["chat_kind"], chat_scope_empty_root["topic_id"]), ("group", "omt_100"))
+        self.assertEqual(_channel_routing(chat_scope_empty_root), {"chat_id": "g1", "chat_kind": "topic", "topic_id": "omt_100"})
+
+        dm_with_thread = normalize(
+            {"msg_id": "18", "chat_id": "c_dm", "chat_type": 1, "scope": "chat", "root_id": "9", "thread_id": "omt_99"}, self.key
+        )
+        self.assertEqual((dm_with_thread["chat_kind"], dm_with_thread["topic_id"]), ("dm", ""))
+        self.assertEqual(_channel_routing(dm_with_thread), {"chat_id": "c_dm", "chat_kind": "direct"})
+
+        # Regression: chat_type=3 topic-group root still gets msg_id even when scope="chat" and no root/thread IDs.
+        topic_group_chat_scope = normalize(
+            {"msg_id": "19", "chat_id": "g_topic", "chat_type": 3, "msg_type_name": "TEXT",
+             "scope": "chat", "root_id": "0", "thread_id": ""}, self.key
+        )
+        self.assertEqual((topic_group_chat_scope["chat_kind"], topic_group_chat_scope["topic_id"]), ("group", "19"))
+        self.assertEqual(_channel_routing(topic_group_chat_scope), {"chat_id": "g_topic", "chat_kind": "topic", "topic_id": "19"})
+
+        topic_group_system = normalize(
+            {"msg_id": "20", "chat_id": "g_topic", "chat_type": 3, "msg_type_name": "SYSTEM",
+             "scope": "chat", "root_id": "0", "thread_id": ""}, self.key
+        )
+        self.assertEqual((topic_group_system["chat_kind"], topic_group_system["topic_id"]), ("group", ""))
+
+        # When agent_group_topics is off (topics=False), group/topic messages suppress chat_kind and topic_id.
+        self.assertEqual(_channel_routing(reply, topics=False), {"chat_id": "g1"})
+        self.assertEqual(_channel_routing(topic_group_chat_scope, topics=False), {"chat_id": "g_topic"})
+        self.assertEqual(_channel_routing(dm_with_thread, topics=False), {"chat_id": "c_dm", "chat_kind": "direct"})
 
 
 if __name__ == "__main__":

@@ -8,4 +8,4 @@ Household (家庭管家) keeps a home's stock, shopping list, chores and meal pl
 - [Manifest](persona-extension.json)
 - [Assistant skill](skills/household/SKILL.md)
 
-The package contains the `household` program: the 家庭管家 page and the overview card, the daily reminder, and `household mcp`, the assistant's nine tools over the same data.
+The package contains the `household` program: the 家庭管家 page and the overview card, the daily reminder, and `household mcp`, the assistant's fifteen tools over the same data, including the import from a receipt, a photo or a text (a preview first, written only after the user agrees, and undoable) and today's advice.

@@ -160,7 +160,7 @@ func TestRestoreRefusesAComputerNoLongerPicked(t *testing.T) {
 	tf.f.setSelected([]string{"m-3c4d"}) // the laptop m-1a2b is no longer picked
 
 	res, err := a.runRemoteRestore(ctx, &ext.UIRequest{}, page{}, "m-1a2b", "entry-1")
-	if err != nil || res == nil || !strings.Contains(res.Toast, "不在要检索的电脑里") {
+	if err != nil || res == nil || !strings.Contains(res.Toast, "不在要搜的电脑里") {
 		t.Fatalf("page restore: %+v %v", res, err)
 	}
 	a.restores.Wait()

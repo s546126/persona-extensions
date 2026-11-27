@@ -181,7 +181,8 @@ func TestPersistentReplayAndUnknownOutcome(t *testing.T) {
 	if len(f.uploads) != 1 {
 		t.Fatal("restart repeated note upload")
 	}
-	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: string(args), Status: "pending", StartedAt: time.Now()}})
+	keyData, _ := json.Marshal(createArgs{Path: "Notes/new-note.md", Text: "Persistent note"})
+	raw, _ := json.Marshal(map[string]writeReceipt{"persist-1": {Key: "nextcloud_create_note:" + string(keyData), Status: "pending", StartedAt: time.Now()}})
 	if err := os.WriteFile(store.path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}

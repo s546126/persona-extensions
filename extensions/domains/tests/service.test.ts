@@ -65,7 +65,56 @@ test("a request deadline aborts the fetch and carries the timeout reason", async
     });
     throw new Error("aborted response must not resolve");
   }, {}, { limits: { gap: 0, request: 5 } });
-  await assert.rejects(service.lookup("example.com"), (error: unknown) => error instanceof Error && error.name === "AbortError");
+  await assert.rejects(service.lookup("example.com"), (error: unknown) => error instanceof ReadError && error.code === "slow");
+  assert.equal(service.status().error, "The registry took too long to answer.");
+});
+
+test("timeouts fall back to stale cache, HTTP status classifies first, not_found skips status, and oversized refresh evicts cache", async () => {
+  // Timeout falls back to stale cache instead of throwing AbortError.
+  const slowFixture = new Fixture();
+  const slowService = make(slowFixture, { limits: { gap: 0, request: 20 } });
+  await slowService.lookup("example.com");
+  slowFixture.put(registryURL, registration, { delay: 500 });
+  const stale = await slowService.lookup("example.com", true);
+  assert.equal(stale.registrar, "Example Registrar");
+  assert.equal(stale.stale?.code, "slow");
+  assert.equal(slowService.status().error, "The registry took too long to answer.");
+
+  // Bodyless 404 classifies as not_found and does not pollute status().
+  const okFixture = new Fixture();
+  const okService = make(okFixture);
+  await okService.lookup("example.com");
+  const notFoundService = new Domains(async (input) => {
+    if (String(input) === bootstrapURL) return new Response(JSON.stringify(bootstrap), { status: 200 });
+    return new Response(null, { status: 404 });
+  }, {}, { now: () => okFixture.clock, monotonic: () => okFixture.clock, limits: { gap: 0 }, locale: "en" });
+  await assert.rejects(notFoundService.lookup("missing.com"), (error: unknown) => error instanceof ReadError && error.code === "not_found");
+  assert.equal(notFoundService.status().state, "ok");
+
+  // Non-UTF-8 503 body classifies as http(503) and formats {0} in status().error.
+  const badUtf8Service = new Domains(async (input) => {
+    if (String(input) === bootstrapURL) return new Response(JSON.stringify(bootstrap), { status: 200 });
+    return new Response(new Uint8Array([0xff, 0xfe]), { status: 503 });
+  }, {}, { now: () => okFixture.clock, monotonic: () => okFixture.clock, limits: { gap: 0 }, locale: "en" });
+  await assert.rejects(badUtf8Service.lookup("example.com"), (error: unknown) => error instanceof ReadError && error.code === "http" && error.status === 503);
+  assert.equal(badUtf8Service.status().error, "The registry returned HTTP 503.");
+
+  // Oversized refresh evicts old cached entry when cacheBytes is exceeded.
+  const evictFixture = new Fixture();
+  const smallSize = new TextEncoder().encode(JSON.stringify(registration)).byteLength;
+  const bootstrapSize = new TextEncoder().encode(JSON.stringify(bootstrap)).byteLength;
+  const evictService = make(evictFixture, { limits: { gap: 0, cacheBytes: bootstrapSize + smallSize + 20 } });
+  await evictService.lookup("example.com");
+  assert.equal(evictService.cacheStats().entries, 2);
+  evictFixture.put(registryURL, {
+    ...registration,
+    entities: [{ roles: ["registrar"], vcardArray: ["vcard", [["version", {}, "text", "4.0"], ["fn", {}, "text", "R".repeat(smallSize + bootstrapSize + 50)]]] }],
+  });
+  await evictService.lookup("example.com", true);
+  assert.equal(evictService.cacheStats().entries, 1);
+
+  // Unknown tool must return unknown_method even with invalid args.
+  await assert.rejects(callTool(okService, "unknown", { domain: 123 }), /unknown method/);
 });
 test("assistant lookup returns lifecycle metadata and rejects unsafe inputs", async () => {
   const service = make();

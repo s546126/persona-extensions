@@ -99,8 +99,12 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 && (os.Args[1] == "exits" || os.Args[1] == "recall") {
-		cmd := map[string]func([]string) error{"exits": exitsCmd, "recall": recallCmd}[os.Args[1]]
+	if len(os.Args) > 1 && (os.Args[1] == "exits" || os.Args[1] == "recall" || os.Args[1] == "review-bundle") {
+		cmd := map[string]func([]string) error{
+			"exits":         exitsCmd,
+			"recall":        recallCmd,
+			"review-bundle": reviewBundleCmd,
+		}[os.Args[1]]
 		if err := cmd(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "enkeep-memory "+os.Args[1]+":", err)
 			os.Exit(1)
@@ -124,6 +128,13 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := migrate(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "enkeep-memory migrate:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "migrate-v04" {
+		if err := migrateV04Cmd(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "enkeep-memory migrate-v04:", err)
 			os.Exit(1)
 		}
 		return

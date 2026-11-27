@@ -85,6 +85,7 @@ func describeAction(name string, raw json.RawMessage) (map[string]any, error) {
 
 func (a *app) doAction(ctx context.Context, requestID, name string, raw json.RawMessage) (map[string]any, error) {
 	var fn func() (string, error)
+	var keyArgs any
 	switch name {
 	case "monday_create_item":
 		var in createArgs
@@ -97,6 +98,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if _, err := a.client.board(ctx, in.BoardID); err != nil {
 			return nil, err
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			item, err := a.client.createItem(ctx, in.BoardID, in.Name)
 			if err != nil {
@@ -119,6 +121,7 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		if !statusLabelExists(board, in.ColumnID, in.Label) {
 			return nil, errors.New("label must already exist on the selected status column; no label was created")
 		}
+		keyArgs = in
 		fn = func() (string, error) {
 			if _, err := a.client.updateStatusColumn(ctx, in.BoardID, in.ItemID, in.ColumnID, in.Label); err != nil {
 				return "", err
@@ -128,8 +131,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	keyData, _ := json.Marshal(keyArgs)
+	text, err := a.receipts.commit(requestID, name+":"+string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}

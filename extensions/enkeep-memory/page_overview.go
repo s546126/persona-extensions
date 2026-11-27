@@ -17,6 +17,7 @@ const (
 	ovPerFacet  = 8 // patterns shown per facet on the subpage
 	ovReports   = 8 // reports listed
 	ovChunkMost = 1800
+	ovMaxChunks = 100 // well below CheckView's 300-component limit
 )
 
 // overviewCard is the start tab's row opening the subpage.
@@ -121,18 +122,35 @@ func (a *app) overviewPage(t tr) *wire.View {
 	return v
 }
 
-// reportPage is a report's full text, cut into parts a page carries.
+// reportPage is a report's full text, cut into schema-safe parts within CheckView limits.
 func (a *app) reportPage(t tr, open string) *wire.View {
 	kind, period, _ := strings.Cut(strings.TrimPrefix(open, "ovr:"), ":")
-	text := overview.ReportIn(a.c.St.Dir, kind, period)
-	v := &wire.View{Title: period}
-	if text == "" {
+	body := overview.ReportIn(a.c.St.Dir, kind, period)
+	v := &wire.View{Title: short(period, 120)}
+	if strings.TrimSpace(body) == "" {
 		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{empty(t.s("这份报告不见了", "This report is gone"))}})
 		return v
 	}
+	parts := chunks(body, ovChunkMost)
 	var items []wire.Component
-	for _, part := range chunks(text, ovChunkMost) {
-		items = append(items, wire.Component{Type: wire.ComponentMarkdown, Text: part})
+	for i, part := range parts {
+		if i >= ovMaxChunks {
+			remaining := 0
+			for _, rest := range parts[i:] {
+				remaining += len([]rune(rest))
+			}
+			items = append(items, secondary(t.f("报告过长，后面还有约 %d 字未显示", "Report truncated; about %d more characters omitted.", remaining)))
+			break
+		}
+		md := wire.Component{Type: wire.ComponentMarkdown, Text: part}
+		if wire.CheckView(&wire.View{Sections: []wire.Section{{Items: []wire.Component{md}}}}) == nil {
+			items = append(items, md)
+		} else if plain := strings.TrimSpace(part); plain != "" {
+			items = append(items, text(plain))
+		}
+	}
+	if len(items) == 0 {
+		items = []wire.Component{empty(t.s("这份报告不见了", "This report is gone"))}
 	}
 	v.Sections = append(v.Sections, wire.Section{Items: items})
 	return v

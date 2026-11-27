@@ -13,10 +13,22 @@ export function toolsFor(locale = "en") {
 export const tools = toolsFor();
 function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   if (exact) {
+    const trimmed = exact.raw.trim();
+    if (trimmed === "null") return {};
+    if (!trimmed.startsWith("{")) throw new ReadError("invalid");
     const args: Record<string, unknown> = {};
     for (const field of ["amount", "from", "to", "dimension"]) {
-      for (const token of exact.fieldValues(field)) {
-        const value: unknown = JSON.parse(token.raw); if (typeof value !== "string") throw new ReadError("invalid"); args[field] = value;
+      const tokens = [...exact.fieldValues(field)];
+      if (tokens.length > 1) throw new ReadError("invalid");
+      if (tokens.length === 1) {
+        const value: unknown = JSON.parse(tokens[0].raw);
+        if (value == null) continue;
+        if (field === "amount") {
+          if (typeof value !== "string" && typeof value !== "number") throw new ReadError("invalid");
+        } else if (typeof value !== "string") {
+          throw new ReadError("invalid");
+        }
+        args[field] = value;
       }
     }
     return args;
@@ -29,17 +41,18 @@ function argsFrom(raw: unknown, exact?: ExactJSON): Record<string, unknown> {
   return value;
 }
 export async function callTool(service: CurrencyService, name: string, raw: unknown = {}, signal?: AbortSignal, exact?: ExactJSON): Promise<string> {
+  if (name !== "currency_convert" && name !== "unit_convert") throw unknownMethod(`connector.tools.${name}`);
   const args = argsFrom(raw, exact), t = textsFor(service.locale), request = budget(signal, service.limits.tool);
   try {
     if (name === "currency_convert") {
       const input = amount(args.amount), rate = await service.rate(args.from, args.to, false, request.signal), result = currencyConversion(input, rate);
       return clip(`${input} ${rate.base} = ${result.result} ${rate.quote}\n${fmt(t.rateDate, { date: rate.date })}\n${t.attribution}${rate.stale ? `\n${errorText(rate.stale, service.locale)}` : ""}`, 29_999);
     }
-    if (name === "unit_convert") {
-      const result = unitConversion(args.amount, args.from, args.to, args.dimension == null ? undefined : dimension(args.dimension));
-      return `${result.amount} ${result.from} = ${result.result} ${result.to}\n${t.local}`;
-    }
-    throw unknownMethod(`connector.tools.${name}`);
+    const result = unitConversion(args.amount, args.from, args.to, args.dimension == null ? undefined : dimension(args.dimension));
+    return `${result.amount} ${result.from} = ${result.result} ${result.to}\n${t.local}`;
+  } catch (error) {
+    if (!signal?.aborted && request.signal.aborted && request.signal.reason instanceof ReadError) throw request.signal.reason;
+    throw error;
   } finally { request.dispose(); }
 }
 export function connector(getService: () => CurrencyService): Handler { return withExactParams(async (method, params: unknown, call) => {

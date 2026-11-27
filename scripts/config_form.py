@@ -13,7 +13,8 @@ import json, re
 from urllib.parse import urlsplit
 
 ROOT_KEYS = ("$schema", "type", "properties", "required", "title", "description")
-DESCRIBING = ("title", "description", "default", "x-confirm")
+LEGACY_DESCRIBING = ("title", "description", "default", "x-confirm")
+DESCRIBING = LEGACY_DESCRIBING + ("section",)
 KEYS_FOR = {
     "string": ("enum", "oneOf", "format", "x-os", "pattern", "minLength", "maxLength"),
     "integer": ("enum", "oneOf", "minimum", "maximum"),
@@ -23,6 +24,7 @@ KEYS_FOR = {
     "object": ("properties", "required"),
 }
 FORMATS = ("uri", "email", "hostname", "machine", "launcher")
+SECTIONS = ("connection", "channel", "inbox", "advanced")
 SYSTEMS = ("darwin", "linux", "windows")
 FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
 HOSTNAME = re.compile(r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
@@ -35,13 +37,13 @@ class Refused(ValueError):
     """The hub refuses the configuration; the message is where and why, as the hub says it."""
 
 
-def check(manifest):
+def check(manifest, allow_section=True):
     """Raise Refused when a hub would refuse manifest's configuration (or what refers to it)."""
-    fields = parse(manifest.get("configuration"))
+    fields = parse(manifest.get("configuration"), allow_section=allow_section)
     check_configured(manifest, fields or [])
 
 
-def parse(schema):
+def parse(schema, allow_section=True):
     """The top-level fields of a configuration schema ([] for none), each a dict with its name and rules."""
     if schema is None or schema == {}:
         return []
@@ -52,10 +54,10 @@ def parse(schema):
             raise Refused("configuration: %r is not in the subset the forms draw" % k)
     if schema.get("type") != "object":
         raise Refused('configuration: the root is {"type": "object", "properties": {…}}')
-    return _properties(schema, "", 0)
+    return _properties(schema, "", 0, allow_section=allow_section)
 
 
-def _properties(obj, at, depth):
+def _properties(obj, at, depth, allow_section=True):
     props = obj.get("properties")
     if not isinstance(props, dict):
         raise Refused("configuration: %sproperties: %s" % (at, "missing" if props is None else "an object"))
@@ -67,7 +69,7 @@ def _properties(obj, at, depth):
             raise Refused("configuration: %srequired: %r is not a property" % (at, r))
     out = []
     for name, raw in props.items():
-        f = _field(name, raw, at + name + ".", depth)
+        f = _field(name, raw, at + name + ".", depth, allow_section=allow_section)
         f["required"] = name in required
         out.append(f)
     return out
@@ -95,7 +97,7 @@ def _number(m, k, at):
     return v
 
 
-def _field(name, raw, at, depth):
+def _field(name, raw, at, depth, allow_section=True):
     if not FIELD_NAME.fullmatch(name):
         raise _fail(at, "not a usable property name")
     if not isinstance(raw, dict):
@@ -103,11 +105,12 @@ def _field(name, raw, at, depth):
     t = raw.get("type")
     if t not in KEYS_FOR:
         raise _fail(at, "type %r: string, integer, number, boolean, array or object" % (t if isinstance(t, str) else ""))
+    describing = DESCRIBING if allow_section else LEGACY_DESCRIBING
     for k in raw:
-        if k != "type" and k not in DESCRIBING and k not in KEYS_FOR[t]:
+        if k != "type" and k not in describing and k not in KEYS_FOR[t]:
             raise _fail(at, "%r is not in the subset the forms draw for a %s" % (k, t))
     f = {"name": name, "type": t}
-    for k in ("title", "description", "format", "pattern", "x-confirm"):
+    for k in ("title", "description", "format", "pattern", "x-confirm", "section"):
         if k in raw and not isinstance(raw[k], str):
             raise _fail(at, "%s: a string" % k)
     for k in ("minLength", "maxLength", "minItems", "maxItems"):
@@ -120,6 +123,9 @@ def _field(name, raw, at, depth):
     f["format"] = raw.get("format", "")
     if f["format"] and f["format"] not in FORMATS:
         raise _fail(at, "format %r: uri, email, hostname, machine or launcher" % f["format"])
+    f["section"] = raw.get("section", "")
+    if f["section"] and f["section"] not in SECTIONS:
+        raise _fail(at, "section %r: connection, channel, inbox or advanced" % f["section"])
     if "x-os" in raw:
         if f["format"] != "machine":
             raise _fail(at, "x-os: only with format machine")
@@ -152,14 +158,14 @@ def _field(name, raw, at, depth):
     if t == "array":
         if "items" not in raw:
             raise _fail(at, "items: required")
-        item = _field("items", raw["items"], at + "items.", depth + 1)
+        item = _field("items", raw["items"], at + "items.", depth + 1, allow_section=allow_section)
         if item["type"] != "string":
             raise _fail(at, "items: only strings (a list of objects is not in the subset)")
         f["items"] = item
     elif t == "object":
         if depth > 0:
             raise _fail(at, "an object only at the first level")
-        f["fields"] = _properties(raw, at, depth + 1)
+        f["fields"] = _properties(raw, at, depth + 1, allow_section=allow_section)
         for sub in f["fields"]:
             if sub["type"] == "object":
                 raise _fail(at, "an object only at the first level")

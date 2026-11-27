@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,10 @@ type pageState struct {
 
 func readState(r *ext.UIRequest) (pageState, error) {
 	var st pageState
-	if err := r.DecodeState(&st); err != nil || st.Offset < 0 || len(st.ID) > 128 || len(st.DraftID) > 128 || len([]rune(st.Query)) > maxQueryChars || len([]rune(st.Title)) > maxTitleChars || len(st.URL) > 1100 || len([]rune(st.Labels)) > maxLabelsStateChars || st.Progress < 0 || st.Progress > 100 {
+	if err := r.DecodeState(&st); err != nil || st.Offset < 0 || st.Offset > 1000000 || len(st.ID) > 128 || len(st.DraftID) > 128 || len([]rune(st.Query)) > maxQueryChars || len([]rune(st.Title)) > maxTitleChars || len(st.URL) > 1100 || len([]rune(st.Labels)) > maxLabelsStateChars || st.Progress < 0 || st.Progress > 100 {
+		return pageState{}, errors.New("invalid page state")
+	}
+	if st.View != "" && st.View != "unread" && st.View != "favorites" && st.View != "search" {
 		return pageState{}, errors.New("invalid page state")
 	}
 	return st, nil
@@ -129,29 +133,90 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	return &wire.ActionResult{View: v}, err
 }
 
-const maxViewRecords = 250
+const (
+	maxViewRecords = 250
+	maxViewPages   = 10
+)
+
+func bookmarkKey(id string) string {
+	key := "bookmark-" + id
+	if len(key) <= 128 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "bookmark-" + hex.EncodeToString(sum[:])
+}
+
+func bookmarkTitle(item bookmark) string {
+	for _, candidate := range []string{item.Title, item.URL, item.ID} {
+		if s := strings.TrimSpace(candidate); s != "" {
+			return s
+		}
+	}
+	return "Bookmark"
+}
+
+func clipLabelsField(raw string, limit int) string {
+	if len([]rune(raw)) <= limit {
+		return raw
+	}
+	labels := splitLabels(raw)
+	var kept []string
+	total := 0
+	for _, label := range labels {
+		n := len([]rune(label))
+		sep := 0
+		if len(kept) > 0 {
+			sep = 2
+		}
+		if total+sep+n > limit {
+			break
+		}
+		kept = append(kept, label)
+		total += sep + n
+	}
+	if len(kept) > 0 {
+		return strings.Join(kept, ", ")
+	}
+	return clipText(raw, limit)
+}
 
 // collectBookmarks reads the batches from the start through the one at offset, following Readeck's next links, so that
 // Load more answers the whole list, longer. It stops at maxViewRecords to keep the view within the SDK's component
 // limit, and HasMore (with NextPage) reports whether another batch can be loaded.
 func (a *app) collectBookmarks(ctx context.Context, view, query string, offset int) (bookmarkPage, error) {
 	var out bookmarkPage
-	for pos := 0; len(out.Items) < maxViewRecords; {
+	seenIDs := map[string]bool{}
+	seenOffsets := map[int]bool{}
+	pages := 0
+	for pos := 0; len(out.Items) < maxViewRecords && pages < maxViewPages; {
+		if seenOffsets[pos] {
+			out.HasMore = false
+			break
+		}
+		seenOffsets[pos] = true
+		pages++
 		batch, err := a.client.bookmarks(ctx, view, query, pos)
 		if err != nil {
 			return bookmarkPage{}, err
 		}
-		out.Items = append(out.Items, batch.Items...)
+		for _, item := range batch.Items {
+			if !validBookmarkID(item.ID) || item.Title == "" || item.IsDeleted || seenIDs[item.ID] {
+				continue
+			}
+			seenIDs[item.ID] = true
+			out.Items = append(out.Items, item)
+			if len(out.Items) >= maxViewRecords {
+				break
+			}
+		}
 		out.Total, out.HasMore, out.NextPage = batch.Total, batch.HasMore, batch.NextPage
 		if !batch.HasMore || pos >= offset {
 			break
 		}
 		pos = batch.NextPage
 	}
-	if len(out.Items) > maxViewRecords {
-		out.Items = out.Items[:maxViewRecords]
-	}
-	if len(out.Items) >= maxViewRecords {
+	if len(out.Items) >= maxViewRecords || pages >= maxViewPages || seenOffsets[out.NextPage] {
 		out.HasMore = false
 	}
 	return out, nil
@@ -194,13 +259,24 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	if st.View == "" {
 		st.View = "unread"
 	}
-	page, err := a.collectBookmarks(ctx, st.View, st.Query, st.Offset)
-	a.record(err)
-	if err != nil {
-		return nil, err
+	if st.View != "unread" && st.View != "favorites" && st.View != "search" {
+		return nil, errors.New("invalid reading view")
+	}
+	var page bookmarkPage
+	if st.View != "search" || strings.TrimSpace(st.Query) != "" {
+		var err error
+		page, err = a.collectBookmarks(ctx, st.View, st.Query, st.Offset)
+		a.record(err)
+		if err != nil {
+			return nil, err
+		}
+	}
+	filterValue := st.View
+	if filterValue == "search" {
+		filterValue = "unread"
 	}
 	v := &wire.View{Title: t.reading, State: ext.EncodeState(st), Search: &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}, Filter: &wire.Filter{
-		Name: "view", Title: t.reading, Value: st.View, Action: wire.Action{ID: "view"},
+		Name: "view", Title: t.reading, Value: filterValue, Action: wire.Action{ID: "view"},
 		Choices: []wire.Choice{{Value: "unread", Title: t.unread}, {Value: "favorites", Title: t.favorites}},
 	}}
 	section := wire.Section{Title: t.results}
@@ -208,7 +284,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		if !validBookmarkID(item.ID) || item.Title == "" || item.IsDeleted {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "bookmark-" + item.ID, Title: clipText(item.Title, 1800), Subtitle: clipText(fmt.Sprintf("%s · %d%% · %s", item.SiteName, item.ReadProgress, strings.Join(item.Labels, ", ")), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: bookmarkKey(item.ID), Title: clipText(item.Title, 1800), Subtitle: clipText(fmt.Sprintf("%s · %d%% · %s", item.SiteName, item.ReadProgress, strings.Join(item.Labels, ", ")), 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 	}
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noBookmarks})
@@ -243,7 +319,7 @@ func saveView(r *ext.UIRequest, st pageState) *wire.View {
 	return &wire.View{Title: t.save, State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.save, Items: []wire.Component{
 		{Type: wire.ComponentField, Kind: "text", Name: "url", Label: t.url, Value: st.URL},
 		{Type: wire.ComponentField, Kind: "text", Name: "title", Label: t.title, Value: st.Title},
-		{Type: wire.ComponentField, Kind: "text", Name: "labels", Label: t.labels, Value: st.Labels},
+		{Type: wire.ComponentField, Kind: "text", Name: "labels", Label: t.labels, Value: clipLabelsField(st.Labels, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "review-save", Submit: true}},
 	}}}}
 }
@@ -260,7 +336,7 @@ func detailView(r *ext.UIRequest, st pageState, item bookmark, article string, h
 		wire.Component{Type: wire.ComponentButton, Title: t.review, Action: &wire.Action{ID: "update", Submit: true}},
 		wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	)
-	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
+	v := &wire.View{Title: clipText(bookmarkTitle(item), 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
 	used := len(items)
 	if article != "" {
 		body := capComponents(textComponents(clipText(article, 30000)), maxArticleItems)

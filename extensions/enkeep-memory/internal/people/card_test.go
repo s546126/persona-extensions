@@ -239,3 +239,42 @@ func TestMergedGroupCard(t *testing.T) {
 		t.Fatalf("merged group listed once: %+v", l)
 	}
 }
+
+func TestCardFiltersEphemeralHRNoiseAndConsumesGraphMerges(t *testing.T) {
+	in := cardFixture()
+	in.Contacts["person:p1"].Name = "person:陈明"
+	in.Contacts["person:p2"] = &entry.Contact{Person: "person:p2", Name: "明", Ties: map[string]int{TieGroup: 2}, Score: 2}
+	in.Contacts["person:hr"] = &entry.Contact{Person: "person:hr", Name: "HR", Ties: map[string]int{TieDM: 2}, Score: 6}
+	in.GraphMerges = []entry.PersonMerge{{ID: "graph:n-p-1", Persons: []string{"person:p1", "person:p2"}, Name: "陈明"}}
+	in.Entries["ep-call"] = &entry.Entry{
+		ID: "ep-call", Facet: entry.People, Grain: entry.Class, Person: "person:p1", Part: entry.PartFact,
+		Text: "约 11-24 17:30 call 对齐发布", Count: 1, First: "2026-11-24", Last: "2026-11-24",
+	}
+	in.Entries["hr-noise"] = &entry.Entry{
+		ID: "hr-noise", Facet: entry.People, Grain: entry.Class, Person: "person:p1", Part: entry.PartFact,
+		Text: "和 HR 沟通了招聘进度和简历筛选", Count: 1, First: "2026-11-20", Last: "2026-11-20",
+	}
+	in.Entries["p2-fact"] = &entry.Entry{
+		ID: "p2-fact", Facet: entry.People, Grain: entry.Class, Person: "person:p2", Part: entry.PartFact, Type: "role",
+		Text: "负责 Alpha 核心服务架构", Count: 2, First: "2026-11-01", Last: "2026-11-15",
+	}
+
+	c := BuildCard(in, "person:p2")
+	if c.Name != "陈明" {
+		t.Errorf("canonical name = %q, want 陈明", c.Name)
+	}
+	if line(c, "ep-call") != nil {
+		t.Error("ephemeral call schedule should be filtered from durable card")
+	}
+	if line(c, "hr-noise") != nil {
+		t.Error("generic HR chatter should be filtered from durable card")
+	}
+	if line(c, "p2-fact") == nil || line(c, "c1") == nil {
+		t.Errorf("durable facts from merged graph entities should be combined: %+v", c.Parts[SecFacts])
+	}
+	// Generic "HR" contact is filtered from Ranked and List; merged p1+p2 appears once.
+	list := List(in)
+	if len(list) != 1 || list[0].Name != "陈明" {
+		t.Fatalf("List should exclude generic HR and merge p1+p2 once: %+v", list)
+	}
+}

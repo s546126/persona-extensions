@@ -109,6 +109,10 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		for _, item := range items {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(item.Title+" · "+item.ID, 1800)})
 		}
+		if len(section.Items) > maxViewSubscriptions {
+			section.Items = section.Items[:maxViewSubscriptions]
+			section.Items[maxViewSubscriptions-1].Text = clipText(section.Items[maxViewSubscriptions-1].Text, 1700) + " […]"
+		}
 		if len(section.Items) == 0 {
 			section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noSubscriptions})
 		}
@@ -128,10 +132,12 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	st.Continuation = next
 	v := &wire.View{Title: t.reading, State: ext.EncodeState(st), Filter: &wire.Filter{Name: "view", Title: t.reading, Value: st.View, Action: wire.Action{ID: "view"}, Choices: []wire.Choice{{Value: "unread", Title: t.unread}, {Value: "starred", Title: t.starred}}}}
 	section := wire.Section{Title: t.articles}
+	seen := make(map[string]bool, len(items))
 	for _, item := range items {
-		if !validItemID(item.ID) || item.Title == "" {
+		if !validItemID(item.ID) || item.Title == "" || seen[item.ID] {
 			continue
 		}
+		seen[item.ID] = true
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "article-" + item.ID, Title: clipText(item.Title, 1800), Subtitle: clipText(item.Origin.Title+" · "+item.Author, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"id": item.ID}}})
 	}
 	if len(section.Items) == 0 {
@@ -145,8 +151,9 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 }
 
 const (
-	maxViewArticles = 250
-	maxViewPages    = 10
+	maxViewArticles      = 250
+	maxViewSubscriptions = 250
+	maxViewPages         = 10
 )
 
 // collectArticles reads the pages the view shows: the first, then the ones pages names by their continuation, so that
@@ -155,6 +162,7 @@ const (
 // while another page can be loaded.
 func (a *app) collectArticles(ctx context.Context, view string, pages []string) ([]article, string, error) {
 	var out []article
+	seen := map[string]bool{}
 	next := ""
 	for _, continuation := range append([]string{""}, pages...) {
 		if len(out) >= maxViewArticles {
@@ -164,7 +172,15 @@ func (a *app) collectArticles(ctx context.Context, view string, pages []string) 
 		if err != nil {
 			return nil, "", err
 		}
-		out = append(out, batch.Items...)
+		for _, item := range batch.Items {
+			if item.ID != "" && seen[item.ID] {
+				continue
+			}
+			if item.ID != "" {
+				seen[item.ID] = true
+			}
+			out = append(out, item)
+		}
 		next = batch.Continuation
 	}
 	if len(out) > maxViewArticles {
@@ -189,7 +205,7 @@ func detailView(r *ext.UIRequest, st pageState, item article) *wire.View {
 		}
 	}
 	if !read {
-		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.markRead, Action: &wire.Action{ID: "read", Confirm: t.markRead + "\n" + item.Title}})
+		items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.markRead, Action: &wire.Action{ID: "read", Confirm: t.markRead + "\n" + clipText(item.Title, 1800)}})
 	}
 	items = append(items, wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}})
 	v := &wire.View{Title: clipText(item.Title, 1800), State: ext.EncodeState(st), Sections: []wire.Section{{Title: t.reading, Items: items}}}
