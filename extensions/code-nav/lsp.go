@@ -111,6 +111,30 @@ type openDoc struct {
 const maxOpen = 64
 
 // startLSP starts bin in root and runs initialize. env is the program's environment (PATH, HOME, GOPATH...).
+// readOnlySettings are the settings that keep servers from writing into a repository or running its code: no
+// build scripts, proc macros or check on save for rust-analyzer (they run cargo, build.rs and write target/), no
+// background index for sourcekit-lsp (it builds into .build/), no type acquisition for typescript-language-server.
+// They go with initialize and answer the server's workspace/configuration under their section.
+var readOnlySettings = map[string]any{
+	"rust-analyzer": map[string]any{
+		"cargo":        map[string]any{"buildScripts": map[string]any{"enable": false}, "autoreload": false},
+		"procMacro":    map[string]any{"enable": false},
+		"checkOnSave":  false,
+		"cachePriming": map[string]any{"enable": false},
+	},
+	"sourcekit-lsp":              map[string]any{"backgroundIndexing": false},
+	"typescript-language-server": map[string]any{"disableAutomaticTypingAcquisition": true},
+}
+
+// initOptions are a server's initializationOptions, by its program's name.
+func initOptions(bin string) any {
+	name := filepath.Base(bin)
+	if name == "sourcekit-lsp" {
+		return map[string]any{"backgroundIndexing": false}
+	}
+	return readOnlySettings[name]
+}
+
 func startLSP(ctx context.Context, bin string, args []string, root string, env []string) (*lspServer, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = root
@@ -141,10 +165,11 @@ func startLSP(ctx context.Context, bin string, args []string, root string, env [
 
 	uri := fileURI(root)
 	init := map[string]any{
-		"processId":        os.Getpid(),
-		"rootUri":          uri,
-		"workspaceFolders": []map[string]string{{"uri": uri, "name": filepath.Base(root)}},
-		"clientInfo":       map[string]string{"name": "persona-code-nav"},
+		"processId":             os.Getpid(),
+		"rootUri":               uri,
+		"workspaceFolders":      []map[string]string{{"uri": uri, "name": filepath.Base(root)}},
+		"clientInfo":            map[string]string{"name": "persona-code-nav"},
+		"initializationOptions": initOptions(bin),
 		"capabilities": map[string]any{
 			"general": map[string]any{"positionEncodings": []string{"utf-8", "utf-16"}},
 			"textDocument": map[string]any{
@@ -219,10 +244,16 @@ func (s *lspServer) read(r *bufio.Reader) {
 			var result any
 			if msg.Method == "workspace/configuration" {
 				var p struct {
-					Items []json.RawMessage `json:"items"`
+					Items []struct {
+						Section string `json:"section"`
+					} `json:"items"`
 				}
 				_ = json.Unmarshal(msg.Params, &p)
-				result = make([]any, len(p.Items))
+				answers := make([]any, len(p.Items))
+				for i, it := range p.Items {
+					answers[i] = readOnlySettings[it.Section]
+				}
+				result = answers
 			}
 			_ = s.write(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": result})
 		case msg.Method != "": // a notification

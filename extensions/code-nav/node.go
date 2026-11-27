@@ -65,6 +65,7 @@ type node struct {
 	home    string
 	env     []string
 	repos   []repo
+	found   []string // languages whose server was found, with the repositories
 	reposAt time.Time
 	extra   []string // read-only folders definitions may lead to: GOROOT, the module cache
 	lists   map[string]fileList
@@ -313,14 +314,14 @@ func (n *node) reposResult() reposResult {
 	if n.repos == nil || time.Since(n.reposAt) > reposFresh {
 		n.repos = findRepos(n.cfg.Roots, n.home)
 		n.reposAt = time.Now()
-	}
-	var found []string
-	for _, l := range languages {
-		if _, ok := n.serverLocked(l); ok {
-			found = append(found, l.name)
+		n.found = nil
+		for _, l := range languages {
+			if _, ok := n.serverLocked(l); ok {
+				n.found = append(n.found, l.name)
+			}
 		}
 	}
-	return reposResult{Repos: append([]repo(nil), n.repos...), Roots: n.cfg.Roots, Lsp: found}
+	return reposResult{Repos: append([]repo(nil), n.repos...), Roots: n.cfg.Roots, Lsp: append([]string(nil), n.found...)}
 }
 
 // repoAt is the configured repository at path (as nav.repos gave it), never anything else.
@@ -337,9 +338,15 @@ func (n *node) repoAt(path string) (repo, error) {
 func findRepos(roots []string, home string) []repo {
 	var out []repo
 	seen := map[string]bool{}
+	realHome, _ := filepath.EvalSymlinks(home)
 	add := func(p string) {
 		real, err := filepath.EvalSymlinks(p)
 		if err != nil || seen[real] || len(out) >= maxRepos {
+			return
+		}
+		// the home folder, or a folder holding it, is never one repository (a stray package.json in ~ would open
+		// everything in it)
+		if real == "/" || realHome != "" && within(realHome, real) {
 			return
 		}
 		seen[real] = true
@@ -528,7 +535,12 @@ func secretPath(path, home string) bool {
 	case "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk":
 		return true
 	}
-	if base == ".env" || (strings.HasPrefix(base, ".env.") && !strings.HasSuffix(base, ".example") && !strings.HasSuffix(base, ".sample") && !strings.HasSuffix(base, ".template")) {
+	// .env, .env.local, .env-prod, .envrc...: all but the templates
+	if strings.HasPrefix(base, ".env") && !strings.HasSuffix(base, ".example") && !strings.HasSuffix(base, ".sample") && !strings.HasSuffix(base, ".template") {
+		return true
+	}
+	switch base { // credential files, wherever they are
+	case ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".pgpass", ".htpasswd", "credentials.toml", ".dockercfg":
 		return true
 	}
 	for _, ext := range []string{".pem", ".key", ".p12", ".pfx", ".p8", ".keystore", ".jks"} {
@@ -666,6 +678,10 @@ func (n *node) server(ctx context.Context, repoPath, path string) (*lspServer, l
 	defer slot.mu.Unlock()
 	if slot.srv != nil && slot.srv.alive() {
 		return slot.srv, lang, nil
+	}
+	if slot.srv != nil { // dead: its process group goes before a new one starts
+		slot.srv.kill()
+		slot.srv = nil
 	}
 	if slot.err != nil && time.Since(slot.at) < retryStart {
 		return nil, lang, slot.err
@@ -810,6 +826,9 @@ func (n *node) toLocation(l lspLocation, encoding string, cache map[string][]str
 		lines, _, _ = fileLines(real)
 		cache[real] = lines
 	}
+	if l.Range.Start.Line < 0 || l.Range.Start.Character < 0 {
+		return location{}, false
+	}
 	loc := location{Path: real, Rel: rel, Line: l.Range.Start.Line + 1, Col: l.Range.Start.Character + 1}
 	if l.Range.Start.Line < len(lines) {
 		text := lines[l.Range.Start.Line]
@@ -844,6 +863,9 @@ func (n *node) symbols(ctx context.Context, p navParams) (symbolsResult, error) 
 			r := s.SelectionRange
 			if s.Location != nil {
 				r = s.Location.Range
+			}
+			if r.Start.Line < 0 || r.Start.Character < 0 {
+				continue
 			}
 			sym := symbol{Name: s.Name, Kind: s.Kind, Detail: cutRunes(s.Detail, 200), Container: s.ContainerName, Line: r.Start.Line + 1, Depth: depth}
 			if r.Start.Line < len(lines) {
@@ -882,6 +904,7 @@ func (n *node) search(ctx context.Context, p navParams) (symbolsResult, error) {
 			return symbolsResult{}, err
 		}
 		srv = s
+		n.openOne(ctx, r, s, l)
 		break
 	}
 	if srv == nil {
@@ -906,6 +929,26 @@ func (n *node) search(ctx context.Context, p navParams) (symbolsResult, error) {
 		out = append(out, symbol{Name: s.Name, Kind: s.Kind, Container: s.ContainerName, Path: loc.Path, Rel: loc.Rel, Line: loc.Line, Col: loc.Col})
 	}
 	return symbolsResult{Symbols: out}, nil
+}
+
+// openOne tells a server about one of the repository's files of its language before a workspace search: some servers
+// (TypeScript's) know no project until a file of it is open.
+func (n *node) openOne(ctx context.Context, r repo, srv *lspServer, l language) {
+	files, _ := n.list(ctx, r)
+	for _, f := range files {
+		if fl, ok := languageOf(f); !ok || fl.servers[0].bin != l.servers[0].bin || grepSkipped(f) {
+			continue
+		}
+		real, _, _, err := n.allowed(filepath.Join(r.Path, filepath.FromSlash(f)))
+		if err != nil {
+			continue
+		}
+		if _, text, err := fileLines(real); err == nil {
+			fl, _ := languageOf(real)
+			_ = srv.open(real, fl.id, text)
+		}
+		return
+	}
 }
 
 // wordAt is the identifier at col (1-based, characters) on line, for titles ("Definition of Foo").
@@ -953,7 +996,7 @@ var (
 	pylspCmd   = serverCmd{bin: "pylsp"}
 	rustCmd    = serverCmd{bin: "rust-analyzer"}
 	swiftCmd   = serverCmd{bin: "sourcekit-lsp"}
-	clangdCmd  = serverCmd{bin: "clangd"}
+	clangdCmd  = serverCmd{bin: "clangd", args: []string{"--background-index=false"}}
 )
 
 // languages are found by a file's ending. Go, TypeScript and JavaScript, Python, Rust and Swift are the ones the page
@@ -972,6 +1015,11 @@ var languages = []language{
 func languageOf(path string) (language, bool) {
 	ext := strings.ToLower(filepath.Ext(path))
 	for _, l := range languages {
+		// JSX is a language of its own to the TypeScript server
+		if ext == ".tsx" && l.name == "typescript" || ext == ".jsx" && l.name == "javascript" {
+			l.id += "react"
+			return l, true
+		}
 		for _, e := range l.exts {
 			if e == ext {
 				return l, true
