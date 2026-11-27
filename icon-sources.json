@@ -1236,6 +1236,17 @@
       "height": 1024,
       "trademark_owner": "Persona / nwverse",
       "usage": "Official Persona app branding for this Persona-native tool or pack, not the logo of an external data provider."
+    },
+    "english-by-default": {
+      "path": "assets/icon.png",
+      "source_id": "persona",
+      "source_url": "https://raw.githubusercontent.com/nwverse/persona/ba975136899181a7f79b771cfe0d508f088dbaf9/apple/Persona/Resources/Assets.xcassets/AppIcon.appiconset/icon.png",
+      "sha256": "75e0d3f981f537db57000b7f6f1fa203f5dc0cf0305f6a7f1f1ec1b092fd031a",
+      "format": "png",
+      "width": 1024,
+      "height": 1024,
+      "trademark_owner": "Persona / nwverse",
+      "usage": "Official Persona app branding for this Persona-native tool or pack, not the logo of an external data provider."
     }
   }
 }
