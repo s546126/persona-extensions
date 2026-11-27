@@ -315,6 +315,11 @@ func (a *hubApp) file(t text, r *ext.UIRequest, s *state, nc func(string, any, a
 	if s.L >= rd.From && s.L < rd.From+strings.Count(rd.Text, "\n")+1 {
 		c.Highlight = &wire.LineRange{Start: s.L, End: s.L}
 	}
+	if _, ok := languageOf(s.P); ok && r.UIVersion >= 13 {
+		// UI version 13: the app follows a name in the code itself (⌘-click, ⌘B, ⌥F7, ⌘[) and calls "nav" with where.
+		// Older apps get the outline, usages and search, which offer the same.
+		c.Navigate = &wire.Action{ID: "nav"}
+	}
 	if rd.More {
 		c.Truncated = true
 		c.Load = &wire.Action{ID: "more", Values: map[string]string{"from": strconv.Itoa(rd.From + strings.Count(rd.Text, "\n") + 1)}}

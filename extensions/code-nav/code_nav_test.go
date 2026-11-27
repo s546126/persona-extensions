@@ -139,9 +139,10 @@ func TestThePageOnARepository(t *testing.T) {
 		return json.Unmarshal(b, out)
 	}}
 	ctx := context.Background()
+	uiVersion := 13
 	req := func(st string, action string, values map[string]string) *ext.UIRequest {
 		r := &ext.UIRequest{}
-		r.Contribution, r.Size, r.UIVersion, r.Locale, r.State, r.Action, r.Values = codeUI, wire.SizeFull, 12, "zh-Hans", st, action, values
+		r.Contribution, r.Size, r.UIVersion, r.Locale, r.State, r.Action, r.Values = codeUI, wire.SizeFull, uiVersion, "zh-Hans", st, action, values
 		return r
 	}
 	check := func(v *wire.View) string {
@@ -179,6 +180,17 @@ func TestThePageOnARepository(t *testing.T) {
 	raw := check(v)
 	if !strings.Contains(raw, `"path":"main.go"`) || !strings.Contains(raw, "util.Greet") {
 		t.Fatalf("main.go: %s", raw)
+	}
+	if !strings.Contains(raw, `"navigate":{"id":"nav"}`) {
+		t.Fatalf("a Go file's code follows names at UI version 13: %s", raw)
+	}
+	uiVersion = 12
+	if raw := check(act(v, "open", map[string]string{"path": "main.go"})); strings.Contains(raw, `"navigate"`) {
+		t.Fatalf("no navigate below UI version 13: %s", raw)
+	}
+	uiVersion = 13
+	if raw := check(act(v, "open", map[string]string{"path": "README.md"})); strings.Contains(raw, `"navigate"`) {
+		t.Fatalf("no navigate where no language server reads the file: %s", raw)
 	}
 
 	if _, err := exec.LookPath(goplsPath()); err != nil {

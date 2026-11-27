@@ -23,7 +23,7 @@ Other languages are found when their server is installed (`typescript-language-s
 | Symbol search | Symbols of the whole repository by name, through the language server's workspace search. |
 | Back | Each jump remembers where you were; **← 后退** returns there (the last 30 places). |
 
-Go to definition from inside the code (⌘B or ⌘-click on a Mac, Ctrl+B or Ctrl-click elsewhere; Alt+F7 for usages) needs a Persona app that can report which name in the code was chosen. Until then, the outline, the usages list and the symbol search do the same job. A definition in Go's standard library or a module dependency opens read-only, outside the repository.
+In the web app, a Go file's code follows names itself: ⌘-click or ⌘B on a Mac (Ctrl-click or Ctrl+B elsewhere) goes to the definition, ⌥F7 (Alt+F7) lists the usages and ⌘[ (Ctrl+Alt+← elsewhere) goes back. This needs a Persona hub and app with extension UI version 13; the iPhone, Mac and Android apps don't draw it yet, and there the outline, the usages list and the symbol search do the same job. A definition in Go's standard library or a module dependency opens read-only, outside the repository.
 
 ## What the program reads
 
