@@ -218,7 +218,7 @@ class PayloadTests(CatalogFixture, unittest.TestCase):
         self.entry["downloads"] = 100
         self.body["extensions"] = [self.entry, low]
         inventory = [catalog.entry_inventory(low), catalog.entry_inventory(self.entry)]
-        predecessor = b"synthetic predecessor"
+        predecessor = catalog.encode(self.body)
         generation = {"source_commit": "1" * 40, "source_inventory_hash": catalog.inventory_hash(inventory),
                       "base_catalog_hash": catalog.payload_hash(predecessor), "mode": "versions"}
         with mock.patch.object(index, "git"), mock.patch.object(index, "tree_inventory", return_value=inventory), \

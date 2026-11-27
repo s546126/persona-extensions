@@ -156,8 +156,7 @@ def _assert_pre_section_strict_schema(schema):
 
 
 class PreSectionHubCompatibilityTests(unittest.TestCase):
-    """Packaged larkx manifests and its catalog entry must pass the pre-#14833 strict configuration schema so
-    hubs built before section support can still list, install, and upgrade larkx."""
+    """Check the published LarkX compatibility manifest and both names of the current package manifest."""
 
     def test_larkx_package_and_catalog_entry_pass_pre_section_strict_schema(self):
         tmp = pathlib.Path(tempfile.mkdtemp())
@@ -176,24 +175,21 @@ class PreSectionHubCompatibilityTests(unittest.TestCase):
             ext_manifest = json.loads(t.extractfile('larkx/persona-extension.json').read().decode('utf-8'))
             legacy_manifest = json.loads(t.extractfile('larkx/persona-plugin.json').read().decode('utf-8'))
 
-        # Packaged manifests and catalog entry stay identical and do not raise engines.persona.
         self.assertEqual(ext_manifest, catalog_manifest)
         self.assertEqual(legacy_manifest, ext_manifest)
-        self.assertNotIn('persona', ext_manifest.get('engines', {}))
+        _, market = catalog.verified()
+        previous = next(entry for entry in market['extensions'] if entry['manifest']['id'] == 'larkx')
+        catalog.check_source_release(ext_manifest, previous)
 
-        # Every published manifest copy must pass the pre-#14833 strict schema (allow_section=False).
-        for label, item in (
-            ('persona-extension.json', ext_manifest),
-            ('persona-plugin.json', legacy_manifest),
-            ('catalog entry', catalog_manifest),
-        ):
+        compatibility = [previous['manifest']]
+        if not catalog.needs_fallback(ext_manifest, previous):
+            compatibility.extend((ext_manifest, legacy_manifest))
+        for item in compatibility:
             config_form.check(item, allow_section=False)
             _assert_pre_section_strict_schema(item['configuration'])
-            for prop_name, prop in item['configuration']['properties'].items():
-                self.assertNotIn('section', prop, '%s: %s' % (label, prop_name))
 
         # Sanity check: injecting section into a copy is caught by both pre-section checks.
-        with_section = json.loads(json.dumps(ext_manifest))
+        with_section = json.loads(json.dumps(previous['manifest']))
         with_section['configuration']['properties']['region']['section'] = 'connection'
         config_form.check(with_section)
         with self.assertRaises(config_form.Refused):

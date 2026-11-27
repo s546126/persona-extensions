@@ -87,6 +87,9 @@ type app struct {
 	refreshing bool
 
 	previews sync.Map // source -> *preview, the page's last previews
+
+	doneMu sync.Mutex
+	done   map[string]*actionReceipt
 }
 
 func newApp(logf func(string, ...any)) *app {
@@ -95,7 +98,8 @@ func newApp(logf func(string, ...any)) *app {
 	}
 	base, _ := parseInstance("")
 	return &app{logf: logf, client: newClient(), now: time.Now, getenv: os.Getenv,
-		inst: instance{base: base}, every: defaultRefresh * time.Minute, store: openStore("", logf)}
+		inst: instance{base: base}, every: defaultRefresh * time.Minute, store: openStore("", logf),
+		done: map[string]*actionReceipt{}}
 }
 
 func main() {

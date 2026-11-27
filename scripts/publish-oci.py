@@ -323,20 +323,26 @@ def source_inventory():
 def desired_entries(body, mode):
     if mode == "bootstrap":
         # Do not derive already published versions from a new build or from the former repository.
-        if len(body["extensions"]) != 14 or any(len(e["packages"]) != 1 or catalog.package_platform(e["packages"][0]) != "any"
-                                                for e in body["extensions"]):
+        if len(body["extensions"]) != catalog.BOOTSTRAP_ENTRY_COUNT or any(
+                "releases" in e or len(e["packages"]) != 1 or catalog.package_platform(e["packages"][0]) != "any"
+                for e in body["extensions"]):
             raise ValueError("bootstrap expects the frozen 14 any-platform packages")
         return copy.deepcopy(body["extensions"])
     prior = {e["manifest"]["id"]: e for e in body["extensions"]}
     result = []
     for owned in source_inventory():
         m = owned["manifest"]
-        old = prior.get(m["id"])
-        if old and old["manifest"]["version"] == m["version"]:
-            if old["manifest"] != m:
+        previous = prior.get(m["id"])
+        catalog.check_source_release(m, previous)
+        old = catalog.current_release(previous) if previous else None
+        if old is not None and old["manifest"]["version"] == m["version"]:
+            if catalog.canonical_json(old["manifest"]) != catalog.canonical_json(m):
                 raise ValueError("same-version manifest changed; bump version before publishing")
-            if catalog.entry_inventory(old) != owned:
-                result.append(dict(copy.deepcopy(owned), packages=copy.deepcopy(old["packages"])))
+            if catalog.entry_inventory(previous) != owned or len(previous.get("releases", ())) > 1:
+                update = dict(copy.deepcopy(owned), packages=copy.deepcopy(old["packages"]))
+                if "l10n" in old:
+                    update["l10n"] = copy.deepcopy(old["l10n"])
+                result.append(update)
             continue
         result.append(dict(owned, packages=[]))
     if result and any(not p["url"].startswith("oci:") for e in body["extensions"] for p in e["packages"]):
@@ -428,8 +434,11 @@ def validate_plan(plan, original, body, head_sha):
     if len(entries) != len(expected):
         raise ValueError("plan is incomplete")
     for actual, wanted in zip(entries, expected):
-        if set(actual) != set(wanted) or catalog.entry_inventory(actual) != catalog.entry_inventory(wanted):
+        if (set(actual) != set(wanted) or catalog.canonical_json(catalog.entry_inventory(actual)) !=
+                catalog.canonical_json(catalog.entry_inventory(wanted))):
             raise ValueError("plan manifest, tags or replaces differ from trusted checkout")
+        if actual.get("l10n") != wanted.get("l10n"):
+            raise ValueError("plan translations differ from the signed catalog")
         if plan["mode"] == "bootstrap":
             if len(actual["packages"]) != len(wanted["packages"]):
                 raise ValueError("bootstrap package count changed")
@@ -441,11 +450,35 @@ def validate_plan(plan, original, body, head_sha):
                 raise ValueError("tags-only update must retain immutable package descriptors")
         elif len(actual["packages"]) != 1 or set(actual["packages"][0]) != {"url", "sha256", "size"}:
             raise ValueError("new versions must have one any-platform archive")
-    validation = dict(body, extensions=entries)
-    # A package plan is not yet the complete ranked metadata snapshot.
-    validation.pop("downloads_updated_at", None)
-    catalog.validate_payload(validation)
     return entries
+
+
+def published_entry(current, previous):
+    entry = copy.deepcopy(current)
+    if catalog.needs_fallback(entry["manifest"], previous):
+        release = catalog.release_fields(entry)
+        for key in release:
+            del entry[key]
+        entry.update(copy.deepcopy(catalog.release_fields(previous)), releases=[release])
+    return entry
+
+
+def verify_entry_packages(entry, registry_factory, strict=False):
+    extension_id = entry["manifest"]["id"]
+    registry = registry_factory(oci.repository(extension_id))
+    current = catalog.current_release(entry)
+    for release in (entry, *entry.get("releases", ())):
+        # A historical archive cannot be checked against an icon from today's source tree.
+        archive_entry = catalog.release_fields(release)
+        if release is current and "icon" in entry:
+            archive_entry["icon"] = entry["icon"]
+        for package in release["packages"]:
+            if not package["url"].startswith("oci:"):
+                raise ValueError("bootstrap must finish before verifying an OCI catalog")
+            platform = catalog.package_platform(package)
+            oci.verify_package(registry, extension_id, release["manifest"]["version"], package,
+                               archive_validator=lambda data: check_entry_archive(
+                                   data, archive_entry, strict and release is current, platform))
 
 
 def unchanged_catalog(plan, catalog_path, head_sha, registry_factory=oci.Registry):
@@ -456,35 +489,24 @@ def unchanged_catalog(plan, catalog_path, head_sha, registry_factory=oci.Registr
     if entries or plan["removed_ids"]:
         raise ValueError("unchanged catalog requires an empty version plan")
     for entry in body["extensions"]:
-        m = entry["manifest"]
-        registry = registry_factory(oci.repository(m["id"]))
-        for package in entry["packages"]:
-            if not package["url"].startswith("oci:"):
-                raise ValueError("a current catalog must contain OCI references")
-            oci.verify_package(registry, m["id"], m["version"], package,
-                               archive_validator=lambda data: check_entry_archive(data, entry, platform=catalog.package_platform(package)))
+        verify_entry_packages(entry, registry_factory)
     return envelope
 
 
 def generate_payload(plan, catalog_path, head_sha, registry_factory=oci.Registry, metadata=None):
     original, body = catalog.verified(catalog_path)
     entries = validate_plan(plan, original, body, head_sha)
-    # Construct clients with NO credentials. Do not reuse the publisher's authenticated clients/tokens.
-    for entry in entries:
-        m = entry["manifest"]
-        registry = registry_factory(oci.repository(m["id"]))
-        for package in entry["packages"]:
-            strict = plan["mode"] == "versions" and not next(
-                (old["manifest"]["version"] == m["version"] for old in body["extensions"] if old["manifest"]["id"] == m["id"]), False)
-            oci.verify_package(registry, m["id"], m["version"], package,
-                               archive_validator=lambda data: check_entry_archive(data, entry, strict, catalog.package_platform(package)))
-            print(m["id"] + ": anonymous manifest/config/archive verified")
     inventory = source_inventory()
     present = {e["manifest"]["id"] for e in inventory}
-    merged = {e["manifest"]["id"]: e for e in body["extensions"]
-              if plan["mode"] == "bootstrap" or e["manifest"]["id"] in present}
-    updated_ids = {e["manifest"]["id"] for e in entries}
-    merged.update({e["manifest"]["id"]: copy.deepcopy(e) for e in entries})
+    prior = {e["manifest"]["id"]: e for e in body["extensions"]}
+    merged = {extension_id: entry for extension_id, entry in prior.items()
+              if plan["mode"] == "bootstrap" or extension_id in present}
+    updated_ids = set()
+    for entry in entries:
+        extension_id = entry["manifest"]["id"]
+        updated_ids.add(extension_id)
+        merged[extension_id] = (published_entry(entry, prior.get(extension_id)) if plan["mode"] == "versions"
+                                else copy.deepcopy(entry))
     body["extensions"] = [merged[k] for k in sorted(merged)]
     # Icons are tied to the trusted source SHA, never a mutable branch or tag.
     for entry in body["extensions"]:
@@ -503,18 +525,18 @@ def generate_payload(plan, catalog_path, head_sha, registry_factory=oci.Registry
     body["generation"] = {"repository": FINAL_REPOSITORY, "repository_id": CLEANED_REPOSITORY_ID,
                           "base_catalog_hash": oci.digest(original), "source_commit": head_sha,
                           "source_inventory_hash": catalog.inventory_hash(inventory), "mode": plan["mode"]}
-    # Verify every retained OCI reference too, not just the newly uploaded versions.
+    catalog.validate_payload(body)
+    # Use anonymous clients for every release, including the signed compatibility packages.
     for entry in body["extensions"]:
-        if entry["manifest"]["id"] in updated_ids:
-            continue
-        m = entry["manifest"]
-        registry = registry_factory(oci.repository(m["id"]))
-        for package in entry["packages"]:
-            if not package["url"].startswith("oci:"):
-                raise ValueError("bootstrap must finish before publishing new-version catalogs")
-            oci.verify_package(registry, m["id"], m["version"], package,
-                               archive_validator=lambda data: check_entry_archive(data, entry, platform=catalog.package_platform(package)))
-    return catalog.encode(catalog.validate_payload(body))
+        extension_id = entry["manifest"]["id"]
+        previous = prior.get(extension_id)
+        current = catalog.current_release(entry)["manifest"]
+        strict = plan["mode"] == "versions" and (
+            previous is None or catalog.current_release(previous)["manifest"]["version"] != current["version"])
+        verify_entry_packages(entry, registry_factory, strict)
+        if extension_id in updated_ids:
+            print(extension_id + ": anonymous manifest/config/archive verified")
+    return catalog.encode(body)
 
 
 def catalog_phase(args, registry_factory=oci.Registry):

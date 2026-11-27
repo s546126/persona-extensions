@@ -114,25 +114,26 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 			IID     int64  `json:"iid"`
 		}{name, in.Project, in.IID})
 	}
+	c, hub, receipts := a.deps()
 	var fn func() (string, error)
 	switch name {
 	case "gitlab_approve":
 		fn = func() (string, error) {
-			if err := a.client.approve(ctx, in.Project, in.IID); err != nil {
+			if err := c.approve(ctx, in.Project, in.IID); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("Approved MR !%d", in.IID), nil
 		}
 	case "gitlab_unapprove":
 		fn = func() (string, error) {
-			if err := a.client.unapprove(ctx, in.Project, in.IID); err != nil {
+			if err := c.unapprove(ctx, in.Project, in.IID); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("Removed approval from MR !%d", in.IID), nil
 		}
 	case "gitlab_comment":
 		fn = func() (string, error) {
-			if err := a.client.comment(ctx, in.Project, in.IID, body); err != nil {
+			if err := c.comment(ctx, in.Project, in.IID, body); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("Commented on MR !%d", in.IID), nil
@@ -140,13 +141,13 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	default:
 		return nil, fmt.Errorf("unknown action %q", name)
 	}
-	text, err := a.receipts.commit(requestID, string(keyData), fn)
+	text, err := receipts.commit(requestID, string(keyData), fn)
 	if err != nil {
 		return nil, err
 	}
 	a.record(nil)
-	if a.hub != nil {
-		_ = a.hub.Invalidate(pageUI)
+	if hub != nil {
+		_ = hub.Invalidate(pageUI)
 	}
 	return map[string]any{"text": text}, nil
 }

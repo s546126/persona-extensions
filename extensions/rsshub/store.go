@@ -117,9 +117,17 @@ func openStore(dir string, logf func(string, ...any)) *store {
 	if err == nil {
 		var d diskState
 		if err = json.Unmarshal(raw, &d); err == nil {
+			seenID := make(map[string]bool, len(d.Feeds))
+			seenSrc := make(map[string]bool, len(d.Feeds))
 			for _, f := range d.Feeds {
-				if f != nil && f.ID != "" && f.Source != "" {
-					s.feeds = append(s.feeds, f)
+				if f == nil || f.ID == "" || f.Source == "" || seenID[f.ID] || seenSrc[f.Source] {
+					continue
+				}
+				seenID[f.ID] = true
+				seenSrc[f.Source] = true
+				s.feeds = append(s.feeds, f)
+				if len(s.feeds) >= feedsMost {
+					break
 				}
 			}
 			return s
@@ -157,6 +165,9 @@ func (s *store) flush() {
 func copyFeed(f *feed) feed {
 	c := *f
 	c.Entries = slices.Clone(f.Entries)
+	for i := range c.Entries {
+		c.Entries[i].Tags = slices.Clone(c.Entries[i].Tags)
+	}
 	return c
 }
 

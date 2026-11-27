@@ -71,17 +71,40 @@ def check_source(generation, base_ref, body):
     # be in the real base history and carry exactly its current inventory and predecessor catalog.
     git("merge-base", "--is-ancestor", source, base_ref)
     source_inventory, base_inventory = tree_inventory(source), tree_inventory(base_ref)
-    if catalog.inventory_hash(source_inventory) != generation["source_inventory_hash"] or source_inventory != base_inventory:
+    inventory_hash = generation["source_inventory_hash"]
+    if catalog.inventory_hash(source_inventory) != inventory_hash or catalog.inventory_hash(base_inventory) != inventory_hash:
         raise ValueError("signed source inventory is stale or does not match trusted PR base")
-    if catalog.payload_hash(tree_catalog(source)[0]) != generation["base_catalog_hash"]:
+    prior_payload, _ = tree_catalog(source)
+    if catalog.payload_hash(prior_payload) != generation["base_catalog_hash"]:
         raise ValueError("signed source catalog does not match generation base")
-    if generation["mode"] == "versions":
-        current = sorted((catalog.entry_inventory(e) for e in body["extensions"]), key=lambda e: e["manifest"]["id"])
-        if current != base_inventory:
-            raise ValueError("generated catalog does not match complete source inventory")
-        for entry in body["extensions"]:
-            if "icon" in entry and entry.get("icon_url") != catalog.icon_url(entry["manifest"]["id"], entry["icon"], source):
-                raise ValueError("generated icon_url differs from the signed source commit")
+    prior = {entry["manifest"]["id"]: entry for entry in catalog.loads(prior_payload)["extensions"]}
+    entries = body["extensions"]
+    if generation["mode"] == "bootstrap":
+        # Bootstrap is only for the frozen Release migration. Later catalogs
+        # must not bypass versions-mode source and compatibility checks.
+        frozen = len(prior) == catalog.BOOTSTRAP_ENTRY_COUNT and all(
+            "releases" not in entry and all(p["url"].startswith("release:") for p in entry["packages"])
+            for entry in prior.values())
+        if not frozen or any("releases" in entry for entry in entries):
+            raise ValueError("bootstrap requires the frozen Release catalog without releases")
+        return
+    current = sorted((catalog.entry_inventory(entry) for entry in entries), key=lambda e: e["manifest"]["id"])
+    if catalog.inventory_hash(current) != inventory_hash:
+        raise ValueError("generated catalog does not match complete source inventory")
+    for entry in entries:
+        extension_id = entry["manifest"]["id"]
+        previous = prior.get(extension_id)
+        manifest = catalog.current_release(entry)["manifest"]
+        expected_fallback = catalog.needs_fallback(manifest, previous)
+        if len(entry.get("releases", ())) != int(expected_fallback):
+            raise ValueError(f"{extension_id}: expected {'one' if expected_fallback else 'no'} alternate release")
+        if expected_fallback:
+            # The Hub uses property order to draw configuration forms.
+            baseline = catalog.encode(catalog.release_fields(previous))
+            if catalog.encode(catalog.release_fields(entry)) != baseline:
+                raise ValueError(f"{extension_id}: top-level compatibility release differs from the signed base catalog")
+        if "icon" in entry and entry.get("icon_url") != catalog.icon_url(extension_id, entry["icon"], source):
+            raise ValueError("generated icon_url differs from the signed source commit")
 
 
 def check(path=None, *, base_catalog=None, base_signature=None, repository_id=None, base_ref=None):

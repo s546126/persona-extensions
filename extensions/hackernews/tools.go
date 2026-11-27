@@ -125,7 +125,7 @@ func (a *app) toolStories(ctx context.Context, list string, filtered bool, extra
 	var conditions []string
 	applied := []filter{extra}
 	if filtered {
-		applied = []filter{a.cfg.filter(), extra}
+		applied = []filter{a.config().filter(), extra}
 	}
 	for _, f := range applied {
 		if d := en.describe(f); d != "" {

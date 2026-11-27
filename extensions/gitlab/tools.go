@@ -90,7 +90,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		if in.Page == 0 {
 			in.Page = 1
 		}
-		page, err := a.client.mergeRequests(ctx, in.Scope, in.Search, in.Page)
+		c, _, _ := a.deps()
+		page, err := c.mergeRequests(ctx, in.Scope, in.Search, in.Page)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -135,12 +136,13 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 }
 
 func (a *app) readDetail(ctx context.Context, project string, iid int64) (mergeRequest, []note, string, error) {
-	item, err := a.client.mergeRequest(ctx, project, iid)
+	c, _, _ := a.deps()
+	item, err := c.mergeRequest(ctx, project, iid)
 	a.record(err)
 	if err != nil {
 		return mergeRequest{}, nil, "", err
 	}
-	notes, next, err := a.client.notes(ctx, project, iid)
+	notes, next, err := c.notes(ctx, project, iid)
 	a.record(err)
 	if err != nil {
 		return mergeRequest{}, nil, "", err

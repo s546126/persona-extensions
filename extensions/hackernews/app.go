@@ -50,13 +50,21 @@ func (a *app) init(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any,
 		cfg.List = "top"
 	}
 	cfg.MinScore = max(cfg.MinScore, 0)
+	a.mu.Lock()
 	a.cfg = cfg
+	a.mu.Unlock()
 	return nil, nil
 }
 
+func (a *app) config() Config {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg
+}
+
 // read reads the site and keeps how it went for the status. An older copy standing in is a failed read.
-func (a *app) read(ctx context.Context, path string, fresh time.Duration) (reading, error) {
-	rd, err := a.site.get(ctx, path, fresh)
+func (a *app) read(ctx context.Context, path string, fresh time.Duration, validate func([]byte) error) (reading, error) {
+	rd, err := a.site.get(ctx, path, fresh, validate)
 	failure := err
 	if failure == nil {
 		failure = rd.stale

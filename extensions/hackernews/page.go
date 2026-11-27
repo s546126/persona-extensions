@@ -36,7 +36,7 @@ func (a *app) readState(r *ext.UIRequest) pageState {
 		st = pageState{}
 	}
 	if _, ok := listEndpoint(st.List); !ok {
-		st.List = a.cfg.List
+		st.List = a.config().List
 	}
 	return st
 }
@@ -130,7 +130,7 @@ func (a *app) listPage(ctx context.Context, r *ext.UIRequest, st pageState, refr
 		v.Sections = append(v.Sections, wire.Section{Items: notes})
 	}
 
-	f := a.cfg.filter()
+	f := a.config().filter()
 	shown := l.stories
 	if !st.All {
 		shown = f.apply(l.stories)
@@ -145,8 +145,9 @@ func (a *app) listPage(ctx context.Context, r *ext.UIRequest, st pageState, refr
 	}
 	for _, it := range shown {
 		next := pageState{List: st.List, Story: it.ID, All: st.All}
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: clip(it.Title, 300), Subtitle: clip(t.meta(it, now), 300),
-			Action: ext.Open(fmt.Sprintf("story:%d", it.ID), "", next, clip(it.Title, 200))})
+		rowTitle := it.displayTitle()
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: clip(rowTitle, 300), Subtitle: clip(t.meta(it, now), 300),
+			Action: ext.Open(fmt.Sprintf("story:%d", it.ID), "", next, clip(rowTitle, 200))})
 	}
 	if len(shown) == 0 {
 		sec.Items = append(sec.Items, text(t.nothing, wire.TextStyleSecondary))
@@ -188,7 +189,7 @@ func (a *app) storyPage(ctx context.Context, r *ext.UIRequest, st pageState, ref
 		v.Sections = []wire.Section{{Items: []wire.Component{text(t.gone, wire.TextStyleSecondary)}}, tail(item{})}
 		return v
 	}
-	v.Title = clip(s.Title, 200)
+	v.Title = clip(s.displayTitle(), 200)
 	head := []wire.Component{text(t.meta(s, now), wire.TextStyleCaption)}
 	if th.stale != nil {
 		head = append(head, text(fmt.Sprintf(t.stale, oneLine(th.stale.Error()), t.ago(now.Sub(th.at))), wire.TextStyleSecondary))

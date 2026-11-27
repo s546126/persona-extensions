@@ -235,8 +235,11 @@ class GitContinuityRegressions(CatalogFixture, unittest.TestCase):
         return self.run_git("rev-parse", "HEAD").decode().strip()
 
     def candidate(self):
-        base_raw = index.tree_catalog(self.pr_base)[0]
         self.body["extensions"][0]["manifest"]["version"] = "2.0.0"
+        self.sign_candidate()
+
+    def sign_candidate(self):
+        base_raw = index.tree_catalog(self.pr_base)[0]
         self.body["generation"] = {"repository": catalog.FINAL_REPOSITORY, "repository_id": catalog.CLEANED_REPOSITORY_ID,
                                    "base_catalog_hash": catalog.payload_hash(base_raw), "source_commit": self.pr_base,
                                    "source_inventory_hash": catalog.inventory_hash(index.tree_inventory(self.pr_base)), "mode": "versions"}
@@ -258,6 +261,82 @@ class GitContinuityRegressions(CatalogFixture, unittest.TestCase):
         if example:
             with open(example, "xb") as output:
                 output.write(self.catalog_path.read_bytes())
+
+    def compatibility_candidate(self):
+        self.entry["manifest"]["configuration"] = {"type": "object", "properties": {
+            "first": {"type": "string"}, "second": {"type": "boolean"},
+        }}
+        self.entry["l10n"] = {"en": {"name": "Compatible demo"}}
+        self.write_signed(self.body)
+        (self.repo / "persona-extensions.json").write_bytes(self.catalog_path.read_bytes())
+        current = dict(self.entry["manifest"], version="2.0.0", engines={"persona": ">=202611250000"})
+        self.source_path.write_bytes(catalog.encode(dict(current, tags=self.entry["tags"])))
+        self.pr_base = self.commit("Require a newer synthetic hub")
+        release = {"manifest": current, "packages": [dict(self.entry["packages"][0], sha256="2" * 64)]}
+        self.entry["releases"] = [release]
+        self.sign_candidate()
+
+    def test_compatibility_release_is_exactly_the_signed_base(self):
+        self.compatibility_candidate()
+        self.assertTrue(self.check())
+        for path, value in (
+            (("packages", 0, "sha256"), "3" * 64),
+            (("packages", 0, "url"), "https://example.com/replaced.tar.gz"),
+            (("manifest", "name"), "Fabricated baseline"),
+            (("manifest", "manifest_version"), True),
+            (("manifest", "configuration", "properties"), {"second": {"type": "boolean"}, "first": {"type": "string"}}),
+            (("l10n", "en", "name"), "Fabricated translation"),
+        ):
+            with self.subTest(path=path):
+                original = self.body["extensions"]
+                self.body["extensions"] = copy.deepcopy(original)
+                node = self.body["extensions"][0]
+                for part in path[:-1]:
+                    node = node[part]
+                node[path[-1]] = value
+                self.sign_candidate()  # A fresh valid signature cannot change the compatibility fields.
+                self.assertFalse(self.check())
+                self.body["extensions"] = original
+        self.entry.pop("l10n")
+        self.sign_candidate()
+        self.assertFalse(self.check())
+
+    def test_existing_baseline_cannot_be_replaced_by_a_previously_signed_alternative(self):
+        self.compatibility_candidate()
+        (self.repo / "persona-extensions.json").write_bytes(self.catalog_path.read_bytes())
+        previous = self.entry["releases"][0]
+        current = dict(previous["manifest"], version="3.0.0", engines={"persona": ">=202611260000"})
+        self.source_path.write_bytes(catalog.encode(dict(current, tags=self.entry["tags"])))
+        self.pr_base = self.commit("Advance the alternative release")
+        self.entry["releases"] = [dict(previous, manifest=current)]
+        self.sign_candidate()
+        self.assertTrue(self.check())
+
+        self.entry.pop("l10n")
+        self.entry.update(previous)
+        self.sign_candidate()
+        self.assertFalse(self.check())
+
+    def test_current_release_must_match_trusted_source(self):
+        self.compatibility_candidate()
+        self.entry["releases"][0]["manifest"]["description"] = "Not in the source tree"
+        self.sign_candidate()
+        self.assertFalse(self.check())
+
+    def test_required_compatibility_release_cannot_be_dropped(self):
+        self.compatibility_candidate()
+        self.entry.update(self.entry.pop("releases")[0])
+        self.sign_candidate()
+        self.assertFalse(self.check())
+
+    def test_bootstrap_mode_cannot_skip_compatibility_provenance(self):
+        self.compatibility_candidate()
+        self.body["generation"]["mode"] = "bootstrap"
+        self.write_signed(self.body)
+        self.assertFalse(self.check())
+        self.entry.update(self.entry.pop("releases")[0])
+        self.write_signed(self.body)
+        self.assertFalse(self.check())
 
     def test_old_valid_signed_artifact_fails_against_new_real_base(self):
         self.advance_source()

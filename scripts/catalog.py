@@ -9,6 +9,8 @@ import re
 import subprocess
 import tempfile
 
+import config_form
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "persona-extensions.json"
 # Approved cleaned repository key; embedding a signature does not rotate this pin.
@@ -17,8 +19,18 @@ APPROVED_KEY_ID = "3cce0f471911a1cf"
 SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 FINAL_REPOSITORY = "nwverse/persona-extensions"
 CLEANED_REPOSITORY_ID = 1449704212
+BOOTSTRAP_ENTRY_COUNT = 14
 VERSION_MOST = 96
 PACKAGE_MOST = 200 * 1024 * 1024
+RELEASE_MOST = 16
+RELEASE_FIELDS = ("manifest", "packages", "l10n")
+# Packaged manifest fields in the Hub immediately before nwverse/persona#14833.
+LEGACY_MANIFEST_FIELDS = {
+    "manifest_version", "id", "name", "version", "description", "publisher", "homepage",
+    "engines", "runtime", "node", "activation_events", "contributes", "off_by_default",
+    "depends", "exports", "extension_pack", "configuration", "secrets", "settings_check",
+    "permissions", "tools", "auth", "host_integrations",
+}
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:[A-Za-z0-9-]+)(?:\.[A-Za-z0-9-]+)*)?")
 
 
@@ -27,6 +39,64 @@ def valid_version(value):
         return False
     return "-" not in value or all(not p.isdigit() or p == "0" or not p.startswith("0")
                                    for p in value.split("-", 1)[1].split("."))
+
+
+def version_key(version):
+    """SemVer precedence for a version that has passed valid_version."""
+    core, dash, prerelease = version.partition("-")
+    identifiers = tuple((0, int(p)) if p.isdigit() else (1, p) for p in prerelease.split("."))
+    return tuple(int(p) for p in core.split(".")), not dash, identifiers
+
+
+def persona_floor(manifest):
+    """Read the effective Hub build floor in the Hub's >=N / <N range syntax."""
+    engines = manifest.get("engines", {})
+    requirement = engines.get("persona", "") if isinstance(engines, dict) else None
+    if requirement == "":
+        return 0
+    bounds = requirement.split() if isinstance(requirement, str) else []
+    if not bounds:
+        raise ValueError("engines.persona must use >=N and <N build bounds")
+    floor, ceiling = 0, 1 << 63
+    for bound in bounds:
+        match = re.fullmatch(r"(>=|<)(\+?[0-9]+)", bound)
+        number = int(match[2]) if match else 0
+        if not 0 < number < 1 << 63:
+            raise ValueError("engines.persona must use >=N and <N with positive build numbers")
+        if match[1] == ">=":
+            floor = max(floor, number)
+        else:
+            ceiling = min(ceiling, number)
+    if max(1, floor) >= ceiling:
+        raise ValueError("engines.persona range allows no Hub builds")
+    return floor
+
+
+def needs_fallback(manifest, previous):
+    floor = persona_floor(manifest)
+    return previous is not None and floor > persona_floor(previous["manifest"])
+
+
+def check_manifest_schema(manifest, *, compatibility):
+    if compatibility:
+        unknown = manifest.keys() - LEGACY_MANIFEST_FIELDS
+        if unknown:
+            raise ValueError("top-level manifest has fields unknown before #14833: " + ", ".join(sorted(unknown)))
+    try:
+        config_form.check(manifest, allow_section=not compatibility)
+    except (config_form.Refused, TypeError, AttributeError) as error:
+        if compatibility:
+            raise ValueError(f"top-level manifest must pass the pre-#14833 schema: {error}") from error
+        raise ValueError(f"release manifest configuration is invalid: {error}") from error
+
+
+def check_source_release(manifest, previous):
+    if not valid_version(manifest.get("version")):
+        raise ValueError(f"version {manifest.get('version')!r} is not MAJOR.MINOR.PATCH")
+    fallback = needs_fallback(manifest, previous)
+    if fallback and version_key(manifest["version"]) <= version_key(previous["manifest"]["version"]):
+        raise ValueError("release version must be strictly newer than the top-level version")
+    check_manifest_schema(manifest, compatibility=not fallback)
 
 
 def payload_hash(payload):
@@ -58,12 +128,20 @@ def source_entry(source):
 
 def entry_inventory(entry):
     """The exact source-owned fields covered by generation provenance."""
-    result = {"manifest": entry["manifest"], "tags": entry.get("tags", [])}
+    result = {"manifest": current_release(entry)["manifest"], "tags": entry.get("tags", [])}
     if "replaces" in entry:
         result["replaces"] = entry["replaces"]
     if "icon" in entry:
         result["icon"] = entry["icon"]
     return result
+
+
+def current_release(entry):
+    return entry["releases"][0] if "releases" in entry else entry
+
+
+def release_fields(entry):
+    return {key: entry[key] for key in RELEASE_FIELDS if key in entry}
 
 
 def valid_icon_path(value):
@@ -93,7 +171,8 @@ def validate_downloads_timestamp(value):
 def validate_entry_identities(entries):
     ids, predecessors = set(), set()
     for entry in entries:
-        extension_id = entry["manifest"].get("id")
+        manifest = entry.get("manifest") if isinstance(entry, dict) else None
+        extension_id = manifest.get("id") if isinstance(manifest, dict) else None
         if not valid_extension_id(extension_id) or extension_id in ids:
             raise ValueError("unsafe or duplicate extension id")
         ids.add(extension_id)
@@ -109,10 +188,13 @@ def validate_entry_identities(entries):
     return entries
 
 
+def canonical_json(value):
+    # Used for provenance comparisons. Signature verification always uses the raw payload.
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
 def inventory_hash(inventory):
-    # Explicit canonical encoding here is for inventory provenance, never for signature verification.
-    raw = json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    return payload_hash(raw)
+    return payload_hash(canonical_json(inventory))
 
 
 def validate_generation(generation):
@@ -218,33 +300,68 @@ def validate_payload(payload):
         if ranked or "downloads" in entry:
             if type(entry.get("downloads")) is not int or entry["downloads"] < 0:
                 raise ValueError("downloads must be a nonnegative integer")
-        m = entry["manifest"]
-        if "icon" in m:
-            raise ValueError("packaged manifests must not contain icon")
-        if "tags" in m:
-            raise ValueError("packaged manifests must not contain tags")
-        if "replaces" in m:
-            raise ValueError("packaged manifests must not contain replaces")
-        if not valid_version(m["version"]):
-            raise ValueError("unsafe extension version")
-        packages = entry["packages"]
-        if not isinstance(packages, list) or not packages:
-            raise ValueError("entry must have packages")
-        platforms = set()
-        for package in packages:
-            if not re.fullmatch(r"[0-9a-f]{64}", package["sha256"]):
-                raise ValueError("archive SHA256 must be lowercase hex")
-            if type(package["size"]) is not int or not 0 < package["size"] <= PACKAGE_MOST:
-                raise ValueError("archive size must be positive and at most 200 MiB")
-            platform = package_platform(package)
-            if platform in platforms:
-                raise ValueError("unsafe or duplicate package platform")
-            platforms.add(platform)
-            if not isinstance(package["url"], str) or not package["url"]:
-                raise ValueError("package URL is missing")
+        extension_id = entry["manifest"]["id"]
+        try:
+            validate_release(entry, extension_id, compatibility=True)
+            if "releases" in entry:
+                validate_releases(entry, extension_id)
+        except ValueError as error:
+            raise ValueError(f"{extension_id}: {error}") from error
     if ranked and entries != sorted(entries, key=lambda e: (-e["downloads"], e["manifest"]["id"])):
         raise ValueError("catalog must be sorted by downloads descending, then id")
     return payload
+
+
+def validate_release(release, extension_id, *, compatibility):
+    manifest = release.get("manifest")
+    if not isinstance(manifest, dict) or manifest.get("id") != extension_id:
+        raise ValueError("release manifest id must match the top-level extension id")
+    for field in ("icon", "tags", "replaces"):
+        if field in manifest:
+            raise ValueError(f"packaged manifests must not contain {field}")
+    if not valid_version(manifest.get("version")):
+        raise ValueError("unsafe extension version")
+    check_manifest_schema(manifest, compatibility=compatibility)
+    packages = release.get("packages")
+    if not isinstance(packages, list) or not packages:
+        raise ValueError("release must have packages")
+    platforms = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ValueError("package must be an object")
+        sha = package.get("sha256")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            raise ValueError("archive SHA256 must be lowercase hex")
+        size = package.get("size")
+        if type(size) is not int or not 0 < size <= PACKAGE_MOST:
+            raise ValueError("archive size must be positive and at most 200 MiB")
+        platform = package_platform(package)
+        if platform in platforms:
+            raise ValueError("unsafe or duplicate package platform")
+        platforms.add(platform)
+        url = package.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("package URL is missing")
+
+
+def validate_releases(entry, extension_id):
+    releases = entry["releases"]
+    if not isinstance(releases, list) or not 1 <= len(releases) <= RELEASE_MOST:
+        raise ValueError(f"releases must be an array of 1 to {RELEASE_MOST} entries")
+    top = version_key(entry["manifest"]["version"])
+    previous = None
+    for release in releases:
+        if not isinstance(release, dict) or release.keys() - RELEASE_FIELDS:
+            raise ValueError("release fields must be manifest, packages and optional l10n")
+        if "l10n" in release and not isinstance(release["l10n"], dict):
+            raise ValueError("release l10n must be an object")
+        validate_release(release, extension_id, compatibility=False)
+        version = version_key(release["manifest"]["version"])
+        if version <= top or (previous is not None and version >= previous):
+            raise ValueError("release versions must descend strictly and be newer than the top-level version")
+        if not needs_fallback(release["manifest"], entry):
+            raise ValueError("release engines.persona floor must be higher than the top-level floor")
+        previous = version
 
 
 def package_platform(package):

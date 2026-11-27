@@ -49,12 +49,12 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	}
 	switch r.Action {
 	case "search":
-		st.Query, st.Page, st.Mode = clipText(r.Values["q"], 200), 0, "list"
+		st.Query, st.Page, st.Mode, st.DraftID, st.Body = clipText(r.Values["q"], 200), 0, "list", "", ""
 	case "scope":
 		if r.Values["view"] != "assigned_to_me" && r.Values["view"] != "reviews_for_me" {
 			return nil, errors.New("invalid review scope")
 		}
-		st.Scope, st.Page, st.Mode = r.Values["view"], 0, "list"
+		st.Scope, st.Page, st.Mode, st.DraftID, st.Body = r.Values["view"], 0, "list", "", ""
 	case "more":
 		st.Page++
 	case "detail":
@@ -66,9 +66,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if err != nil || iid <= 0 {
 			return nil, errors.New("invalid merge request IID")
 		}
-		st.Project, st.IID, st.Mode = project, iid, "detail"
+		st.Project, st.IID, st.Mode, st.DraftID, st.Body = project, iid, "detail", "", ""
 	case "back":
-		st.Mode, st.IID, st.Project = "list", 0, ""
+		st.Mode, st.IID, st.Project, st.DraftID, st.Body = "list", 0, "", "", ""
 	case "comment":
 		st.Mode, st.DraftID, st.Body = "comment", randomID(), ""
 	case "review-comment":
@@ -83,7 +83,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 	case "edit-comment":
 		st.Mode = "comment"
 	case "approve", "unapprove":
-		if st.IID <= 0 || validProjectID(st.Project) != nil || st.DraftID == "" {
+		if st.IID <= 0 || validProjectID(st.Project) != nil || strings.TrimSpace(st.DraftID) == "" {
 			return nil, errors.New("project, merge request IID and draft are required")
 		}
 		raw, _ := json.Marshal(reviewArgs{Project: st.Project, IID: st.IID})
@@ -93,6 +93,9 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		return &wire.ActionResult{Toast: out["text"].(string), Pop: true}, nil
 	case "confirm-comment":
+		if st.IID <= 0 || validProjectID(st.Project) != nil || strings.TrimSpace(st.DraftID) == "" {
+			return nil, errors.New("project, merge request IID and draft are required")
+		}
 		raw, _ := json.Marshal(commentArgs{Project: st.Project, IID: st.IID, Body: st.Body})
 		out, err := a.doAction(ctx, "ui-comment:"+st.DraftID, "gitlab_comment", raw)
 		if err != nil {
@@ -108,7 +111,8 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 
 func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.View, error) {
 	t := textsFor(r.Locale)
-	if a.client.base == "" || a.client.token == "" {
+	c, _, _ := a.deps()
+	if c.base == "" || c.token == "" {
 		return &wire.View{Sections: []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Title: t.missingConfig}}}}}, nil
 	}
 	switch st.Mode {
@@ -130,6 +134,7 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 			return nil, err
 		}
 		st.DraftID = randomID()
+		st.Body = ""
 		return detailView(r, st, item, notes, next), nil
 	}
 	if st.Scope == "" {
@@ -153,13 +158,20 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 		Name: "view", Title: t.open, Value: st.Scope, Action: wire.Action{ID: "scope"},
 		Choices: []wire.Choice{{Value: "assigned_to_me", Title: t.assigned}, {Value: "reviews_for_me", Title: t.review}},
 	}}
-	section := wire.Section{Title: fmt.Sprintf(t.results, len(items))}
+	section := wire.Section{}
+	seenKeys := make(map[string]bool, len(items))
 	for _, item := range items {
 		if item.ProjectID <= 0 || item.IID <= 0 {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: "mr-" + itoa(item.ID), Title: fmt.Sprintf("!%d %s", item.IID, clipText(item.Title, 1800)), Subtitle: clipText(item.Author.Name+" · "+item.References.Full+" · "+item.SourceBranch, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"iid": itoa(item.IID), "project": url.QueryEscape(itoa(item.ProjectID))}}})
+		key := mrRowKey(item)
+		if seenKeys[key] {
+			continue
+		}
+		seenKeys[key] = true
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Key: key, Title: fmt.Sprintf("!%d %s", item.IID, clipText(item.Title, 1800)), Subtitle: clipText(item.Author.Name+" · "+item.References.Full+" · "+item.SourceBranch, 1800), Action: &wire.Action{ID: "detail", Values: map[string]string{"iid": itoa(item.IID), "project": url.QueryEscape(itoa(item.ProjectID))}}})
 	}
+	section.Title = fmt.Sprintf(t.results, len(section.Items))
 	if len(section.Items) == 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentEmpty, Title: t.noMRs})
 	}
@@ -170,43 +182,68 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState) (*wire.V
 	return v, nil
 }
 
+func mrRowKey(item mergeRequest) string {
+	if item.ID > 0 {
+		return "mr-" + itoa(item.ID)
+	}
+	return fmt.Sprintf("mr-%d-%d", item.ProjectID, item.IID)
+}
+
 // maxViewMergeRequests keeps the accumulated list within the SDK's component limit.
 const maxViewMergeRequests = 250
 
 // collectMergeRequests reads pages 1 through page so that Load more extends the list instead of replacing it,
 // and reports whether GitLab has more merge requests that the cap still leaves room to show.
 func (a *app) collectMergeRequests(ctx context.Context, scope, query string, page int) ([]mergeRequest, bool, error) {
+	c, _, _ := a.deps()
 	var out []mergeRequest
+	seen := map[string]bool{}
 	more := false
 	for p := 1; p <= page && len(out) < maxViewMergeRequests; p++ {
-		batch, err := a.client.mergeRequests(ctx, scope, query, p)
+		batch, err := c.mergeRequests(ctx, scope, query, p)
 		if err != nil {
 			return nil, false, err
 		}
-		out = append(out, batch.Items...)
-		more = batch.Next != ""
+		for _, item := range batch.Items {
+			if item.ProjectID <= 0 || item.IID <= 0 {
+				continue
+			}
+			key := mrRowKey(item)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, item)
+			if len(out) >= maxViewMergeRequests {
+				break
+			}
+		}
+		nextPage, nerr := strconv.Atoi(strings.TrimSpace(batch.Next))
+		more = len(batch.Items) > 0 && nerr == nil && nextPage > p
 		if !more {
 			break
 		}
-	}
-	if len(out) > maxViewMergeRequests {
-		out = out[:maxViewMergeRequests]
 	}
 	return out, more && len(out) < maxViewMergeRequests, nil
 }
 
 func detailView(r *ext.UIRequest, st pageState, item mergeRequest, notes []note, next ...string) *wire.View {
 	t := textsFor(r.Locale)
+	title := strings.TrimSpace(item.Title)
+	if title == "" {
+		title = fmt.Sprintf("MR !%d", item.IID)
+	}
+	shortTitle := clipText(title, 1800)
 	items := []wire.Component{
-		{Type: wire.ComponentText, Text: clipText(item.Title, 1800)},
+		{Type: wire.ComponentText, Text: shortTitle},
 		{Type: wire.ComponentText, Text: t.author + ": " + clipText(item.Author.Name+" · "+item.SourceBranch+" → "+item.TargetBranch, 1800)},
 	}
 	if safeHTTPSLink(item.WebURL) {
 		items = append(items, wire.Component{Type: wire.ComponentLink, Title: t.openMR, URL: item.WebURL})
 	}
 	items = append(items,
-		wire.Component{Type: wire.ComponentButton, Title: t.approve, Action: &wire.Action{ID: "approve", Confirm: t.approve + "\n" + item.Title}},
-		wire.Component{Type: wire.ComponentButton, Title: t.unapprove, Action: &wire.Action{ID: "unapprove", Confirm: t.unapprove + "\n" + item.Title}},
+		wire.Component{Type: wire.ComponentButton, Title: t.approve, Action: &wire.Action{ID: "approve", Confirm: t.approve + "\n" + shortTitle}},
+		wire.Component{Type: wire.ComponentButton, Title: t.unapprove, Action: &wire.Action{ID: "unapprove", Confirm: t.unapprove + "\n" + shortTitle}},
 		wire.Component{Type: wire.ComponentButton, Title: t.comment, Action: &wire.Action{ID: "comment", Push: &wire.Push{Title: t.comment, State: ext.EncodeState(pageState{Scope: st.Scope, Query: st.Query, Page: st.Page, Project: st.Project, IID: st.IID, Mode: "comment", DraftID: randomID()})}}},
 		wire.Component{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	)
@@ -214,31 +251,40 @@ func detailView(r *ext.UIRequest, st pageState, item mergeRequest, notes []note,
 	if item.Description != "" {
 		v.Sections = append(v.Sections, wire.Section{Title: t.description, Items: capComponents(textComponents(clipText(item.Description, 60000)), maxDescriptionItems)})
 	}
-	budget := 250 - viewItemCount(v)
 	if len(item.Reviewers) > 0 {
 		section := wire.Section{Title: t.reviewers}
 		for _, reviewer := range limitUsers(item.Reviewers, 100) {
 			name := strings.TrimSpace(reviewer.Name)
+			uname := strings.TrimSpace(reviewer.Username)
 			if name == "" {
-				name = reviewer.Username
+				name = uname
 			}
 			if name == "" {
 				continue
 			}
-			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Title: clipText(name, 1800), Subtitle: "@" + reviewer.Username})
+			sub := ""
+			if uname != "" {
+				sub = "@" + clipText(uname, 1800)
+			}
+			section.Items = append(section.Items, wire.Component{Type: wire.ComponentRow, Title: clipText(name, 1800), Subtitle: sub})
 		}
 		if len(section.Items) > 0 {
 			v.Sections = append(v.Sections, section)
 		}
 	}
+	hasNext := len(next) > 0 && strings.TrimSpace(next[0]) != ""
+	budget := maxViewMergeRequests - viewItemCount(v)
+	if hasNext && budget > 0 {
+		budget--
+	}
 	section := wire.Section{Title: t.comments}
-	for _, item := range notes {
-		if item.System || budget < 2 {
+	for _, noteItem := range notes {
+		if noteItem.System || budget < 2 {
 			continue
 		}
-		section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(authorLabel(item.Author), 1800), Style: wire.TextStyleSecondary})
+		section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: clipText(authorLabel(noteItem.Author), 1800), Style: wire.TextStyleSecondary})
 		budget--
-		content := textComponents(clipText(item.Body, 12000))
+		content := textComponents(clipText(noteItem.Body, 12000))
 		if len(content) > budget {
 			content = content[:budget]
 			content[len(content)-1].Text = clipText(content[len(content)-1].Text, 1700) + " […]"
@@ -246,14 +292,16 @@ func detailView(r *ext.UIRequest, st pageState, item mergeRequest, notes []note,
 		section.Items = append(section.Items, content...)
 		budget -= len(content)
 	}
-	if len(section.Items) == 0 {
+	if len(section.Items) == 0 && budget > 0 {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentText, Text: t.noComments, Style: wire.TextStyleSecondary})
 	}
-	if len(next) > 0 && next[0] != "" {
+	if hasNext {
 		section.Items = append(section.Items, wire.Component{Type: wire.ComponentText,
-			Text: "Discussion is incomplete; next notes page: " + next[0], Style: wire.TextStyleSecondary})
+			Text: "Discussion is incomplete; next notes page: " + clipText(strings.TrimSpace(next[0]), 100), Style: wire.TextStyleSecondary})
 	}
-	v.Sections = append(v.Sections, section)
+	if len(section.Items) > 0 {
+		v.Sections = append(v.Sections, section)
+	}
 	return v
 }
 
@@ -286,7 +334,7 @@ func authorLabel(user user) string {
 
 func safeHTTPSLink(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && len([]rune(raw)) <= wire.StringMost
 }
 
 func limitUsers(users []user, limit int) []user {
@@ -307,7 +355,7 @@ func viewItemCount(v *wire.View) int {
 func commentView(r *ext.UIRequest, st pageState) *wire.View {
 	t := textsFor(r.Locale)
 	return &wire.View{Title: t.comment, State: ext.EncodeState(st), Sections: []wire.Section{{Items: []wire.Component{
-		{Type: wire.ComponentField, Kind: "text", Name: "body", Label: t.body, Value: st.Body},
+		{Type: wire.ComponentField, Kind: "text", Name: "body", Label: t.body, Value: clipText(st.Body, wire.StringMost)},
 		{Type: wire.ComponentButton, Title: t.reviewComment, Action: &wire.Action{ID: "review-comment", Submit: true}},
 		{Type: wire.ComponentButton, Title: t.back, Action: &wire.Action{ID: "back"}},
 	}}}}

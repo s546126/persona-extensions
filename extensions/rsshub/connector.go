@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/nwverse/persona/sdk/go/ext"
@@ -171,6 +170,7 @@ func (a *app) status() map[string]any {
 		st["last_sync"] = h.OK
 	}
 	if h.failing() {
+		st["state"] = "error"
 		st["error"] = clip(oneLine(h.Err.Error()), 200)
 	}
 	return st
@@ -373,8 +373,14 @@ func previewText(p *preview, limit int, content bool) string {
 // write is one of the writes, checked without the network (actions.describe must not reach out).
 type write struct {
 	name    string
+	params  string
 	summary string
 	run     func(ctx context.Context) (string, error)
+}
+
+func canonicalParams(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
@@ -395,7 +401,13 @@ func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
 			summary += "，标题「" + title + "」"
 		}
 		summary += "，分类「" + firstNonEmpty(tag, defaultTag) + "」"
-		return write{name: name, summary: summary, run: func(ctx context.Context) (string, error) {
+		params := canonicalParams(struct {
+			Action string `json:"action"`
+			Source string `json:"source"`
+			Title  string `json:"title"`
+			Tag    string `json:"tag"`
+		}{name, src.String(), title, tag})
+		return write{name: name, params: params, summary: summary, run: func(ctx context.Context) (string, error) {
 			f, added, n, err := a.subscribe(ctx, src.String(), title, tag)
 			if err != nil {
 				return "", err
@@ -413,7 +425,11 @@ func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
 		if !ok {
 			return write{}, bad(fmt.Sprintf("没有订阅 %s（id 从 rsshub_feeds 拿）", args.FeedID))
 		}
-		return write{name: name, summary: fmt.Sprintf("取消订阅「%s」（%s），删掉它的 %d 条条目", f.name(), f.Source, len(f.Entries)),
+		params := canonicalParams(struct {
+			Action string `json:"action"`
+			FeedID string `json:"feed_id"`
+		}{name, args.FeedID})
+		return write{name: name, params: params, summary: fmt.Sprintf("取消订阅「%s」（%s），删掉它的 %d 条条目", f.name(), f.Source, len(f.Entries)),
 			run: func(context.Context) (string, error) {
 				f, err := a.unsubscribe(args.FeedID)
 				if err != nil {
@@ -444,7 +460,14 @@ func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
 		default:
 			return write{}, bad("要给 entry_ids、feed_id，或者 all: true")
 		}
-		return write{name: name, summary: "把" + what + "标为" + word, run: func(context.Context) (string, error) {
+		params := canonicalParams(struct {
+			Action   string   `json:"action"`
+			FeedID   string   `json:"feed_id"`
+			EntryIDs []string `json:"entry_ids"`
+			All      bool     `json:"all"`
+			Read     bool     `json:"read"`
+		}{name, args.FeedID, args.EntryIDs, args.All, read})
+		return write{name: name, params: params, summary: "把" + what + "标为" + word, run: func(context.Context) (string, error) {
 			n, err := a.markRead(args.FeedID, args.EntryIDs, args.All, read)
 			if err != nil {
 				return "", bad(err.Error())
@@ -455,32 +478,60 @@ func (a *app) readWrite(name string, raw json.RawMessage) (write, error) {
 	return write{}, ext.UnknownMethod("connector.action " + name)
 }
 
-// done remembers the answers of actions.do by request id: the hub may send the same one again.
-var (
-	doneMu sync.Mutex
-	done   = map[string]string{}
-)
+type actionReceipt struct {
+	params string
+	ready  chan struct{}
+	done   bool
+	text   string
+	err    error
+}
 
 func (a *app) do(ctx context.Context, requestID string, w write) (any, error) {
+	requestID = strings.TrimSpace(requestID)
 	if requestID == "" || len(requestID) > 256 {
 		return nil, bad("没有 request_id")
 	}
 	key := w.name + "\x00" + requestID
-	doneMu.Lock()
-	if text, ok := done[key]; ok {
-		doneMu.Unlock()
-		return map[string]any{"text": text}, nil
+	a.doneMu.Lock()
+	if a.done == nil {
+		a.done = map[string]*actionReceipt{}
 	}
-	doneMu.Unlock()
+	if rec, ok := a.done[key]; ok {
+		a.doneMu.Unlock()
+		if rec.params != w.params {
+			return nil, bad("request_id 已经用于不同的参数")
+		}
+		select {
+		case <-rec.ready:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if rec.err != nil {
+			return nil, rec.err
+		}
+		return map[string]any{"text": rec.text}, nil
+	}
+	if len(a.done) > 500 {
+		for k, r := range a.done {
+			if r.done {
+				delete(a.done, k)
+			}
+		}
+	}
+	rec := &actionReceipt{params: w.params, ready: make(chan struct{})}
+	a.done[key] = rec
+	a.doneMu.Unlock()
+
 	text, err := w.run(ctx)
+	a.doneMu.Lock()
+	rec.text, rec.err, rec.done = text, err, true
+	if err != nil {
+		delete(a.done, key)
+	}
+	close(rec.ready)
+	a.doneMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	doneMu.Lock()
-	if len(done) > 500 {
-		done = map[string]string{}
-	}
-	done[key] = text
-	doneMu.Unlock()
 	return map[string]any{"text": text}, nil
 }

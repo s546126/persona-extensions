@@ -114,6 +114,28 @@ class JunkTests(unittest.TestCase):
         self.assertEqual(manifest.check_junk('junk'), [])
         self.assertTrue(manifest.check())
 
+    def test_section_source_requires_a_signed_compatibility_release(self):
+        root = self.make_ext([])
+        self.with_root(root)
+        path = root / 'extensions' / 'junk' / manifest.NEW
+        prior = json.loads(path.read_text())
+        source = dict(prior, version='0.2.0', configuration={'type': 'object', 'properties': {
+            'example': {'type': 'string', 'section': 'connection'},
+        }})
+        market = {'extensions': [{'manifest': prior}]}
+        with mock.patch.object(manifest.catalog, 'verified', return_value=(b'', market)):
+            path.write_text(json.dumps(source))
+            with redirect_stderr(io.StringIO()) as stderr:
+                self.assertFalse(manifest.check())
+            self.assertIn("top-level", stderr.getvalue())
+            source['engines'] = {'persona': '>=202611250000'}
+            path.write_text(json.dumps(source))
+            self.assertTrue(manifest.check())
+            market['extensions'].clear()
+            with redirect_stderr(io.StringIO()) as stderr:
+                self.assertFalse(manifest.check())
+            self.assertIn("top-level", stderr.getvalue())
+
     def test_junk_outside_packaged_dirs_is_not_scanned(self):
         # package.sh copies only skills/ and assistant/, so junk elsewhere cannot land in the tarball.
         d = self.make_ext(['.DS_Store', '._foo', 'src/.DS_Store'])

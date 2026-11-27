@@ -73,9 +73,10 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	c, hub, receipts := a.deps()
 	found := false
 	for offset := 0; offset < 1000; {
-		page, err := a.client.types(ctx, in.SpaceID, offset)
+		page, err := c.types(ctx, in.SpaceID, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -93,9 +94,9 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 	if !found {
 		return nil, errors.New("the selected space has no compatible page/note type; no object was created")
 	}
-	keyData, _ := json.Marshal(raw)
-	text, err := a.receipts.commit(requestID, string(keyData), func() (string, error) {
-		item, err := a.client.createObject(ctx, in.SpaceID, in.Name, in.Body, in.TypeKey)
+	keyData, _ := json.Marshal(in)
+	text, err := receipts.commit(requestID, string(keyData), func() (string, error) {
+		item, err := c.createObject(ctx, in.SpaceID, in.Name, in.Body, in.TypeKey)
 		if err != nil {
 			return "", err
 		}
@@ -105,8 +106,8 @@ func (a *app) doAction(ctx context.Context, requestID, name string, raw json.Raw
 		return nil, err
 	}
 	a.record(nil)
-	if a.hub != nil {
-		_ = a.hub.Invalidate(pageUI)
+	if hub != nil {
+		_ = hub.Invalidate(pageUI)
 	}
 	return map[string]any{"text": text}, nil
 }

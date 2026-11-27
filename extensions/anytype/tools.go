@@ -61,9 +61,10 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 	if err := decode(raw, &in); err != nil {
 		return "", err
 	}
+	c, _, _ := a.deps()
 	switch name {
 	case "anytype_spaces":
-		page, err := a.client.spaces(ctx, in.Offset)
+		page, err := c.spaces(ctx, in.Offset)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -74,7 +75,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return pageText(&b, len(page.Data), "No accessible spaces.", page.Pagination.HasMore, in.Offset+len(page.Data)), nil
 	case "anytype_objects":
-		page, err := a.client.objects(ctx, in.SpaceID, in.Offset)
+		page, err := c.objects(ctx, in.SpaceID, in.Offset)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -85,7 +86,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return pageText(&b, len(page.Data), "No objects in this space.", page.Pagination.HasMore, in.Offset+len(page.Data)), nil
 	case "anytype_search":
-		page, err := a.client.search(ctx, in.Query, in.Offset)
+		page, err := c.search(ctx, in.Query, in.Offset)
 		a.record(err)
 		if err != nil {
 			return "", err
@@ -96,7 +97,7 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (s
 		}
 		return pageText(&b, len(page.Data), "No matching objects.", page.Pagination.HasMore, in.Offset+len(page.Data)), nil
 	case "anytype_object":
-		item, err := a.client.object(ctx, in.SpaceID, in.ObjectID)
+		item, err := c.object(ctx, in.SpaceID, in.ObjectID)
 		a.record(err)
 		if err != nil {
 			return "", err

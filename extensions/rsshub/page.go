@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
@@ -36,6 +37,7 @@ type pageState struct {
 func readState(r *ext.UIRequest) pageState {
 	var st pageState
 	_ = r.DecodeState(&st)
+	st.Preview = clip(st.Preview, routeMost)
 	return st
 }
 
@@ -206,7 +208,15 @@ func (a *app) page(r *ext.UIRequest, st pageState) *wire.View {
 		fallthrough
 	default:
 		v.Sections = append(v.Sections, a.latest(r, st, feeds))
-		v.Sections = append(v.Sections, feedGroups(feeds, loc)...)
+		add := addSection(st)
+		budget := wire.ItemsMost - viewItemCount(v) - len(add.Items)
+		v.Sections = append(v.Sections, feedGroups(feeds, loc, budget)...)
+		v.Sections = append(v.Sections, add)
+		v.State = ext.EncodeState(st)
+		if r.UIVersion >= 2 {
+			v.RefreshAfter = 300
+		}
+		return v
 	}
 	v.Sections = append(v.Sections, addSection(st))
 	v.State = ext.EncodeState(st)
@@ -214,6 +224,14 @@ func (a *app) page(r *ext.UIRequest, st pageState) *wire.View {
 		v.RefreshAfter = 300
 	}
 	return v
+}
+
+func viewItemCount(v *wire.View) int {
+	n := 0
+	for _, s := range v.Sections {
+		n += len(s.Items)
+	}
+	return n
 }
 
 // pageTitle is the page's and the navigation entry's name (persona-extension.json contributes.ui).
@@ -406,17 +424,24 @@ func entryRow(e entry, from string, loc *time.Location) wire.Component {
 	return row
 }
 
-// feedGroups is the subscriptions, one section a tag.
-func feedGroups(feeds []feed, loc *time.Location) []wire.Section {
-	if len(feeds) == 0 {
+// feedGroups is the subscriptions, one section a tag, bounded to fit within budget items.
+func feedGroups(feeds []feed, loc *time.Location, budget int) []wire.Section {
+	if len(feeds) == 0 || budget <= 0 {
 		return nil
 	}
 	var out []wire.Section
+	shown := 0
 	for _, t := range tagsOf(feeds) {
+		if shown >= budget {
+			break
+		}
 		sec := wire.Section{Title: "我订阅的 · " + t}
 		for _, f := range feeds {
 			if f.tag() != t {
 				continue
+			}
+			if shown >= budget {
+				break
 			}
 			row := wire.Component{Type: wire.ComponentRow, Title: clip(f.name(), 300), Subtitle: clip(f.Source+" · "+fetchState(f, loc), 300),
 				Action: &wire.Action{ID: "feed:" + f.ID}}
@@ -427,8 +452,14 @@ func feedGroups(feeds []feed, loc *time.Location) []wire.Section {
 				row.Badge = &wire.Badge{Text: strconv.Itoa(f.unread()), Tone: wire.ToneCaution}
 			}
 			sec.Items = append(sec.Items, row)
+			shown++
 		}
-		out = append(out, sec)
+		if len(sec.Items) > 0 {
+			out = append(out, sec)
+		}
+	}
+	if omitted := len(feeds) - shown; omitted > 0 && len(out) > 0 {
+		out[len(out)-1].Footer = fmt.Sprintf("还有 %d 个网站未在此页显示", omitted)
 	}
 	return out
 }
@@ -496,7 +527,7 @@ func feedSections(r *ext.UIRequest, f feed, st pageState, loc *time.Location) []
 // httpsLink reports whether a link component can carry raw: the view check refuses the whole view for any other.
 func httpsLink(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && utf8.RuneCountInString(raw) <= wire.StringMost
 }
 
 // entrySection is one entry's text.
@@ -585,7 +616,7 @@ func previewSection(p *preview, loc *time.Location) wire.Section {
 func addSection(st pageState) wire.Section {
 	return wire.Section{Title: "添加订阅", Items: []wire.Component{
 		{Type: wire.ComponentText, Text: addressHelp, Style: wire.TextStyleSecondary},
-		{Type: wire.ComponentField, Name: "route", Label: "要订阅的地址", Kind: wire.FieldKindText, Value: st.Preview,
+		{Type: wire.ComponentField, Name: "route", Label: "要订阅的地址", Kind: wire.FieldKindText, Value: clip(st.Preview, wire.StringMost),
 			Placeholder: "比如 " + exampleUPRoute + " 或 https://…/feed"},
 		{Type: wire.ComponentField, Name: "tag", Label: "分类（可不填，用来分组）", Kind: wire.FieldKindText, Placeholder: "比如 新闻、学习"},
 		{Type: wire.ComponentField, Name: "title", Label: "名字（可不填，默认用网站自己的）", Kind: wire.FieldKindText},

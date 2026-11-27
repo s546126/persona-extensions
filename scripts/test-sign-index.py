@@ -115,6 +115,31 @@ class SigningTests(CatalogFixture, unittest.TestCase):
             sign_index.sign(self.payload_path, output)
         self.assertEqual(catalog.verified(output)[0], self.payload_path.read_bytes())
 
+    def test_signing_uses_the_trusted_compatibility_baseline(self):
+        prior, _ = catalog.verified(self.catalog_path)
+        current = dict(self.entry["manifest"], version="2.0.0", engines={"persona": ">=202611250000"})
+        self.entry["releases"] = [{"manifest": current, "packages": self.entry["packages"]}]
+        inventory = [dict(catalog.entry_inventory(self.entry), manifest=current)]
+        self.body["generation"].update(base_catalog_hash=catalog.payload_hash(prior),
+                                       source_inventory_hash=catalog.inventory_hash(inventory))
+        sha = self.body["generation"]["source_commit"]
+        output = self.directory / "new.json"
+        payload = json.dumps(self.body, ensure_ascii=False, indent=3).encode() + b"\r\n"
+        self.payload_path.write_bytes(payload)
+        with mock.patch.object(sign_index.index, "git"), \
+             mock.patch.object(sign_index.index, "tree_inventory", return_value=inventory), \
+             mock.patch.object(sign_index.index, "tree_catalog", return_value=(prior, [])), \
+             mock.patch.dict(os.environ, isolated_environ(EXTENSION_MARKET_SIGNING_KEY=self.key.read_text()), clear=True):
+            sign_index.sign(self.payload_path, output, sha)
+            actual, body = catalog.verified(output)
+            self.assertEqual(actual, payload)
+            self.assertEqual(body["extensions"], [self.entry])
+            self.entry["packages"] = [dict(self.entry["packages"][0], url="https://example.com/changed.tar.gz")]
+            self.payload_path.write_bytes(catalog.encode(self.body))
+            with self.assertRaisesRegex(ValueError, "compatibility release differs"):
+                sign_index.sign(self.payload_path, output, sha)
+            self.assertEqual(catalog.verified(output)[0], payload)
+
     def test_actions_empty_secret_fails_closed(self):
         output = self.directory / "actions.json"
         for secret in ("", " \n\t"):

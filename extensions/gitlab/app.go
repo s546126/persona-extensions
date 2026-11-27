@@ -81,11 +81,24 @@ func (a *app) record(err error) {
 	}
 }
 
+func (a *app) deps() (*client, hubNotifier, *writeStore) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	c, hub, receipts := a.client, a.hub, a.receipts
+	if c == nil {
+		c = newClient("", "")
+	}
+	if receipts == nil {
+		receipts = newWriteStore("")
+	}
+	return c, hub, receipts
+}
+
 func (a *app) status() map[string]any {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	state := "ok"
-	if a.client.token == "" {
+	if a.client == nil || a.client.token == "" {
 		state = "not_configured"
 	}
 	out := map[string]any{"state": state, "account": "GitLab 合并请求评审"}

@@ -92,7 +92,7 @@ class SubsetTests(unittest.TestCase):
                 "plain": {"type": "string"},
             }},
         }}
-        # Additive section metadata does not force an engines.persona lower bound.
+        # The form parser checks the keyword itself. Catalog publishing checks the Hub build floor.
         self.assertEqual(refused(valid), "")
         self.assertEqual(refused({"type": "object", "properties": {"a": {"type": "string", "section": ""}}}), "")
         with self.assertRaises(config_form.Refused):

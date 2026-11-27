@@ -6,8 +6,8 @@
   scripts/manifest.py packaged <id>   the runtime manifest: without source-only "tags" and "replaces"
   scripts/manifest.py ids             every extension in extensions/
   scripts/manifest.py check           every manifest is sound (what CI runs): id, version, tags, no retired files,
-                                      the files it references are in its package, its pack members are here, and a
-                                      hub takes its configuration (scripts/config_form.py)
+                                      its files and pack members are here, and its planned market release fits
+                                      the Hub schema
   scripts/manifest.py changed <ref>   the extensions whose version is not what it was at <ref> (new ones too)
   scripts/manifest.py last-released   the commit CI last released for (its newest "market: index after" commit)
   scripts/manifest.py base <ref>…     the first ref HEAD descends from: where a push's release diffs from
@@ -18,7 +18,6 @@ import json, os, posixpath, re, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import catalog
-import config_form
 import icons
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -283,6 +282,12 @@ def check_junk(id):
 
 
 def check():
+    try:
+        _, market = catalog.verified()
+    except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError) as error:
+        print(f"could not verify the signed catalog for manifest compatibility: {error}", file=sys.stderr)
+        return False
+    previous = {entry["manifest"]["id"]: entry for entry in market["extensions"]}
     bad, inventory, sources = [], [], []
     for id in ids():
         try:
@@ -293,17 +298,12 @@ def check():
         sources.append(m)
         if m.get("id") != id:
             bad.append("extensions/%s: the manifest's id is %r, not the directory's name" % (id, m.get("id")))
-        if not catalog.valid_version(m.get("version", "")):
-            bad.append("extensions/%s: version %r is not MAJOR.MINOR.PATCH" % (id, m.get("version")))
         try:
-            inventory.append(catalog.source_entry(m))
+            entry = catalog.source_entry(m)
+            inventory.append(entry)
+            catalog.check_source_release(entry["manifest"], previous.get(id))
         except ValueError as e:
             bad.append("extensions/%s: %s" % (id, e))
-        # A hub refuses a manifest whose configuration its forms can't draw, and drops it from the catalog (#494).
-        try:
-            config_form.check(m)
-        except config_form.Refused as e:
-            bad.append("extensions/%s: a hub refuses this manifest: %s" % (id, e))
         t = m.get("tags", [])
         if not isinstance(t, list) or len(t) > TAGS_MOST or any(not isinstance(x, str) or not 0 < len(x) <= TAG_LONGEST for x in t):
             bad.append("extensions/%s: tags must be at most %d strings of 1 to %d characters" % (id, TAGS_MOST, TAG_LONGEST))

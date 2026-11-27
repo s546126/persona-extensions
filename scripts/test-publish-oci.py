@@ -39,17 +39,20 @@ class PublisherTests(CatalogFixture, unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         self.server = fake_oci.FakeRegistry()
-        data = archive(self.candidate["manifest"])
-        obj = oci.manifest("demo", "2.0.0", oci.digest(data), len(data))
-        encoded = oci.manifest_bytes(obj)
-        ref = oci.digest(encoded)
-        self.server.blobs.update({oci.digest(data): data, oci.digest(oci.EMPTY_CONFIG): oci.EMPTY_CONFIG})
-        self.server.manifests.update({"2.0.0": encoded, ref: encoded})
-        self.candidate["packages"] = [{"url": oci.package_url("demo", ref), "sha256": oci.digest(data)[7:], "size": len(data)}]
+        self.candidate["packages"] = [self.registry_package(self.candidate["manifest"])]
         raw, _ = catalog.verified(self.catalog_path)
         self.plan = {"repository_id": publisher.CLEANED_REPOSITORY_ID, "head_sha": SHA, "mode": "versions",
                      "base_payload_sha256": oci.digest(raw), "entries": [self.candidate], "release_receipts": [],
                      "removed_ids": [], "catalog_update_required": True}
+
+    def registry_package(self, manifest):
+        data = archive(manifest)
+        extension_id, version = manifest["id"], manifest["version"]
+        encoded = oci.manifest_bytes(oci.manifest(extension_id, version, oci.digest(data), len(data)))
+        ref = oci.digest(encoded)
+        self.server.blobs.update({oci.digest(data): data, oci.digest(oci.EMPTY_CONFIG): oci.EMPTY_CONFIG})
+        self.server.manifests.update({version: encoded, ref: encoded})
+        return {"url": oci.package_url(extension_id, ref), "sha256": oci.digest(data)[7:], "size": len(data)}
 
     def args(self, **changes):
         values = dict(repository=publisher.FINAL_REPOSITORY, repository_id=publisher.CLEANED_REPOSITORY_ID,
@@ -136,6 +139,73 @@ class PublisherTests(CatalogFixture, unittest.TestCase):
         self.assertEqual(calls, [oci.repository("demo")])
         token_call = next(c for c in self.server.calls if "/token?" in c[1])
         self.assertNotIn("Authorization", token_call[2])
+
+    def test_publish_preserves_one_signed_baseline_until_the_floor_returns(self):
+        old = self.entry["manifest"]
+        old["engines"] = {"persona": ">=202611230000"}
+        self.entry["packages"] = [self.registry_package(old)]
+        self.entry["l10n"] = {"en": {"name": "Compatible demo"}}
+        baseline = copy.deepcopy(catalog.release_fields(self.entry))
+        body = self.body
+        factory = lambda path: oci.Registry(path, transport=self.server)
+        for version, requirement, fallback in (
+            ("2.0.0", ">=202611260000", True),
+            ("2.1.0", ">=202611260000", True),
+            ("2.2.0", ">=202611250000 <202701010000", True),
+            ("3.0.0", ">=202611230000", False),
+            ("3.1.0", None, False),
+        ):
+            with self.subTest(version=version):
+                raw, _ = self.write_signed(body)
+                manifest = self.candidate["manifest"]
+                manifest["version"] = version
+                if requirement:
+                    manifest["engines"] = {"persona": requirement}
+                else:
+                    manifest.pop("engines")
+                if fallback:
+                    manifest["configuration"] = {"type": "object", "properties": {
+                        "example": {"type": "string", "section": "advanced"},
+                    }}
+                else:
+                    manifest.pop("configuration", None)
+                self.candidate["packages"] = [self.registry_package(manifest)]
+                plan = dict(self.plan, base_payload_sha256=oci.digest(raw))
+                body = catalog.loads(publisher.generate_payload(plan, self.catalog_path, SHA, factory))
+                entry = body["extensions"][0]
+                if fallback:
+                    self.assertEqual(catalog.release_fields(entry), baseline)
+                    self.assertEqual(entry["releases"], [catalog.release_fields(self.candidate)])
+                else:
+                    self.assertEqual(entry, self.candidate)
+                raw, _ = self.write_signed(body)
+                self.assertEqual(publisher.desired_entries(body, "versions"), [])
+                unchanged = dict(plan, base_payload_sha256=oci.digest(raw), entries=[], catalog_update_required=False)
+                self.server.calls.clear()
+                self.assertEqual(publisher.unchanged_catalog(unchanged, self.catalog_path, SHA, factory),
+                                 self.catalog_path.read_bytes())
+                if fallback:
+                    old_digest = "sha256:" + baseline["packages"][0]["sha256"]
+                    new_digest = "sha256:" + self.candidate["packages"][0]["sha256"]
+                    for ref in (old_digest, new_digest):
+                        self.assertTrue(any(call[1].endswith("/blobs/" + ref) for call in self.server.calls))
+
+    def test_new_extension_with_a_floor_stays_single(self):
+        self.candidate["manifest"]["engines"] = {"persona": ">=202611260000"}
+        self.candidate["packages"] = [self.registry_package(self.candidate["manifest"])]
+        raw, _ = self.write_signed(dict(self.body, extensions=[]))
+        plan = dict(self.plan, base_payload_sha256=oci.digest(raw))
+        body = catalog.loads(publisher.generate_payload(plan, self.catalog_path, SHA,
+            lambda path: oci.Registry(path, transport=self.server)))
+        self.assertEqual(body["extensions"], [self.candidate])
+
+    def test_nested_metadata_update_reuses_current_package_and_translations(self):
+        current = self.candidate["manifest"]
+        current["engines"] = {"persona": ">=202611260000"}
+        release = dict(catalog.release_fields(self.candidate), l10n={"en": {"name": "New demo"}})
+        self.entry["releases"] = [release]
+        with mock.patch.object(publisher.manifests, "tags", return_value=["new"]):
+            self.assertEqual(publisher.desired_entries(self.body, "versions"), [dict(release, tags=["new"])])
 
     def test_image_capture_does_not_raise_the_json_gate_limit(self):
         payload = b" " * (publisher.MANIFEST_MOST + 1)

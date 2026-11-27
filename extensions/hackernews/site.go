@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -73,12 +74,15 @@ func itemURL(id int64) string         { return fmt.Sprintf("%s/item?id=%d", webB
 
 // get reads path, from the cache when it is younger than fresh (0 always reads). When the site fails, an older copy
 // stands in and says why in stale, unless the thing is gone or the caller gave up.
-func (s *site) get(ctx context.Context, path string, fresh time.Duration) (reading, error) {
+func (s *site) get(ctx context.Context, path string, fresh time.Duration, validate func([]byte) error) (reading, error) {
 	old, had := s.lookup(path)
 	if had && fresh > 0 && time.Since(old.at) < fresh {
 		return reading{body: old.body, at: old.at}, nil
 	}
 	body, err := s.fetch(ctx, path)
+	if err == nil && validate != nil {
+		err = validate(body)
+	}
 	if err == nil {
 		now := time.Now()
 		s.store(path, body, now)
@@ -119,7 +123,7 @@ func (s *site) fetch(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("Hacker News answered HTTP %d", res.StatusCode)
 	case int64(len(body)) > answerMost || !json.Valid(body):
 		return nil, errBadAnswer
-	case string(body) == "null": // the API's answer for an id it does not have
+	case bytes.Equal(bytes.TrimSpace(body), []byte("null")): // the API's answer for an id it does not have
 		return nil, errNotFound
 	}
 	return body, nil

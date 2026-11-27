@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"net/url"
 	"regexp"
@@ -14,6 +15,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/nwverse/persona/sdk/go/wire"
 )
 
 // item is a story, a comment or a poll as the API answers it (only the fields this reads).
@@ -49,10 +52,37 @@ func (it item) domain() string {
 
 // link is the article's address when it can be opened as a link (views take only HTTPS), else empty.
 func (it item) link() string {
-	if u, err := url.Parse(it.URL); err == nil && u.Scheme == "https" && u.Host != "" {
+	if u, err := url.Parse(it.URL); err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && utf8.RuneCountInString(it.URL) <= wire.StringMost {
 		return it.URL
 	}
 	return ""
+}
+
+// displayTitle returns a non-empty single-line title for list rows and detail headers.
+func (it item) displayTitle() string {
+	if title := oneLine(it.Title); title != "" {
+		return title
+	}
+	if it.Type != "" && it.By != "" {
+		return it.Type + " by " + it.By
+	}
+	if it.By != "" {
+		return "Item by " + it.By
+	}
+	return fmt.Sprintf("Item %d", it.ID)
+}
+
+func dedupPositiveIDs(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // listDef is one of the site's lists.
@@ -88,7 +118,13 @@ func (a *app) stories(ctx context.Context, list string, n int, refresh bool) (li
 	if !ok {
 		return listing{}, errors.New("unknown list " + list)
 	}
-	rd, err := a.read(ctx, listPath(endpoint), freshness(listFor, refresh))
+	rd, err := a.read(ctx, listPath(endpoint), freshness(listFor, refresh), func(body []byte) error {
+		var ids []int64
+		if err := json.Unmarshal(body, &ids); err != nil {
+			return errBadAnswer
+		}
+		return nil
+	})
 	if err != nil {
 		return listing{}, err
 	}
@@ -96,6 +132,7 @@ func (a *app) stories(ctx context.Context, list string, n int, refresh bool) (li
 	if err := json.Unmarshal(rd.body, &ids); err != nil {
 		return listing{}, errBadAnswer
 	}
+	ids = dedupPositiveIDs(ids)
 	if len(ids) > n {
 		ids = ids[:n]
 	}
@@ -143,7 +180,16 @@ func (a *app) items(ctx context.Context, ids []int64, refresh bool) ([]item, int
 }
 
 func (a *app) item(ctx context.Context, id int64, refresh bool) (item, error) {
-	rd, err := a.read(ctx, itemPath(id), freshness(itemFor, refresh))
+	if id <= 0 {
+		return item{}, errNotFound
+	}
+	rd, err := a.read(ctx, itemPath(id), freshness(itemFor, refresh), func(body []byte) error {
+		var it item
+		if err := json.Unmarshal(body, &it); err != nil || it.ID != id {
+			return errBadAnswer
+		}
+		return nil
+	})
 	if err != nil {
 		return item{}, err
 	}
@@ -182,7 +228,7 @@ func (a *app) thread(ctx context.Context, id int64, comments int, refresh bool) 
 		return th, nil
 	}
 	// Read a few more than asked: some are deleted or dead.
-	kids := st.Kids
+	kids := dedupPositiveIDs(st.Kids)
 	if want := comments + comments/2; len(kids) > want {
 		kids = kids[:want]
 	}
