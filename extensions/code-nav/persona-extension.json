@@ -2,9 +2,9 @@
   "manifest_version": 1,
   "id": "code-nav",
   "name": "代码导航",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon": "assets/icon.png",
-  "description": "在 Persona 里像 JetBrains 一样看你电脑上的代码：文件树、面包屑、大纲、按名字搜符号、全文搜索，跳到定义、跳到实现、查找引用、查看说明，还能后退和前进。按文件自动找对应语言的语言服务（Go、TypeScript / JavaScript、Python、Rust、Swift），没装的语言也能看代码和全文搜索。代码只在那台电脑上读，经 hub 显示到你的设备上，不写任何文件。",
+  "description": "在 Persona 里像 JetBrains 一样看你电脑或 Hub 本机上的代码：页面内可视化引导配置机器与代码目录、按机器和语言探测并配置语言服务、查看 Git 变更 Diff 并点击修改位置直接跳转源码高亮，衔接文件树、大纲、符号/全文搜索、Hover 说明、跳定义/实现/引用、代码内点词跳转与前进后退。全程严格只读，绝不修改任何代码仓库。",
   "publisher": "nwverse",
   "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/code-nav.md",
   "tags": [
@@ -55,6 +55,11 @@
         "placement": "nav_page",
         "icon": "code"
       }
+    ]
+  },
+  "permissions": {
+    "hub": [
+      "machines.read"
     ]
   },
   "configuration": {

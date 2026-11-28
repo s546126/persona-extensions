@@ -3,11 +3,11 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -35,9 +35,13 @@ const codeUI = "code"
 type nodeCaller func(ctx context.Context, machine, method string, params, out any) error
 
 type hubApp struct {
-	mu       sync.Mutex
-	machines []string
-	call     nodeCaller
+	mu        sync.Mutex
+	machines  []string
+	baseCfg   config
+	call      nodeCaller
+	localNode *node
+	store     *settingsStore
+	pairedFn  func(ctx context.Context) ([]pairedMachine, error)
 }
 
 func (a *hubApp) program(id, version string) ext.Program {
@@ -55,7 +59,23 @@ func (a *hubApp) init(_ context.Context, in *ext.Init, hub *ext.Hub) (map[string
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.baseCfg = c
 	a.machines = c.Machines
+	if a.store == nil {
+		a.store = newSettingsStore(in.Info().DataDir)
+	}
+	if a.localNode == nil {
+		ln := &node{}
+		ln.setup(c)
+		go ln.reap()
+		a.localNode = ln
+	}
+	if a.pairedFn == nil && in.Hub.URL != "" && in.Hub.Token != "" {
+		url, tok := in.Hub.URL, in.Hub.Token
+		a.pairedFn = func(ctx context.Context) ([]pairedMachine, error) {
+			return fetchPairedMachines(ctx, url, tok)
+		}
+	}
 	if a.call == nil {
 		a.call = func(ctx context.Context, machine, method string, params, out any) error {
 			return hub.Call(ctx, "nodes.call", map[string]any{"machine": machine, "method": "nav." + method, "params": params}, out)
@@ -64,23 +84,159 @@ func (a *hubApp) init(_ context.Context, in *ext.Init, hub *ext.Hub) (map[string
 	return nil, nil
 }
 
+func (a *hubApp) cleanup() {
+	a.mu.Lock()
+	ln := a.localNode
+	a.localNode = nil
+	a.mu.Unlock()
+	if ln != nil {
+		ln.cleanup()
+	}
+}
+
+func (a *hubApp) getStore() *settingsStore {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store == nil {
+		a.store = newSettingsStore("")
+	}
+	return a.store
+}
+
+func (a *hubApp) ensureLocalNode() *node {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.localNode == nil {
+		ln := &node{}
+		cfg := a.baseCfg
+		if len(cfg.Roots) == 0 {
+			cfg.Roots = []string{"~/code"}
+		}
+		ln.setup(cfg)
+		a.localNode = ln
+	}
+	return a.localNode
+}
+
+func (a *hubApp) configuredRemotes() []string {
+	a.mu.Lock()
+	all := append([]string(nil), a.machines...)
+	a.mu.Unlock()
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range all {
+		if m == "" || m == hubMachineID || seen[m] || len(out) >= 99 {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out
+}
+
+func (a *hubApp) enabledMachines() []string {
+	ps := a.getStore().get()
+	var out []string
+	if ps.UseHub {
+		out = append(out, hubMachineID)
+	}
+	out = append(out, a.configuredRemotes()...)
+	return out
+}
+
+func (a *hubApp) machineLabel(t text, id string) string {
+	if id == hubMachineID {
+		return t.hubMachine
+	}
+	return id
+}
+
+func (a *hubApp) pairedMachines(ctx context.Context) []pairedMachine {
+	a.mu.Lock()
+	fn := a.pairedFn
+	a.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	list, err := fn(ctx)
+	if err != nil {
+		return nil
+	}
+	return list
+}
+
+func (a *hubApp) machineOverride(machine string) *nodeOverride {
+	ps := a.getStore().get()
+	if ms, ok := ps.Machines[machine]; ok {
+		return ms.toOverride()
+	}
+	return nil
+}
+
+func (a *hubApp) callMachine(ctx context.Context, machine, method string, params, out any) error {
+	cctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+
+	// Attach runtime per-machine override on probe/repos/configure so restarted nodes stay synced automatically.
+	if ov := a.machineOverride(machine); ov != nil && (method == "repos" || method == "probe" || method == "configure") {
+		if m, ok := params.(map[string]any); ok {
+			cp := make(map[string]any, len(m)+1)
+			for k, v := range m {
+				cp[k] = v
+			}
+			cp["override"] = ov
+			params = cp
+		}
+	}
+
+	if machine == hubMachineID {
+		ln := a.ensureLocalNode()
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		res, err := ln.handle(cctx, method, raw)
+		if err != nil {
+			return err
+		}
+		if out == nil {
+			return nil
+		}
+		b, err := json.Marshal(res)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(b, out)
+	}
+
+	_, call := a.snapshot()
+	if call == nil {
+		return &ext.Error{Code: "unavailable", Message: "no node caller configured"}
+	}
+	return call(cctx, machine, method, params, out)
+}
+
 // state is where the page is. Short names: it travels with every draw and must stay under 16 KB.
 type state struct {
-	M string   `json:"m,omitempty"` // computer
-	R string   `json:"r,omitempty"` // repository (its path on the computer)
-	P string   `json:"p,omitempty"` // file open (absolute)
-	L int      `json:"l,omitempty"` // line marked, 0 none
-	C int      `json:"c,omitempty"` // its column
-	F int      `json:"f,omitempty"` // first line shown, 0 from the marked line
-	O []string `json:"o,omitempty"` // folders open in the tree, relative to the repository
-	H []spot   `json:"h,omitempty"` // the way back, newest last
-	N []spot   `json:"n,omitempty"` // the way forward, newest last
-	V string   `json:"v,omitempty"` // what the main pane lists instead of the file: refs, defs, impls, search, dir
-	Q string   `json:"q,omitempty"` // the search
-	K string   `json:"k,omitempty"` // what the search looks for: "" symbols, "text" the files' text
-	W *spot    `json:"w,omitempty"` // where refs / defs / impls were asked from
-	X *spot    `json:"x,omitempty"` // where quick info was asked for
-	D string   `json:"d,omitempty"` // the folder the main pane lists (V dir), relative to the repository
+	M  string   `json:"m,omitempty"`  // computer ("hub" or remote machine ID)
+	T  string   `json:"t,omitempty"`  // home tab: ""/"repos", "setup", "lsp"
+	E  string   `json:"e,omitempty"`  // language selected in "lsp" tab
+	R  string   `json:"r,omitempty"`  // repository (its path on the computer)
+	P  string   `json:"p,omitempty"`  // file open (absolute)
+	L  int      `json:"l,omitempty"`  // line marked, 0 none
+	C  int      `json:"c,omitempty"`  // its column
+	F  int      `json:"f,omitempty"`  // first line shown, 0 from the marked line
+	O  []string `json:"o,omitempty"`  // folders open in the tree, relative to the repository
+	H  []spot   `json:"h,omitempty"`  // the way back, newest last
+	N  []spot   `json:"n,omitempty"`  // the way forward, newest last
+	V  string   `json:"v,omitempty"`  // what the main pane lists instead of the file: refs, defs, impls, search, dir, diff
+	Q  string   `json:"q,omitempty"`  // the search
+	K  string   `json:"k,omitempty"`  // what the search looks for: "" symbols, "text" the files' text
+	W  *spot    `json:"w,omitempty"`  // where refs / defs / impls were asked from
+	X  *spot    `json:"x,omitempty"`  // where quick info was asked for
+	D  string   `json:"d,omitempty"`  // the folder the main pane lists (V dir), relative to the repository
+	DM string   `json:"dm,omitempty"` // diff mode: ""/"unstaged", "staged", "branch"
+	DF string   `json:"df,omitempty"` // diff file path relative to the repository (V diff)
 }
 
 type spot struct {
@@ -104,7 +260,9 @@ const (
 )
 
 // views the main pane can show instead of the file
-var listViews = map[string]bool{"": true, "refs": true, "defs": true, "impls": true, "search": true, "dir": true}
+var listViews = map[string]bool{"": true, "refs": true, "defs": true, "impls": true, "search": true, "dir": true, "diff": true}
+
+var homeTabs = map[string]bool{"": true, "repos": true, "setup": true, "lsp": true}
 
 func (a *hubApp) snapshot() ([]string, nodeCaller) {
 	a.mu.Lock()
@@ -114,7 +272,7 @@ func (a *hubApp) snapshot() ([]string, nodeCaller) {
 
 func (a *hubApp) render(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {
 	s := decodeState(r)
-	return a.view(ctx, r, &s, ""), nil
+	return a.view(ctx, r, &s, "", false), nil
 }
 
 // decodeState reads the page's state and drops what it cannot be: a state is the app's to send back, so it is held to
@@ -130,6 +288,12 @@ func decodeState(r *ext.UIRequest) state {
 
 func (s *state) sanitize() {
 	okPath := func(p string) bool { return p == "" || (filepath.IsAbs(p) && len(p) <= 4096) }
+	if !homeTabs[s.T] {
+		s.T = ""
+	}
+	if s.E != "" && !isManagedLang(s.E) {
+		s.E = ""
+	}
 	if !okPath(s.R) || s.R == "" {
 		s.R, s.P = "", ""
 	}
@@ -146,6 +310,12 @@ func (s *state) sanitize() {
 	s.Q = clip(strings.TrimSpace(s.Q), maxQuery)
 	if !relOK(s.D) {
 		s.D = ""
+	}
+	if s.DM != "" && s.DM != diffModeUnstaged && s.DM != diffModeStaged && s.DM != diffModeBranch {
+		s.DM = ""
+	}
+	if !relOK(s.DF) || len(s.DF) > 1024 {
+		s.DF = ""
 	}
 	s.O = slices.DeleteFunc(s.O, func(d string) bool { return d == "" || len(d) > 1024 || !relOK(d) })
 	if len(s.O) > maxOpenDirs {
@@ -174,31 +344,76 @@ func relOK(rel string) bool {
 }
 
 // view draws the page for s; note, when set, is a line above the code (a definition that was not found).
-func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note string) *wire.View {
+func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note string, forceProbe bool) *wire.View {
 	t := texts(r.Locale)
-	all, call := a.snapshot()
-	var machines []string
-	for _, c := range machineChoices(all) {
-		machines = append(machines, c.Value)
-	}
+	machines := a.enabledMachines()
 	v := &wire.View{Title: t.title}
+
+	// Synchronize active machine selection with enabled machines.
 	if len(machines) == 0 {
-		v.Sections = []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Key: "setup", Title: t.noMachines, Detail: t.noMachinesHint, Icon: wire.NavIconCode}}}}
-		return v
+		s.M, s.R, s.P = "", "", ""
+	} else {
+		switch {
+		case s.M == "":
+			s.M = machines[0]
+		case !slices.Contains(machines, s.M):
+			*s = state{M: machines[0], T: s.T, E: s.E}
+		}
 	}
-	switch {
-	case s.M == "": // the first draw: the first computer, keeping what the state already says
-		s.M = machines[0]
-	case !slices.Contains(machines, s.M): // a computer no longer chosen: start over on the first
-		*s = state{M: machines[0]}
-	}
-	if choices := machineChoices(machines); len(choices) > 1 {
+	if choices := a.machineFilterChoices(t, machines); len(choices) > 1 {
 		v.Filter = &wire.Filter{Name: "machine", Title: t.machine, Value: s.M, Action: wire.Action{ID: "machine"}, Choices: choices}
 	}
+
+	// Home-level tabs (Repositories / Setup / Languages) when not inside a specific repository.
+	if s.R == "" {
+		activeTab := s.T
+		if activeTab == "" {
+			if len(machines) == 0 {
+				activeTab = "setup"
+			} else {
+				activeTab = "repos"
+			}
+		}
+		v.Tabs = &wire.Tabs{
+			Name:   "tab",
+			Value:  activeTab,
+			Action: wire.Action{ID: "tab"},
+			Items: []wire.Tab{
+				{Value: "repos", Title: t.tabRepos},
+				{Value: "setup", Title: t.tabSetup},
+				{Value: "lsp", Title: t.tabLSP},
+			},
+		}
+		switch activeTab {
+		case "setup":
+			v.State = ext.EncodeState(s)
+			v.Sections = a.setupSections(ctx, r, t, s, machines, forceProbe, note)
+			return v
+		case "lsp":
+			v.State = ext.EncodeState(s)
+			v.Sections = a.lspSections(ctx, r, t, s, machines, forceProbe, note)
+			return v
+		default:
+			if len(machines) == 0 {
+				v.State = ext.EncodeState(s)
+				v.Sections = []wire.Section{{Items: []wire.Component{{
+					Type:   wire.ComponentEmpty,
+					Key:    "setup",
+					Title:  t.noMachines,
+					Detail: t.noMachinesHint,
+					Icon:   wire.NavIconCode,
+					Button: &wire.EmptyButton{
+						Title:  t.setupOpenBtn,
+						Action: wire.Action{ID: "tab", Values: map[string]string{"tab": "setup"}},
+					},
+				}}}}
+				return v
+			}
+		}
+	}
+
 	nc := func(method string, params, out any) error {
-		cctx, cancel := context.WithTimeout(ctx, 35*time.Second)
-		defer cancel()
-		return call(cctx, s.M, method, params, out)
+		return a.callMachine(ctx, s.M, method, params, out)
 	}
 	var repos reposResult
 	if err := nc("repos", map[string]any{}, &repos); err != nil {
@@ -208,6 +423,16 @@ func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note stri
 	}
 	if s.R != "" && !slices.ContainsFunc(repos.Repos, func(x repo) bool { return x.Path == s.R }) {
 		*s = state{M: s.M}
+		v.Tabs = &wire.Tabs{
+			Name:   "tab",
+			Value:  "repos",
+			Action: wire.Action{ID: "tab"},
+			Items: []wire.Tab{
+				{Value: "repos", Title: t.tabRepos},
+				{Value: "setup", Title: t.tabSetup},
+				{Value: "lsp", Title: t.tabLSP},
+			},
+		}
 	}
 	if s.R == "" {
 		v.State = ext.EncodeState(s)
@@ -241,6 +466,10 @@ func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note stri
 	if len(s.N) > 0 {
 		top.Items = append(top.Items, wire.Component{Type: wire.ComponentButton, Key: "forward", Title: t.forward, Action: &wire.Action{ID: "forward"}})
 	}
+	if s.V != "diff" {
+		top.Items = append(top.Items, wire.Component{Type: wire.ComponentButton, Key: "open-diff", Title: t.diffBtn, Action: &wire.Action{ID: "diff_view"}})
+	}
+	top.Items = append(top.Items, wire.Component{Type: wire.ComponentButton, Key: "open-lsp", Title: t.lspConfigBtn, Action: &wire.Action{ID: "open_lsp"}})
 	if note != "" {
 		top.Items = append(top.Items, wire.Component{Type: wire.ComponentText, Key: "note", Style: wire.TextStyleSecondary, Text: clip(note, 2000)})
 	}
@@ -248,6 +477,8 @@ func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note stri
 	body := wire.Section{Key: "main"}
 
 	switch s.V {
+	case "diff":
+		body.Items = a.diffView(t, r, s, nc)
 	case "search":
 		body.Items = a.searchResults(t, s, nc)
 	case "refs", "defs", "impls":
@@ -275,8 +506,8 @@ func (a *hubApp) view(ctx context.Context, r *ext.UIRequest, s *state, note stri
 	return v
 }
 
-// machineChoices are the computers as the filter lists them: each once.
-func machineChoices(machines []string) []wire.Choice {
+// machineFilterChoices are the enabled computers as the filter lists them: each once, with readable titles.
+func (a *hubApp) machineFilterChoices(t text, machines []string) []wire.Choice {
 	var out []wire.Choice
 	seen := map[string]bool{}
 	for _, m := range machines {
@@ -284,7 +515,7 @@ func machineChoices(machines []string) []wire.Choice {
 			continue
 		}
 		seen[m] = true
-		out = append(out, wire.Choice{Value: m})
+		out = append(out, wire.Choice{Value: m, Title: clip(a.machineLabel(t, m), 80)})
 	}
 	return out
 }
@@ -296,7 +527,17 @@ func repoList(t text, repos reposResult) []wire.Section {
 		if len(repos.Roots) > 0 {
 			hint = clip(fmt.Sprintf(t.noReposIn, strings.Join(repos.Roots, t.listSep)), 2000)
 		}
-		return []wire.Section{{Items: []wire.Component{{Type: wire.ComponentEmpty, Key: "none", Title: t.noRepos, Detail: hint, Icon: wire.NavIconFolder}}}}
+		return []wire.Section{{Items: []wire.Component{{
+			Type:   wire.ComponentEmpty,
+			Key:    "none",
+			Title:  t.noRepos,
+			Detail: hint,
+			Icon:   wire.NavIconFolder,
+			Button: &wire.EmptyButton{
+				Title:  t.setupOpenBtn,
+				Action: wire.Action{ID: "tab", Values: map[string]string{"tab": "setup"}},
+			},
+		}}}}
 	}
 	sec := wire.Section{Key: "repos", Title: fmt.Sprintf(t.repos, len(repos.Repos))}
 	for i, r := range repos.Repos {
@@ -426,6 +667,15 @@ func crumbs(t text, s *state, rp repo) wire.Component {
 	}}
 	rel, isFile := "", false
 	switch {
+	case s.V == "diff":
+		diffCrumb := wire.Crumb{Title: t.diffCrumb}
+		if s.DF != "" {
+			diffCrumb.Action = &wire.Action{ID: "diff_list"}
+			c.Crumbs = append(c.Crumbs, diffCrumb, wire.Crumb{Title: clip(s.DF, 200)})
+		} else {
+			c.Crumbs = append(c.Crumbs, diffCrumb)
+		}
+		return c
 	case s.V == "dir":
 		rel = s.D
 	case s.P != "" && s.V == "":
@@ -930,17 +1180,284 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 		return max(0, n)
 	}
 	here := func() spot { return spot{P: s.P, L: num("line"), C: max(num("col"), num("column"))} }
+	activeMachine := func() string {
+		if s.M != "" {
+			return s.M
+		}
+		if ms := a.enabledMachines(); len(ms) > 0 {
+			return ms[0]
+		}
+		return ""
+	}
 	note := ""
+	toast := ""
+	forceProbe := false
+
 	switch r.Action {
+	case "tab":
+		tab := vals["tab"]
+		if !homeTabs[tab] || tab == "" {
+			tab = "repos"
+		}
+		s = state{M: s.M, T: tab, E: s.E}
+	case "open_lsp":
+		s = state{M: s.M, T: "lsp", E: s.E}
 	case "machine":
-		s = state{M: vals["machine"]}
+		s = state{M: vals["machine"], T: s.T, E: s.E}
 	case "repo":
 		s = state{M: s.M, R: vals["repo"]}
 	case "repos":
-		s = state{M: s.M}
+		s = state{M: s.M, T: "repos"}
 	case "home":
 		s.remember()
-		s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D = "", 0, 0, 0, "", nil, nil, ""
+		s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D, s.DF = "", 0, 0, 0, "", nil, nil, "", ""
+	case "toggle_hub":
+		var next bool
+		_ = a.getStore().update(func(ps *persistedSettings) error {
+			switch vals["hub_enabled"] {
+			case "true":
+				ps.UseHub = true
+			case "false":
+				ps.UseHub = false
+			default:
+				ps.UseHub = !ps.UseHub
+			}
+			next = ps.UseHub
+			return nil
+		})
+		if next {
+			s.M = hubMachineID
+		} else if s.M == hubMachineID {
+			s.M, s.R, s.P = "", "", ""
+		}
+		s.T = "setup"
+		forceProbe = true
+	case "add_root":
+		cleaned, err := cleanRootPath(vals["root_path"])
+		if err != nil {
+			toast = t.setupRootInvalid
+			break
+		}
+		target := activeMachine()
+		if target == "" {
+			// Auto-enable Hub local machine for zero-friction first-time setup.
+			_ = a.getStore().update(func(ps *persistedSettings) error {
+				ps.UseHub = true
+				return nil
+			})
+			target = hubMachineID
+			s.M = hubMachineID
+		}
+		var addErr string
+		_ = a.getStore().update(func(ps *persistedSettings) error {
+			ms := ps.Machines[target]
+			roots := a.currentRootsFor(target, ms)
+			if slices.Contains(roots, cleaned) {
+				addErr = t.setupRootExists
+				return nil
+			}
+			if len(roots) >= maxRootsLimit {
+				addErr = t.setupRootLimit
+				return nil
+			}
+			ms.Roots = append(roots, cleaned)
+			ms.RootsSet = true
+			ps.Machines[target] = ms
+			return nil
+		})
+		if addErr != "" {
+			toast = addErr
+		} else {
+			forceProbe = true
+			note = t.setupSaved
+			_ = a.callMachine(ctx, target, "configure", map[string]any{}, nil)
+		}
+		s.T = "setup"
+	case "remove_root":
+		target := activeMachine()
+		rem := strings.TrimSpace(vals["root"])
+		if target != "" && rem != "" {
+			_ = a.getStore().update(func(ps *persistedSettings) error {
+				ms := ps.Machines[target]
+				roots := a.currentRootsFor(target, ms)
+				ms.Roots = slices.DeleteFunc(roots, func(x string) bool { return x == rem })
+				ms.RootsSet = true
+				ps.Machines[target] = ms
+				return nil
+			})
+			forceProbe = true
+			_ = a.callMachine(ctx, target, "configure", map[string]any{}, nil)
+		}
+		s.T = "setup"
+	case "finish_setup":
+		_ = a.getStore().update(func(ps *persistedSettings) error {
+			ps.Configured = true
+			return nil
+		})
+		s = state{M: activeMachine(), T: "repos"}
+	case "probe_refresh":
+		forceProbe = true
+		if target := activeMachine(); target != "" {
+			_ = a.callMachine(ctx, target, "probe", map[string]any{"force": true}, nil)
+		}
+	case "select_lang":
+		if lang := canonicalLang(vals["lang"]); isManagedLang(lang) {
+			s.E = lang
+		}
+		s.T = "lsp"
+	case "toggle_lang":
+		target := activeMachine()
+		lang := canonicalLang(vals["lang"])
+		if target != "" && isManagedLang(lang) {
+			s.E = lang
+			var nowEnabled bool
+			_ = a.getStore().update(func(ps *persistedSettings) error {
+				ms := ps.Machines[target]
+				if ms.Languages == nil {
+					ms.Languages = map[string]langOverride{}
+				}
+				ov := ms.Languages[lang]
+				rawVal := vals["lang_en_"+lang]
+				if rawVal == "" {
+					rawVal = vals["enabled"]
+				}
+				switch rawVal {
+				case "true":
+					ov.Disabled = false
+				case "false":
+					ov.Disabled = true
+				default:
+					ov.Disabled = !ov.Disabled
+				}
+				nowEnabled = !ov.Disabled
+				ms.Languages[lang] = ov
+				ps.Machines[target] = ms
+				return nil
+			})
+			var pr probeResult
+			_ = a.callMachine(ctx, target, "configure", map[string]any{}, &pr)
+			forceProbe = true
+			if !nowEnabled {
+				toast = fmt.Sprintf(t.lspSavedDisabled, languageGroupTitle(lang))
+			} else {
+				toast = a.langProbeSummary(t, pr, lang)
+			}
+		}
+		s.T = "lsp"
+	case "save_lang":
+		target := activeMachine()
+		lang := canonicalLang(vals["lang"])
+		if target != "" && isManagedLang(lang) {
+			s.E = lang
+			cleaned, err := cleanLSPPath(vals["lsp_path"])
+			if err != nil {
+				toast = fmt.Sprintf(t.lspSavedBadPath, languageGroupTitle(lang), err.Error())
+				break
+			}
+			_ = a.getStore().update(func(ps *persistedSettings) error {
+				ms := ps.Machines[target]
+				if ms.Languages == nil {
+					ms.Languages = map[string]langOverride{}
+				}
+				ov := ms.Languages[lang]
+				ov.Path = cleaned
+				ov.Disabled = false
+				ms.Languages[lang] = ov
+				ps.Machines[target] = ms
+				return nil
+			})
+			var pr probeResult
+			if err := a.callMachine(ctx, target, "configure", map[string]any{}, &pr); err != nil {
+				toast = clip(errText(err), 300)
+			} else {
+				toast = a.langProbeSummary(t, pr, lang)
+			}
+			forceProbe = true
+		}
+		s.T = "lsp"
+	case "reset_lang":
+		target := activeMachine()
+		lang := canonicalLang(vals["lang"])
+		if target != "" && isManagedLang(lang) {
+			s.E = lang
+			_ = a.getStore().update(func(ps *persistedSettings) error {
+				ms := ps.Machines[target]
+				if ms.Languages != nil {
+					ov := ms.Languages[lang]
+					ov.Path = ""
+					if !ov.Disabled {
+						delete(ms.Languages, lang)
+					} else {
+						ms.Languages[lang] = ov
+					}
+					ps.Machines[target] = ms
+				}
+				return nil
+			})
+			_ = a.callMachine(ctx, target, "configure", map[string]any{}, nil)
+			forceProbe = true
+			toast = fmt.Sprintf(t.lspSavedAuto, languageGroupTitle(lang))
+		}
+		s.T = "lsp"
+	case "save_idle":
+		target := activeMachine()
+		mins, err := strconv.Atoi(strings.TrimSpace(vals["idle_minutes"]))
+		if err != nil || mins < 1 || mins > 1440 {
+			toast = t.lspIdleInvalid
+			break
+		}
+		if target != "" {
+			_ = a.getStore().update(func(ps *persistedSettings) error {
+				ms := ps.Machines[target]
+				ms.IdleMinutes = mins
+				ps.Machines[target] = ms
+				return nil
+			})
+			_ = a.callMachine(ctx, target, "configure", map[string]any{}, nil)
+			forceProbe = true
+			toast = fmt.Sprintf(t.lspIdleSaved, mins)
+		}
+		s.T = "lsp"
+	case "reap_lsp":
+		if target := activeMachine(); target != "" {
+			var res struct {
+				Stopped int `json:"stopped"`
+			}
+			if err := a.callMachine(ctx, target, "reap", map[string]any{}, &res); err == nil {
+				toast = fmt.Sprintf(t.lspReapedToast, res.Stopped)
+			}
+			forceProbe = true
+		}
+		s.T = "lsp"
+	case "diff_view":
+		if s.R != "" {
+			s.V = "diff"
+			s.DF = ""
+			if s.DM == "" {
+				s.DM = diffModeUnstaged
+			}
+		}
+	case "diff_mode":
+		if s.R != "" {
+			s.V = "diff"
+			s.DM = normalizeDiffMode(vals["diff_mode"])
+			s.DF = ""
+		}
+	case "diff_list":
+		if s.R != "" {
+			s.V = "diff"
+			s.DF = ""
+		}
+	case "diff_file":
+		if p := vals["path"]; s.R != "" && p != "" && relOK(p) {
+			s.V = "diff"
+			s.DF = p
+		}
+	case "diff_jump":
+		if p := vals["path"]; s.R != "" && p != "" && relOK(p) {
+			abs := filepath.Join(s.R, filepath.FromSlash(p))
+			s.moveTo(abs, max(1, num("line")), max(1, num("col")))
+		}
 	case "open":
 		if p := vals["path"]; p != "" && s.R != "" && relOK(p) {
 			s.moveTo(filepath.Join(s.R, filepath.FromSlash(p)), 0, 0)
@@ -953,7 +1470,7 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 		}
 	case "dir":
 		if p := strings.Trim(vals["path"], "/"); relOK(p) {
-			s.V, s.D, s.W = "dir", p, nil
+			s.V, s.D, s.W, s.DF = "dir", p, nil, ""
 			if p == "" {
 				s.V = ""
 				if s.P != "" {
@@ -985,7 +1502,7 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 		s.F = max(1, s.firstShown()-2000)
 	case "search":
 		s.Q = clip(strings.TrimSpace(vals["q"]), maxQuery)
-		s.V = ""
+		s.V, s.DF = "", ""
 		if s.Q != "" {
 			s.V = "search"
 		}
@@ -996,7 +1513,7 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 		}
 		s.V = "search"
 	case "close_list":
-		s.V, s.W, s.D, s.Q = "", nil, "", ""
+		s.V, s.W, s.D, s.Q, s.DF = "", nil, "", "", ""
 	case "close_hover":
 		s.X = nil
 	case "refs_at":
@@ -1068,7 +1585,38 @@ func (a *hubApp) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResu
 		return nil, &ext.Error{Code: "unknown_action", Message: clip(r.Action, 128)}
 	}
 	s.sanitize()
-	return &wire.ActionResult{View: a.view(ctx, r, &s, note)}, nil
+	return &wire.ActionResult{View: a.view(ctx, r, &s, note, forceProbe), Toast: clip(toast, 300)}, nil
+}
+
+func (a *hubApp) currentRootsFor(_ string, ms machineSettings) []string {
+	if ms.RootsSet {
+		return slices.Clone(ms.Roots)
+	}
+	a.mu.Lock()
+	base := slices.Clone(a.baseCfg.Roots)
+	a.mu.Unlock()
+	if len(base) == 0 {
+		return []string{"~/code"}
+	}
+	return base
+}
+
+func (a *hubApp) langProbeSummary(t text, pr probeResult, lang string) string {
+	for _, lp := range pr.Languages {
+		if lp.Lang == lang {
+			switch lp.Status {
+			case "ready":
+				return fmt.Sprintf(t.lspSavedReady, languageGroupTitle(lang), lp.Binary)
+			case "invalid_path":
+				return fmt.Sprintf(t.lspSavedBadPath, languageGroupTitle(lang), lp.Error)
+			case "disabled":
+				return fmt.Sprintf(t.lspSavedDisabled, languageGroupTitle(lang))
+			default:
+				return fmt.Sprintf(t.noServer, languageGroupTitle(lang))
+			}
+		}
+	}
+	return t.setupSaved
 }
 
 // parseLine reads "120" or "120:7" (also "120,7" and spaces) as a line and a column.
@@ -1086,11 +1634,8 @@ func parseLine(v string) (int, int, bool) {
 // jumpTo asks for the definition or the implementations at at: one opens it (the way back remembers where you were),
 // several are listed, none leaves the page as it was. It says how many there were.
 func (a *hubApp) jumpTo(ctx context.Context, s *state, method string, at spot) (int, error) {
-	_, call := a.snapshot()
-	cctx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
 	var res locationsResult
-	if err := call(cctx, s.M, method, map[string]any{"repo": s.R, "path": at.P, "line": at.L, "col": at.C}, &res); err != nil {
+	if err := a.callMachine(ctx, s.M, method, map[string]any{"repo": s.R, "path": at.P, "line": at.L, "col": at.C}, &res); err != nil {
 		return 0, err
 	}
 	if res.NoServer != "" {
@@ -1120,7 +1665,7 @@ func (s *state) moveTo(p string, line, col int) {
 	}
 	s.remember()
 	s.N = nil
-	s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D = p, line, col, 0, "", nil, nil, ""
+	s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D, s.DF = p, line, col, 0, "", nil, nil, "", ""
 }
 
 // back returns to where the page was before its last jump; forward undoes a back.
@@ -1131,7 +1676,7 @@ func (s *state) back() {
 		if s.P != "" {
 			s.N = append(s.N, spot{P: s.P, L: s.L, C: s.C})
 		}
-		s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D = b.P, b.L, b.C, 0, "", nil, nil, ""
+		s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D, s.DF = b.P, b.L, b.C, 0, "", nil, nil, "", ""
 		s.trim()
 	}
 }
@@ -1143,7 +1688,7 @@ func (s *state) forward() {
 		if s.P != "" {
 			s.H = append(s.H, spot{P: s.P, L: s.L, C: s.C})
 		}
-		s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D = f.P, f.L, f.C, 0, "", nil, nil, ""
+		s.P, s.L, s.C, s.F, s.V, s.W, s.X, s.D, s.DF = f.P, f.L, f.C, 0, "", nil, nil, "", ""
 		s.trim()
 	}
 }
@@ -1206,23 +1751,9 @@ func (s *state) firstShown() int {
 	return max(1, s.L-windowBefore)
 }
 
-// navigateField is the index of wire.Component's Navigate (UI version 13: a name chosen in the code is followed with
-// it), or -1 while the SDK copy predates it. Set through it, the page draws a code's navigate as soon as the SDK is
-// synced, with no change here; until then it draws the rows that do the same on UI version 12.
-var navigateField = func() int {
-	f, ok := reflect.TypeOf(wire.Component{}).FieldByName("Navigate")
-	if !ok || f.Type != reflect.TypeOf(&wire.Action{}) || len(f.Index) != 1 {
-		return -1
-	}
-	return f.Index[0]
-}()
-
-// setNavigate sets c's navigate when the SDK has it, and says whether it did.
+// setNavigate sets c's UI version 13 Navigate action directly on the SDK Component.
 func setNavigate(c *wire.Component, a *wire.Action) bool {
-	if navigateField < 0 {
-		return false
-	}
-	reflect.ValueOf(c).Elem().Field(navigateField).Set(reflect.ValueOf(a))
+	c.Navigate = a
 	return true
 }
 

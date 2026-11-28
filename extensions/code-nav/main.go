@@ -52,6 +52,8 @@ func main() {
 		ext.Main(n.program(m.ID, m.Version))
 		n.cleanup()
 	default:
-		ext.Main((&hubApp{}).program(m.ID, m.Version))
+		a := &hubApp{}
+		ext.Main(a.program(m.ID, m.Version))
+		a.cleanup()
 	}
 }

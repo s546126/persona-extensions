@@ -20,16 +20,19 @@ import (
 
 // fakeNode answers nav.* with what a test puts in it.
 type fakeNode struct {
-	repos   reposResult
-	list    listResult
-	read    readResult
-	syms    symbolsResult
-	search  symbolsResult
-	grep    grepResult
-	locs    locationsResult
-	hover   hoverResult
-	fail    map[string]error // a method that fails
-	methods []string
+	repos      reposResult
+	list       listResult
+	read       readResult
+	syms       symbolsResult
+	search     symbolsResult
+	grep       grepResult
+	locs       locationsResult
+	hover      hoverResult
+	probe      probeResult
+	diffStatus diffStatusResult
+	diffFile   diffFileResult
+	fail       map[string]error // a method that fails
+	methods    []string
 }
 
 func (f *fakeNode) call(_ context.Context, _, method string, params, out any) error {
@@ -41,6 +44,10 @@ func (f *fakeNode) call(_ context.Context, _, method string, params, out any) er
 	switch method {
 	case "repos":
 		res = f.repos
+	case "probe", "configure":
+		res = f.probe
+	case "reap":
+		res = map[string]int{"stopped": 1}
 	case "list":
 		res = f.list
 	case "read":
@@ -62,8 +69,15 @@ func (f *fakeNode) call(_ context.Context, _, method string, params, out any) er
 		res = f.locs
 	case "hover":
 		res = f.hover
+	case "diff_status":
+		res = f.diffStatus
+	case "diff_file":
+		res = f.diffFile
 	default:
 		return fmt.Errorf("unknown method %s", method)
+	}
+	if out == nil {
+		return nil
 	}
 	b, _ := json.Marshal(res)
 	return json.Unmarshal(b, out)
@@ -77,6 +91,32 @@ func goodNode() *fakeNode {
 		list:  listResult{Files: []string{"README.md", "go.mod", "main.go", "pkg/a/a.go", "pkg/b.go", "web/app.ts"}},
 		read:  readResult{Repo: repoPath, Rel: "main.go", Text: "package main\n\nfunc main() {\n\tfmt.Println(util.Greet(\"you\"))\n}", From: 1, Lines: 5},
 		syms:  symbolsResult{Symbols: []symbol{{Name: "main", Kind: 12, Line: 3, Col: 6}}},
+		probe: probeResult{
+			Home: "/home/me", OS: "linux", IdleMinutes: 10, TotalRepos: 1,
+			Roots: []rootProbe{{Input: "~/code", Resolved: "/home/me/code", Status: "ok", Repos: 1}},
+			Languages: []lspProbe{
+				{Lang: "go", Enabled: true, Status: "ready", Binary: "/usr/local/bin/gopls", Version: "gopls v0.18.0", Running: 1},
+				{Lang: "typescript", Enabled: true, Status: "missing", Candidates: []string{"typescript-language-server"}},
+				{Lang: "python", Enabled: false, Status: "disabled", Binary: "/usr/bin/pyright-langserver"},
+				{Lang: "rust", Enabled: true, Status: "invalid_path", CustomPath: "/bad/rust-analyzer", Error: "file does not exist"},
+				{Lang: "swift", Enabled: true, Status: "missing"},
+				{Lang: "c", Enabled: true, Status: "missing"},
+			},
+		},
+		diffStatus: diffStatusResult{
+			IsGit: true, Branch: "feat/demo", BaseRef: "main", Mode: diffModeUnstaged,
+			Files:    []diffFileEntry{{Path: "main.go", Status: wire.FileStatusModified, Additions: 2, Deletions: 1, FirstLine: 4}},
+			TotalAdd: 2, TotalDel: 1,
+		},
+		diffFile: diffFileResult{
+			Path: "main.go", AbsPath: repoPath + "/main.go", Status: wire.FileStatusModified, Language: "go", Additions: 2, Deletions: 1,
+			Hunks: []diffHunkSummary{{
+				Index: 0, Header: "@@ -3,3 +3,4 @@ func main()", OldStart: 3, NewStart: 3, JumpLine: 4, JumpCol: 2, Added: 2, Deleted: 1,
+				Preview: `fmt.Println(util.Greet("v2"))`,
+				Lines:   []string{" func main() {", `-\tfmt.Println(util.Greet("you"))`, `+\tfmt.Println(util.Greet("v2"))`, " }"},
+				Changed: []diffChangedLine{{Line: 4, Col: 2, Kind: "+", Preview: `fmt.Println(util.Greet("v2"))`}},
+			}},
+		},
 	}
 }
 
@@ -118,10 +158,15 @@ func components(v *wire.View, typ string) []wire.Component {
 }
 
 func TestViewEmptyStates(t *testing.T) {
-	// no computer chosen
+	// fresh install (no computer enabled): opens visual onboarding guide directly
 	v := viewOf(t, &hubApp{}, state{}, 12, "zh-Hans")
-	if !strings.Contains(rawOf(v), "还没选电脑") {
-		t.Fatalf("no computer: %s", rawOf(v))
+	if !strings.Contains(rawOf(v), "初始配置向导") || !strings.Contains(rawOf(v), "本机（Hub）") {
+		t.Fatalf("fresh install onboarding: %s", rawOf(v))
+	}
+	// explicit repos tab with no computer enabled: empty state with CTA to setup guide
+	v = viewOf(t, &hubApp{}, state{T: "repos"}, 12, "zh-Hans")
+	if !strings.Contains(rawOf(v), "还没选电脑") || !strings.Contains(rawOf(v), "打开配置向导") {
+		t.Fatalf("no computer on repos tab: %s", rawOf(v))
 	}
 	// the computer cannot be reached
 	f := goodNode()
@@ -422,9 +467,27 @@ func TestEveryActionDrawsAValidPage(t *testing.T) {
 		ext.EncodeState(state{M: "m1", R: repoPath, P: repoPath + long, Q: strings.Repeat("q", 5000), V: "search"}),
 	}
 	actions := map[string][]map[string]string{
-		"machine": {{"machine": "m2"}, {"machine": "nope"}},
-		"repo":    {{"repo": repoPath}, {"repo": "/nope"}},
-		"repos":   {nil}, "home": {nil}, "back": {nil}, "forward": {nil}, "more": {{"from": "x"}, {"from": "40"}}, "prev": {nil},
+		"tab":           {{"tab": "repos"}, {"tab": "setup"}, {"tab": "lsp"}, {"tab": "bogus"}},
+		"open_lsp":      {nil},
+		"toggle_hub":    {{"hub_enabled": "true"}, {"hub_enabled": "false"}, nil},
+		"add_root":      {{"root_path": "~/code"}, {"root_path": "relative"}, {"root_path": ""}},
+		"remove_root":   {{"root": "~/code"}, {"root": ""}},
+		"finish_setup":  {nil},
+		"probe_refresh": {nil},
+		"select_lang":   {{"lang": "go"}, {"lang": "python"}, {"lang": "bogus"}},
+		"toggle_lang":   {{"lang": "go", "enabled": "false"}, {"lang": "go", "enabled": "true"}, {"lang": "bogus"}},
+		"save_lang":     {{"lang": "go", "lsp_path": "/usr/local/bin/gopls"}, {"lang": "go", "lsp_path": ""}},
+		"reset_lang":    {{"lang": "go"}},
+		"save_idle":     {{"idle_minutes": "15"}, {"idle_minutes": "0"}, {"idle_minutes": "abc"}},
+		"reap_lsp":      {nil},
+		"diff_view":     {nil},
+		"diff_mode":     {{"diff_mode": "unstaged"}, {"diff_mode": "staged"}, {"diff_mode": "branch"}, {"diff_mode": "bogus"}},
+		"diff_list":     {nil},
+		"diff_file":     {{"path": "main.go"}, {"path": "../../etc/passwd"}, {"path": ""}},
+		"diff_jump":     {{"path": "main.go", "line": "4", "col": "2"}, {"path": "../secret", "line": "1"}},
+		"machine":       {{"machine": "m2"}, {"machine": "nope"}},
+		"repo":          {{"repo": repoPath}, {"repo": "/nope"}},
+		"repos":         {nil}, "home": {nil}, "back": {nil}, "forward": {nil}, "more": {{"from": "x"}, {"from": "40"}}, "prev": {nil},
 		"open":       {{"path": "main.go"}, {"path": "../../etc/passwd"}, {"path": ""}},
 		"expand":     {{"path": "pkg"}, {"path": "../x"}},
 		"expand_to":  {{"path": "pkg/a"}},
@@ -518,12 +581,12 @@ func TestLineWordsAndGotoLine(t *testing.T) {
 	}
 }
 
-// The UI version 13 navigate is drawn exactly when the SDK has it and the app is of version 13.
+// The UI version 13 navigate is drawn exactly when the app is of version 13.
 func TestNavigateFollowsTheSDK(t *testing.T) {
 	var c wire.Component
 	set := setNavigate(&c, &wire.Action{ID: "nav"})
 	raw, _ := json.Marshal(c)
-	if set != strings.Contains(string(raw), `"navigate"`) {
+	if !set || !strings.Contains(string(raw), `"navigate"`) {
 		t.Fatalf("setNavigate %v, json %s", set, raw)
 	}
 	f := goodNode()
@@ -532,11 +595,181 @@ func TestNavigateFollowsTheSDK(t *testing.T) {
 		v := viewOf(t, app, state{M: "m1", R: repoPath, P: repoPath + "/main.go"}, version, "zh-Hans")
 		code := components(v, wire.ComponentCode)[0]
 		b, _ := json.Marshal(code)
-		want := version >= 13 && navigateField >= 0
+		want := version >= 13
 		if strings.Contains(string(b), `"navigate"`) != want || strings.Contains(rawOf(v), "⌘B") != want {
 			t.Fatalf("UI %d: navigate drawn %v, want %v", version, !want, want)
 		}
 	}
+}
+
+func TestViewSetupOnboarding(t *testing.T) {
+	f := goodNode()
+	f.probe = probeResult{
+		Home: "/home/me", OS: "linux", IdleMinutes: 10, TotalRepos: 3,
+		Roots: []rootProbe{
+			{Input: "~/code", Resolved: "/home/me/code", Status: "ok", Repos: 3},
+			{Input: "~/missing", Status: "missing", Error: "no such file"},
+			{Input: "/root/secret", Resolved: "/root/secret", Status: "permission_denied", Error: "permission denied"},
+			{Input: "~/.ssh", Resolved: "/home/me/.ssh", Status: "forbidden", Error: "protected or secret directory"},
+			{Input: "/tmp/file.txt", Status: "not_dir", Error: "not a directory"},
+		},
+		Suggestions: []rootSuggestion{
+			{Path: "~/workspace", Repos: 2},
+			{Path: "~/projects", Repos: 1},
+		},
+		Languages: []lspProbe{
+			{Lang: "go", Enabled: true, Status: "ready", Binary: "/usr/local/bin/gopls", Version: "gopls v0.18.0"},
+			{Lang: "typescript", Enabled: true, Status: "missing"},
+		},
+	}
+	app := &hubApp{
+		machines: []string{"m1"},
+		call:     f.call,
+		pairedFn: func(context.Context) ([]pairedMachine, error) {
+			return []pairedMachine{
+				{ID: "m1", Name: "Dev Linux", Online: true, OS: "linux"},
+				{ID: "m2", Name: "MacBook Pro", Online: true, OS: "darwin"},
+				{ID: "m3", Name: "Offline Box", Online: false, OS: "linux"},
+			}, nil
+		},
+	}
+	for _, locale := range []string{"zh-Hans", "en"} {
+		for _, ver := range []int{4, 6, 12, 13} {
+			v := viewOf(t, app, state{M: "m1", T: "setup"}, ver, locale)
+			raw := rawOf(v)
+			if !strings.Contains(raw, `"setup-m-hub"`) || !strings.Contains(raw, `"setup-root:0"`) || !strings.Contains(raw, `"setup-sug:0"`) || !strings.Contains(raw, `"setup-paired:0"`) {
+				t.Fatalf("setup UI %d %s missing expected sections: %s", ver, locale, raw)
+			}
+			if (ver >= 6) != strings.Contains(raw, `"control":{`) {
+				t.Fatalf("setup UI %d: switch control mismatch", ver)
+			}
+		}
+	}
+	// Empty roots and probe error states
+	f.probe.Roots = nil
+	f.probe.Suggestions = nil
+	viewOf(t, app, state{M: "m1", T: "setup"}, 12, "zh-Hans")
+	f.fail = map[string]error{"probe": errors.New("node offline")}
+	v := viewOf(t, app, state{M: "m1", T: "setup"}, 12, "zh-Hans")
+	if !strings.Contains(rawOf(v), `"setup-probe-err"`) {
+		t.Fatalf("probe error state: %s", rawOf(v))
+	}
+}
+
+func TestViewLanguageConfigAndProbe(t *testing.T) {
+	f := goodNode()
+	f.probe.Languages[0].Version = strings.Repeat("v", 400)
+	f.probe.Languages[0].Binary = "/" + strings.Repeat("a/", 300) + "gopls"
+	app := &hubApp{machines: []string{"m1", "m2"}, call: f.call}
+	for _, locale := range []string{"zh-Hans", "en"} {
+		for _, ver := range []int{4, 6, 12, 13} {
+			for _, lang := range managedLanguages {
+				v := viewOf(t, app, state{M: "m1", T: "lsp", E: lang}, ver, locale)
+				raw := rawOf(v)
+				if !strings.Contains(raw, `"lsp-row:`+lang+`"`) || !strings.Contains(raw, `"lsp-path-field"`) || !strings.Contains(raw, `"lsp-idle-field"`) {
+					t.Fatalf("lsp UI %d %s %s: %s", ver, locale, lang, raw)
+				}
+			}
+		}
+	}
+	// No machine configured on LSP tab
+	v := viewOf(t, &hubApp{}, state{T: "lsp"}, 12, "zh-Hans")
+	if !strings.Contains(rawOf(v), `"lsp-no-machine"`) {
+		t.Fatalf("lsp empty state: %s", rawOf(v))
+	}
+	// Probe failure on LSP tab
+	f.fail = map[string]error{"probe": errors.New("timeout")}
+	v = viewOf(t, app, state{M: "m1", T: "lsp"}, 12, "en")
+	if !strings.Contains(rawOf(v), `"lsp-probe-err"`) {
+		t.Fatalf("lsp error state: %s", rawOf(v))
+	}
+}
+
+func TestViewGitDiffAndJump(t *testing.T) {
+	f := goodNode()
+	app := &hubApp{machines: []string{"m1"}, call: f.call}
+
+	// Verify segmented control constraints in both locales.
+	for _, locale := range []string{"zh-Hans", "en"} {
+		seg := diffModeControl(texts(locale), &state{})
+		if len(seg.Choices) > 5 {
+			t.Fatalf("%s: segmented has %d choices", locale, len(seg.Choices))
+		}
+		for _, c := range seg.Choices {
+			if utf8.RuneCountInString(c.Title) > 12 {
+				t.Fatalf("%s: segmented title too long: %q", locale, c.Title)
+			}
+		}
+	}
+
+	// Many changed files: respects maxDiffListRows and maxMenus.
+	f.diffStatus.Files = nil
+	for i := range maxDiffListRows + 40 {
+		st := wire.FileStatusModified
+		switch i % 4 {
+		case 1:
+			st = wire.FileStatusAdded
+		case 2:
+			st = wire.FileStatusDeleted
+		case 3:
+			st = wire.FileStatusRenamed
+		}
+		f.diffStatus.Files = append(f.diffStatus.Files, diffFileEntry{
+			Path: fmt.Sprintf("pkg/f%03d.go", i), OldPath: fmt.Sprintf("old/f%03d.go", i),
+			Status: st, Additions: i, Deletions: 1, FirstLine: i + 1, Untracked: i%5 == 0, Binary: i%7 == 0,
+		})
+	}
+	for _, mode := range []string{diffModeUnstaged, diffModeStaged, diffModeBranch} {
+		v := viewOf(t, app, state{M: "m1", R: repoPath, V: "diff", DM: mode}, 13, "zh-Hans")
+		if rows := len(components(v, wire.ComponentRow)); rows != maxDiffListRows {
+			t.Fatalf("mode %s: %d diff file rows, want %d", mode, rows, maxDiffListRows)
+		}
+	}
+
+	// File diff detail with many hunks/changed lines, truncated banner, and clickable jump rows.
+	f.diffFile.Truncated = true
+	f.diffFile.Hunks = nil
+	for i := range 20 {
+		h := diffHunkSummary{
+			Index: i, Header: fmt.Sprintf("@@ -%d,5 +%d,8 @@ func f%d()", i*10+1, i*10+1, i),
+			OldStart: i*10 + 1, NewStart: i*10 + 1, JumpLine: i*10 + 2, JumpCol: 2, Added: 3, Deleted: 1,
+			Lines: []string{" ctx", "-old", "+new line " + strings.Repeat("x", 100)},
+		}
+		for j := range 8 {
+			h.Changed = append(h.Changed, diffChangedLine{Line: i*10 + j + 1, Col: 2, Kind: "+", Preview: strings.Repeat("代码", 120)})
+		}
+		f.diffFile.Hunks = append(f.diffFile.Hunks, h)
+	}
+	v := viewOf(t, app, state{M: "m1", R: repoPath, V: "diff", DM: diffModeUnstaged, DF: "main.go"}, 13, "zh-Hans")
+	if dcs := components(v, wire.ComponentDiff); len(dcs) != 1 {
+		t.Fatalf("expected 1 diff component, got %d", len(dcs))
+	}
+	if rows := len(components(v, wire.ComponentRow)); rows != maxDiffJumpRows {
+		t.Fatalf("expected %d jump rows, got %d", maxDiffJumpRows, rows)
+	}
+	if !strings.Contains(rawOf(v), `"diff-open-src"`) || !strings.Contains(rawOf(v), `"diff-trunc-note"`) {
+		t.Fatalf("diff file detail missing open-source or truncation notice: %s", rawOf(v))
+	}
+
+	// Deleted file diff: no Open full source button.
+	f.diffFile = diffFileResult{Path: "gone.go", Status: wire.FileStatusDeleted, Deletions: 5}
+	v = viewOf(t, app, state{M: "m1", R: repoPath, V: "diff", DF: "gone.go"}, 12, "zh-Hans")
+	if strings.Contains(rawOf(v), `"diff-open-src"`) || !strings.Contains(rawOf(v), `"diff-deleted-note"`) {
+		t.Fatalf("deleted file diff should hide open source button: %s", rawOf(v))
+	}
+
+	// Non-git, no-base, empty diff, and error states.
+	for _, ds := range []diffStatusResult{
+		{IsGit: false, Mode: diffModeUnstaged},
+		{IsGit: true, NoBase: true, Mode: diffModeBranch},
+		{IsGit: true, Branch: "main", Mode: diffModeStaged},
+	} {
+		f.diffStatus = ds
+		viewOf(t, app, state{M: "m1", R: repoPath, V: "diff", DM: ds.Mode}, 12, "en")
+	}
+	f.fail = map[string]error{"diff_status": errors.New("git failed"), "diff_file": errors.New("git diff failed")}
+	viewOf(t, app, state{M: "m1", R: repoPath, V: "diff"}, 12, "zh-Hans")
+	viewOf(t, app, state{M: "m1", R: repoPath, V: "diff", DF: "main.go"}, 12, "zh-Hans")
 }
 
 // Review regressions on the page: crafted folder paths, symbols without a name and an empty computer id draw pages

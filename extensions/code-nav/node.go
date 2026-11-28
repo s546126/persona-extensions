@@ -60,18 +60,20 @@ func (c config) idle() time.Duration {
 }
 
 type node struct {
-	mu      sync.Mutex
-	cfg     config
-	home    string
-	env     []string
-	repos   []repo
-	found   []string // languages whose server was found, with the repositories
-	reposAt time.Time
-	extra   []string // read-only folders definitions may lead to: GOROOT, the module cache
-	lists   map[string]fileList
-	servers map[string]*serverSlot
-	stopped chan struct{}
-	once    sync.Once
+	mu       sync.Mutex
+	cfg      config
+	override *nodeOverride
+	home     string
+	env      []string
+	repos    []repo
+	found    []string // languages whose server was found, with the repositories
+	reposAt  time.Time
+	extra    []string // read-only folders definitions may lead to: GOROOT, the module cache
+	lists    map[string]fileList
+	servers  map[string]*serverSlot
+	versions map[string]versionCacheEntry
+	stopped  chan struct{}
+	once     sync.Once
 }
 
 type repo struct {
@@ -128,10 +130,12 @@ func (n *node) setup(c config) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.cfg = c
+	n.override = nil
 	n.home = homeDir()
 	n.env = programEnv(n.home)
 	n.lists = map[string]fileList{}
 	n.servers = map[string]*serverSlot{}
+	n.versions = map[string]versionCacheEntry{}
 	n.stopped = make(chan struct{})
 	n.extra = goDirs(n.env)
 }
@@ -176,7 +180,7 @@ func (n *node) reap() {
 // hold it already, and starts the next server in it.
 func (n *node) reapIdle(now time.Time) int {
 	n.mu.Lock()
-	limit := n.cfg.idle()
+	limit := n.effectiveIdleLocked()
 	slots := make([]*serverSlot, 0, len(n.servers))
 	for _, s := range n.servers {
 		slots = append(slots, s)
@@ -207,7 +211,16 @@ func (n *node) handle(ctx context.Context, method string, raw json.RawMessage) (
 			return nil, &ext.Error{Code: "invalid", Message: err.Error()}
 		}
 	}
+	if p.Override != nil {
+		n.applyOverride(p.Override)
+	}
 	switch method {
+	case "configure":
+		return n.probe(ctx, true), nil
+	case "probe":
+		return n.probe(ctx, p.Force), nil
+	case "reap":
+		return map[string]int{"stopped": n.reapIdle(time.Now().Add(25 * time.Hour))}, nil
 	case "repos":
 		return n.reposResult(), nil
 	case "list":
@@ -233,18 +246,33 @@ func (n *node) handle(ctx context.Context, method string, raw json.RawMessage) (
 		return n.symbols(ctx, p)
 	case "search":
 		return n.search(ctx, p)
+	case "diff_status":
+		r, err := n.repoAt(p.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return n.diffStatus(ctx, r, p.Mode)
+	case "diff_file":
+		r, err := n.repoAt(p.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return n.diffFile(ctx, r, p.Mode, p.Path)
 	}
 	return nil, ext.UnknownMethod("nav." + method)
 }
 
 // navParams is every method's parameters; each reads the ones it needs.
 type navParams struct {
-	Repo  string `json:"repo,omitempty"`  // a repository's path, as nav.repos gave it
-	Path  string `json:"path,omitempty"`  // a file's absolute path
-	From  int    `json:"from,omitempty"`  // first line wanted (1-based)
-	Line  int    `json:"line,omitempty"`  // 1-based
-	Col   int    `json:"col,omitempty"`   // 1-based, in characters
-	Query string `json:"query,omitempty"` // a symbol search
+	Repo     string        `json:"repo,omitempty"`     // a repository's path, as nav.repos gave it
+	Path     string        `json:"path,omitempty"`     // a file's absolute path (or relative path for diff_file)
+	From     int           `json:"from,omitempty"`     // first line wanted (1-based)
+	Line     int           `json:"line,omitempty"`     // 1-based
+	Col      int           `json:"col,omitempty"`      // 1-based, in characters
+	Query    string        `json:"query,omitempty"`    // a symbol search
+	Mode     string        `json:"mode,omitempty"`     // diff mode: unstaged, staged, branch
+	Force    bool          `json:"force,omitempty"`    // force refresh during probe
+	Override *nodeOverride `json:"override,omitempty"` // runtime per-machine config override
 }
 
 type reposResult struct {
@@ -311,8 +339,9 @@ type symbolsResult struct {
 func (n *node) reposResult() reposResult {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	roots := slices.Clone(n.effectiveRootsLocked())
 	if n.repos == nil || time.Since(n.reposAt) > reposFresh {
-		n.repos = findRepos(n.cfg.Roots, n.home)
+		n.repos = findRepos(roots, n.home)
 		n.reposAt = time.Now()
 		n.found = nil
 		for _, l := range languages {
@@ -321,7 +350,7 @@ func (n *node) reposResult() reposResult {
 			}
 		}
 	}
-	return reposResult{Repos: append([]repo(nil), n.repos...), Roots: n.cfg.Roots, Lsp: append([]string(nil), n.found...)}
+	return reposResult{Repos: append([]repo(nil), n.repos...), Roots: roots, Lsp: append([]string(nil), n.found...)}
 }
 
 // repoAt is the configured repository at path (as nav.repos gave it), never anything else.
@@ -704,7 +733,11 @@ var (
 // program's PATH. A path from the settings speaks the way its program is known to (pyright-langserver --stdio, pylsp
 // as it is), else as the language's first server does.
 func (n *node) serverLocked(l language) (serverCmd, bool) {
-	if custom := strings.TrimSpace(n.cfg.customServer(l.name)); custom != "" {
+	disabled, custom := n.langOverrideLocked(l.name)
+	if disabled {
+		return serverCmd{}, false
+	}
+	if custom != "" {
 		p := expandHome(custom, n.home)
 		if !filepath.IsAbs(p) {
 			p = lookPath(p, n.env)
