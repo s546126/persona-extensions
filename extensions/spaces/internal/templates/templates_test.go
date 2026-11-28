@@ -54,7 +54,7 @@ func TestTemplatesInOrder(t *testing.T) {
 	for _, tpl := range All() {
 		keys = append(keys, tpl.Key)
 	}
-	want := []string{"project", "reading", "inventory", "travel", "habit", "people", "subscription", "blank"}
+	want := []string{"project", "reading", "inventory", "travel", "habit", "people", "subscription", "finance", "media", "blank"}
 	if !slices.Equal(keys, want) {
 		t.Fatalf("All() keys = %v, want %v", keys, want)
 	}
@@ -189,6 +189,13 @@ func TestRollupValues(t *testing.T) {
 		{"subscription", "健身房月卡", "paid", 398},
 		{"subscription", "云盘 200G", "paid", 89},
 		{"subscription", "音乐会员", "paid", 0},
+		{"finance", "餐饮买菜", "spent", 221},
+		{"finance", "餐饮买菜", "entries", 2},
+		{"finance", "通勤出行", "spent", 150},
+		{"finance", "休闲聚会", "spent", 430},
+		{"media", "《海风慢车》", "reviews", 1},
+		{"media", "《街巷手艺》", "reviews", 2},
+		{"media", "周末慢看片单", "count", 3},
 	}
 	for _, c := range cases {
 		_, sp, w := applied(t, c.key, true)
@@ -427,6 +434,43 @@ func TestSubscriptionSamples(t *testing.T) {
 	}
 	if got := aggValues(viewNamed(t, sp, w, "payment", "表格")); !slices.Equal(got, []float64{5, 537}) {
 		t.Errorf("payment table aggregates = %v, want [5 537]", got)
+	}
+}
+
+func TestFinanceSamples(t *testing.T) {
+	_, sp, w := applied(t, "finance", true)
+	food := entityTitled(t, sp, "餐饮买菜")
+	if r, ok := w.Ratio(food); !ok || r < 0.11 || r > 0.12 {
+		t.Errorf("food budget ratio = %v, %v; want 221/2000", r, ok)
+	}
+	again := derivedFrom(t, sp, "超市补买水果和牛奶", "菜市场买菜")
+	if got, _ := w.Value(again, "budget").([]string); !slices.Equal(got, []string{food.ID}) || again.Values["way"] != "扫码" {
+		t.Errorf("derived expense values = %v, want budget food and way 扫码", again.Values)
+	}
+	if got := aggValues(viewNamed(t, sp, w, "expense", "流水")); !slices.Equal(got, []float64{5, 801}) {
+		t.Errorf("expense feed aggregates = %v, want [5 801]", got)
+	}
+	if got := aggValues(viewNamed(t, sp, w, "budget", "表格")); !slices.Equal(got, []float64{3000, 801}) {
+		t.Errorf("budget table aggregates = %v, want [3000 801]", got)
+	}
+}
+
+func TestMediaSamples(t *testing.T) {
+	_, sp, w := applied(t, "media", true)
+	city := entityTitled(t, sp, "《街巷手艺》")
+	if r, ok := w.Ratio(city); !ok || r != 0.5 {
+		t.Errorf("work progress = %v, %v; want 0.5 (4/8)", r, ok)
+	}
+	shelf := entityTitled(t, sp, "周末慢看片单")
+	if r, ok := w.Ratio(shelf); !ok || r < 0.33 || r > 0.34 {
+		t.Errorf("shelf progress = %v, %v; want 1/3", r, ok)
+	}
+	again := derivedFrom(t, sp, "第五集制茶篇随记", "第四集木工篇最打动人")
+	if got, _ := w.Value(again, "work").([]string); !slices.Equal(got, []string{city.ID}) {
+		t.Errorf("derived review work = %v, want [%s]", got, city.ID)
+	}
+	if got := titles(viewNamed(t, sp, w, "work", "追更")); !slices.Equal(got, []string{"《街巷手艺》"}) {
+		t.Errorf("watching view = %v, want [《街巷手艺》]", got)
 	}
 }
 

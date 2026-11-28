@@ -21,7 +21,7 @@ import (
 var bundles embed.FS
 
 // order is the fixed order of the templates; the bundle of a key is the file key + ".json".
-var order = []string{"project", "reading", "inventory", "travel", "habit", "people", "subscription", "blank"}
+var order = []string{"project", "reading", "inventory", "travel", "habit", "people", "subscription", "finance", "media", "blank"}
 
 // all are the decoded templates. A bundle that does not load is a programming error, caught by the tests.
 var all = mustLoad(bundles, order)
@@ -50,7 +50,7 @@ type Sample struct {
 }
 
 // All returns the templates in their fixed order: project, reading, inventory, travel, habit, people, subscription,
-// blank.
+// finance, media, blank.
 func All() []Template { return slices.Clone(all) }
 
 // Get returns the template with the key.

@@ -78,14 +78,13 @@ func (c *ctx) editorPage() (*wire.View, error) {
 	}}, nil
 }
 
-// newTypePage is the form of a new type: its key and its name, and the button that creates it. Creating it turns the
-// page into the editor of the new type.
+// newTypePage is the form of a new type: its name and an optional key (auto-generated when left blank), and create.
 func newTypePage() *wire.View {
 	return &wire.View{Title: "新建分类", Sections: []wire.Section{{Items: []wire.Component{
 		{Type: wire.ComponentHeader, Title: "新建分类", Subtitle: "分类就是你要记的一种东西，例如「电影」「药品」「任务」"},
 		caption("建好以后，可以再给它加要填的内容（例如 导演、评分）和几个状态（例如 想看、看过）。"),
 		textField("t_name", "名称", "", "例如 电影"),
-		textField("t_key", "代号", "", "给程序用的短名字，例如 film；小写英文字母开头，建好后不能改"),
+		textField("t_key", "代号（可留空）", "", "留空会自动生成；或填小写英文字母开头的短名字，例如 film"),
 		button("创建", &wire.Action{ID: "typenew", Submit: true}, wire.ButtonRoleNormal),
 	}}}}
 }
@@ -135,10 +134,17 @@ func (c *ctx) flowSection(t *kernel.Type) wire.Section {
 }
 
 // stageFields is the fold of a stage: its name, its phase, and the buttons that save, move up and delete it. For a new
-// stage (i < 0) there is no move or delete.
+// stage on a type without a lifecycle, one-tap presets are offered above the custom inputs.
 func (c *ctx) stageFields(t *kernel.Type, i int) []wire.Component {
 	if i < 0 {
-		items := []wire.Component{textField("stage_name", "名称", "", "例如 想读"), phaseField("stage_phase", kernel.Todo)}
+		var items []wire.Component
+		if len(t.Flow) == 0 {
+			items = append(items,
+				button("套用：待办 → 进行中 → 已完成", &wire.Action{ID: "stagepreset:todo3"}, wire.ButtonRoleNormal),
+				button("套用：想做 → 在做 → 已完成 → 搁置", &wire.Action{ID: "stagepreset:want4"}, wire.ButtonRoleNormal),
+			)
+		}
+		items = append(items, textField("stage_name", "名称", "", "例如 想读"), phaseField("stage_phase", kernel.Todo))
 		if len(t.Flow) == 0 {
 			items = append(items, textField("stage2_name", "第二个状态", "", "例如 读完"), phaseField("stage2_phase", kernel.Done))
 		}
@@ -218,11 +224,14 @@ func (c *ctx) propFields(t *kernel.Type, i int) []wire.Component {
 		Confirm: fmt.Sprintf("删除填写项「%s」？每一条里填过的这一项会一起删除，不能撤销。", cut(p.Name, maxTitle))}, wire.ButtonRoleDestructive))
 }
 
-// newPropFields is the fold that creates a property of a kind: its key, its name, the inputs of its options, and the
-// button that adds it.
+// newPropFields is the fold that creates a property of a kind: its name, optional key (auto-generated when blank),
+// the inputs of its options, and the button that adds it.
 func (c *ctx) newPropFields(t *kernel.Type, k *kernel.Kind) []wire.Component {
 	p := kernel.Prop{Kind: k.Name}
-	items := []wire.Component{textField("p_name", "名称", "", "例如 作者"), textField("p_key", "代号", "", "例如 author；小写英文字母开头，建好后不能改")}
+	items := []wire.Component{
+		textField("p_name", "名称", "", "例如 作者"),
+		textField("p_key", "代号（可留空）", "", "留空会自动生成；或填小写英文字母开头的短名字，例如 author"),
+	}
 	items = append(items, c.optFields(t, p)...)
 	return append(items, button("添加", &wire.Action{ID: "propnew:" + k.Name, Submit: true}, wire.ButtonRoleNormal))
 }
@@ -281,23 +290,52 @@ func (c *ctx) cardFields(t *kernel.Type) []wire.Component {
 	}
 }
 
-// viewFields is the fold of a view (i < 0 for a new one): its name, kind, group, sort and descending, the caption of
-// the filters and aggregates that are changed through the tool, and the buttons that save and delete it.
+// viewOpChoices are the condition operators offered in the schema editor.
+var viewOpChoices = []wire.Choice{
+	{Value: "eq", Title: "等于"},
+	{Value: "ne", Title: "不等于"},
+	{Value: "has", Title: "包含"},
+	{Value: "gt", Title: "大于"},
+	{Value: "ge", Title: "大于等于"},
+	{Value: "lt", Title: "小于"},
+	{Value: "le", Title: "小于等于"},
+	{Value: "empty", Title: "为空"},
+}
+
+// viewFields is the fold of a view (i < 0 for a new one): its name, kind, group, sort, primary filter and primary
+// aggregate, plus a caption when extra conditions/aggregates exist, and save/delete buttons.
 func (c *ctx) viewFields(t *kernel.Type, i int, v kernel.View) []wire.Component {
 	sortBy, desc := "", false
 	if len(v.Sort) > 0 {
 		sortBy, desc = v.Sort[0].By, v.Sort[0].Desc
 	}
+	wField, wOp, wVal := "", "eq", ""
+	if len(v.Where) > 0 {
+		wField, wOp = v.Where[0].Field, v.Where[0].Op
+		if v.Where[0].Value != nil {
+			wVal = fmt.Sprint(v.Where[0].Value)
+		}
+	}
+	aOp, aOf := "", ""
+	if len(v.Agg) > 0 {
+		aOp, aOf = v.Agg[0].Op, v.Agg[0].Of
+	}
 	choices := c.fieldChoices(t)
+	numChoices := c.ownNumericChoices(t)
 	items := []wire.Component{
 		textField("v_name", "名称", v.Name, ""),
 		requiredChoice("v_kind", "显示成", viewKindChoices(), textOr(v.Kind, viewOrder[0])),
 		optionalChoice("v_group", "按什么分组", choices, v.Group),
 		optionalChoice("v_sort", "按什么排序", choices, sortBy),
 		toggleField("v_desc", "倒过来排（从大到小、从新到旧）", desc),
+		optionalChoice("v_wfield", "筛选哪一项", choices, wField),
+		requiredChoice("v_wop", "筛选方式", viewOpChoices, wOp),
+		textField("v_wval", "筛选内容", wVal, "例如 在读、高；选「为空」时可留空"),
+		optionalChoice("v_aop", "顶部统计", aggChoices(), aOp),
+		optionalChoice("v_aof", "统计哪一项（合计、平均时用）", numChoices, aOf),
 	}
-	if len(v.Where) > 0 || len(v.Agg) > 0 {
-		items = append(items, caption(fmt.Sprintf("这个显示方式还有 %d 个筛选条件、%d 项统计，这里改不了，可以让助手改", len(v.Where), len(v.Agg))))
+	if len(v.Where) > 1 || len(v.Agg) > 1 {
+		items = append(items, caption(fmt.Sprintf("这个显示方式另外还有 %d 个筛选条件、%d 项统计，会继续保留", max(0, len(v.Where)-1), max(0, len(v.Agg)-1))))
 	}
 	slot := newSlot
 	if i >= 0 {
@@ -309,6 +347,17 @@ func (c *ctx) viewFields(t *kernel.Type, i int, v kernel.View) []wire.Component 
 			Confirm: fmt.Sprintf("删除显示方式「%s」？条目本身不会被删。", cut(v.Name, maxTitle))}, wire.ButtonRoleDestructive))
 	}
 	return items
+}
+
+// ownNumericChoices returns numeric properties declared on t itself (for view aggregates).
+func (c *ctx) ownNumericChoices(t *kernel.Type) []wire.Choice {
+	var out []wire.Choice
+	for _, p := range t.Props {
+		if k, ok := kernel.KindOf(p.Kind); ok && k.Num != nil {
+			out = append(out, wire.Choice{Value: p.Key, Title: p.Name})
+		}
+	}
+	return out
 }
 
 // typeDelete is the button that deletes the type with its records; the confirmation says how many.
@@ -808,13 +857,69 @@ func (c *ctx) stageFrom(prefix string, old kernel.Stage) kernel.Stage {
 	}
 }
 
-// actTypeNew creates a type from the form of a new type, and turns the page into its editor. A key that is taken is
-// refused: PutType would replace that type instead.
+// commonKeyWords maps everyday Chinese type/property names to clean English keys when the user leaves 代号 blank.
+var commonKeyWords = map[string]string{
+	"电影": "film", "影片": "film", "作品": "work", "书": "book", "书籍": "book",
+	"笔记": "note", "观后感": "review", "任务": "task", "目标": "goal", "点子": "idea",
+	"想法": "idea", "清单": "list", "物品": "item", "位置": "place", "预算": "budget",
+	"账单": "expense", "支出": "expense", "收入": "income", "习惯": "habit", "打卡": "checkin",
+	"旅行": "trip", "日程": "plan", "行李": "pack", "订阅": "sub", "扣款": "payment",
+	"作者": "author", "导演": "director", "评分": "rating", "价格": "price", "单价": "price",
+	"金额": "amount", "日期": "date", "截止": "due", "备注": "note", "简介": "summary",
+	"说明": "about", "类别": "category", "分类": "category", "地点": "place", "链接": "url",
+	"网址": "url", "主页": "url", "页数": "pages", "总页数": "pages", "已读": "read",
+	"时长": "minutes", "数量": "qty", "优先级": "priority", "来源": "source", "标签": "tag",
+	"标签页": "tag", "已装": "packed", "完成": "done", "周期": "cycle", "方式": "way",
+	"城市": "city", "生日": "birthday", "药品": "medicine", "菜谱": "recipe", "课程": "course",
+}
+
+// autoKey derives a valid, unique kernel key from a display name when the user leaves 代号 empty.
+func autoKey(name, prefix string, taken func(string) bool) string {
+	trimmed := strings.TrimSpace(name)
+	base := commonKeyWords[trimmed]
+	if base == "" {
+		var b strings.Builder
+		for _, r := range strings.ToLower(trimmed) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+				b.WriteRune(r)
+			} else if r == ' ' || r == '-' {
+				b.WriteByte('_')
+			}
+		}
+		cand := strings.Trim(b.String(), "_")
+		if len(cand) > 0 && cand[0] >= 'a' && cand[0] <= 'z' {
+			if len(cand) > 24 {
+				cand = cand[:24]
+			}
+			base = cand
+		}
+	}
+	if base != "" && !taken(base) {
+		return base
+	}
+	if base == "" {
+		base = prefix
+	}
+	for i := 1; ; i++ {
+		cand := fmt.Sprintf("%s%d", base, i)
+		if !taken(cand) {
+			return cand
+		}
+	}
+}
+
+// actTypeNew creates a type from the form of a new type, and turns the page into its editor. Leaving 代号 blank
+// generates a clean unique key automatically. A key that is taken is refused: PutType would replace that type instead.
 func actTypeNew(c *ctx, _ string) (*wire.ActionResult, error) {
 	if c.sp == nil {
 		return nil, errors.New("还没有空间。请先从模板新建一个空间")
 	}
-	nt := kernel.Type{Key: strings.TrimSpace(c.sentOr("t_key", "")), Name: strings.TrimSpace(c.sentOr("t_name", ""))}
+	name := strings.TrimSpace(c.sentOr("t_name", ""))
+	key := strings.TrimSpace(c.sentOr("t_key", ""))
+	if key == "" && name != "" {
+		key = autoKey(name, "t", func(k string) bool { return typeIn(c.sp, k) != nil })
+	}
+	nt := kernel.Type{Key: key, Name: name}
 	if typeIn(c.sp, nt.Key) != nil {
 		return nil, fmt.Errorf("已经有代号是「%s」的分类了，请换一个代号", nt.Key)
 	}
@@ -926,8 +1031,45 @@ func actStageDrop(c *ctx, arg string) (*wire.ActionResult, error) {
 	return &wire.ActionResult{Toast: "已删除状态"}, nil
 }
 
-// actPropNew adds a property of the kind named by the argument. A key the type already has is refused: PutType would
-// replace that property.
+// stagePresets are one-tap lifecycle presets offered on a type without a lifecycle.
+var stagePresets = map[string][]kernel.Stage{
+	"todo3": {
+		{Name: "待办", Phase: kernel.Todo},
+		{Name: "进行中", Phase: kernel.Doing},
+		{Name: "已完成", Phase: kernel.Done},
+	},
+	"want4": {
+		{Name: "想做", Phase: kernel.Todo},
+		{Name: "在做", Phase: kernel.Doing},
+		{Name: "已完成", Phase: kernel.Done},
+		{Name: "搁置", Phase: kernel.Dropped},
+	},
+}
+
+// actStagePreset applies a preset lifecycle to a type that currently has no stages.
+func actStagePreset(c *ctx, arg string) (*wire.ActionResult, error) {
+	t, err := c.editedType()
+	if err != nil {
+		return nil, err
+	}
+	preset, ok := stagePresets[arg]
+	if !ok {
+		return nil, errors.New("找不到这组预设状态，请重新选择")
+	}
+	if len(t.Flow) > 0 {
+		return nil, errors.New("这个分类已经有状态了，可以直接在上面修改")
+	}
+	nt := cloneType(t)
+	nt.Flow = slices.Clone(preset)
+	if err := c.putType(nt); err != nil {
+		return nil, err
+	}
+	c.st.F = ""
+	return &wire.ActionResult{Toast: "已套用预设状态"}, nil
+}
+
+// actPropNew adds a property of the kind named by the argument. Leaving 代号 blank generates a clean unique key
+// automatically. A key the type already has is refused: PutType would replace that property.
 func actPropNew(c *ctx, arg string) (*wire.ActionResult, error) {
 	t, err := c.editedType()
 	if err != nil {
@@ -937,7 +1079,13 @@ func actPropNew(c *ctx, arg string) (*wire.ActionResult, error) {
 	if !ok {
 		return nil, fmt.Errorf("没有「%s」这种填写项。请从列表里重新选一种", arg)
 	}
+	name := strings.TrimSpace(c.sentOr("p_name", ""))
 	key := strings.TrimSpace(c.sentOr("p_key", ""))
+	if key == "" && name != "" {
+		key = autoKey(name, "p", func(cand string) bool {
+			return propAt(t, cand) >= 0 || slices.Contains(builtinKeys, cand)
+		})
+	}
 	if propAt(t, key) >= 0 {
 		return nil, fmt.Errorf("这个分类已经有代号是「%s」的填写项了，请换一个代号", key)
 	}
@@ -947,7 +1095,7 @@ func actPropNew(c *ctx, arg string) (*wire.ActionResult, error) {
 		return nil, err
 	}
 	c.st.F = ""
-	return &wire.ActionResult{Toast: "已添加「" + cut(c.sentOr("p_name", key), maxTitle) + "」"}, nil
+	return &wire.ActionResult{Toast: "已添加「" + cut(textOr(name, key), maxTitle) + "」"}, nil
 }
 
 // actPropSave changes the name and the options of the property with the key. The key is the property's identity.
@@ -1075,6 +1223,17 @@ func actViewSave(c *ctx, arg string) (*wire.ActionResult, error) {
 	nv.Kind = c.sentOr("v_kind", old.Kind)
 	nv.Group = c.choiceOr("v_group", old.Group)
 	nv.Sort = sortWith(old.Sort, c.choiceOr("v_sort", sortBy), desc)
+	if _, sent := c.r.Values["v_wfield"]; sent {
+		wf := c.choiceOr("v_wfield", "")
+		wop := strings.TrimSpace(c.sentOr("v_wop", "eq"))
+		wval := strings.TrimSpace(c.sentOr("v_wval", ""))
+		nv.Where = whereWith(old.Where, wf, wop, wval)
+	}
+	if _, sent := c.r.Values["v_aop"]; sent {
+		aop := c.choiceOr("v_aop", "")
+		aof := c.choiceOr("v_aof", "")
+		nv.Agg = aggWith(old.Agg, aop, aof)
+	}
 	nt := cloneType(t)
 	if i < 0 {
 		nt.Views = append(nt.Views, nv)
@@ -1086,6 +1245,38 @@ func actViewSave(c *ctx, arg string) (*wire.ActionResult, error) {
 	}
 	c.st.F = ""
 	return &wire.ActionResult{Toast: "已保存"}, nil
+}
+
+// whereWith updates the primary filter condition of a view while keeping any additional conditions intact.
+func whereWith(old []kernel.Cond, field, op, rawVal string) []kernel.Cond {
+	var rest []kernel.Cond
+	if len(old) > 1 {
+		rest = old[1:]
+	}
+	if field == "" {
+		return slices.Clone(rest)
+	}
+	cond := kernel.Cond{Field: field, Op: textOr(op, "eq")}
+	if rawVal != "" {
+		cond.Value = rawVal
+	}
+	return append([]kernel.Cond{cond}, rest...)
+}
+
+// aggWith updates the primary aggregate of a view while keeping any additional aggregates intact.
+func aggWith(old []kernel.Agg, op, of string) []kernel.Agg {
+	var rest []kernel.Agg
+	if len(old) > 1 {
+		rest = old[1:]
+	}
+	if op == "" {
+		return slices.Clone(rest)
+	}
+	agg := kernel.Agg{Op: op}
+	if op != "count" && op != "percent_done" {
+		agg.Of = of
+	}
+	return append([]kernel.Agg{agg}, rest...)
 }
 
 // sortWith is the sort of a view with its first key replaced by by (none when by is empty); the keys after the first

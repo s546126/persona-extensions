@@ -18,7 +18,11 @@ import (
 const overTab = "/"
 
 // cardRows is the most entities in progress the overview card lists.
-const cardRows = 5
+const (
+	cardRows        = 5
+	focusRows       = 6
+	upcomingHorizon = 14
+)
 
 // pickSlot is the new space's state while its template is not chosen yet.
 const pickSlot = "?"
@@ -154,28 +158,57 @@ func freeName(base string, taken map[string]bool) string {
 	return name
 }
 
-// overview is the space page with no type tab: the space's header and its totals with the buttons that open the
-// settings or start a new space, the settings fold right under them when it is open, a row per type ending with the
-// button that adds one, and the latest changes. Each button sits in the card it acts on: a section of buttons alone
-// is drawn as a card of its own, an empty frame around them.
+// overview is the space workbench with no type tab: a responsive multi-column layout on wide screens (stacking on
+// phones) with the space hero and totals at full width, open folds directly below it, ontology-driven focus cards
+// (upcoming/overdue dates and items in progress), type cards with direct creation shortcuts, and recent updates.
 func (c *ctx) overview() (*wire.View, error) {
 	sp := c.sp
 	filter, tabs := c.chrome()
-	v := &wire.View{Sections: []wire.Section{}, Filter: filter, Tabs: tabs}
-	head := wire.Section{Items: []wire.Component{
+	v := &wire.View{
+		Sections: []wire.Section{}, Filter: filter, Tabs: tabs,
+		Layout: wire.LayoutColumns,
+	}
+	upcoming := c.w.Upcoming(c.todayStr(), upcomingHorizon)
+	headItems := []wire.Component{
 		c.spaceHeader(),
-		statGrid(spaceStats(tallyOf(c.w, sp.Entities))),
+		statGrid(spaceStats(tallyOf(c.w, sp.Entities), len(upcoming))),
+	}
+	if len(sp.Types) > 0 {
+		headItems = append(headItems, button("快速记一条", &wire.Action{ID: "fold:quick"}, wire.ButtonRoleNormal))
+		if c.uiAtLeast(10) && len(c.acyclicSchemaEdges()) > 0 {
+			headItems = append(headItems, button("关系图", &wire.Action{ID: "fold:graph"}, wire.ButtonRoleNormal))
+		}
+	}
+	headItems = append(headItems,
 		button("空间设置", &wire.Action{ID: "fold:space"}, wire.ButtonRoleNormal),
 		button("新建空间", &wire.Action{ID: "new"}, wire.ButtonRoleNormal),
-	}}
-	v.Sections = append(v.Sections, head)
-	if c.st.F == "space" {
+	)
+	v.Sections = append(v.Sections, wire.Section{Span: wire.SectionSpanFull, Items: headItems})
+	switch c.st.F {
+	case "space":
 		v.Sections = append(v.Sections, c.spaceFold())
+	case "quick":
+		if len(sp.Types) > 0 {
+			v.Sections = append(v.Sections, c.quickSpaceFold())
+		}
+	case "graph":
+		if len(sp.Types) > 0 {
+			v.Sections = append(v.Sections, c.spaceGraphSection())
+		}
 	}
 	if len(sp.Types) == 0 {
 		// the empty state's own button adds the first category
-		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{c.noTypes()}})
+		v.Sections = append(v.Sections, wire.Section{Span: wire.SectionSpanFull, Items: []wire.Component{c.noTypes()}})
 		return v, nil
+	}
+	if len(upcoming) > 0 {
+		v.Sections = append(v.Sections, c.upcomingSection(upcoming))
+	}
+	if doing := c.doingEntities(focusRows); len(doing) > 0 {
+		v.Sections = append(v.Sections, wire.Section{
+			Title: fmt.Sprintf("正在进行 · %d", len(doing)),
+			Items: c.rows(doing, true),
+		})
 	}
 	types := append(c.typeRows(), button("新建分类", ext.Open("schema:+", "", state{S: sp.ID, D: "+"}, "新建分类"), wire.ButtonRoleNormal))
 	v.Sections = append(v.Sections, wire.Section{
@@ -217,12 +250,16 @@ func (c *ctx) chrome() (*wire.Filter, *wire.Tabs) {
 	return filter, &wire.Tabs{Name: "tab", Value: cur, Items: items, Action: wire.Action{ID: "tab"}}
 }
 
-// spaceHeader names the space, with its about and its facts: the number of types and entities and the latest change.
+// spaceHeader names the space, with its about and its facts: the number of types, entities, links and latest change.
 func (c *ctx) spaceHeader() wire.Component {
 	sp := c.sp
+	sum := c.w.Summary()
 	facts := []wire.Fact{
 		{Label: "分类", Value: fmt.Sprintf("%d 个", len(sp.Types))},
 		{Label: "条目", Value: fmt.Sprintf("%d 条", len(sp.Entities))},
+	}
+	if sum.Relations > 0 {
+		facts = append(facts, wire.Fact{Label: "连接", Value: fmt.Sprintf("%d 条", sum.Relations)})
 	}
 	if last := latest(sp.Entities); last != nil {
 		facts = append(facts, wire.Fact{Label: "最近更新", Value: c.ago(last.Updated)})
@@ -239,23 +276,201 @@ func (c *ctx) noTypes() wire.Component {
 	}
 }
 
-// typeRows is a row per type: its icon and name, the kind of its default view with its count, and its value: the
-// share done when it has a flow, else the count. A row opens that type's tab.
+// typeRows is a row per type: its icon and name, the kind of its default view with its count and active workload, and
+// its value: the share done when it has a flow, else the count. Each row opens that type's tab and offers quick-add
+// and schema-editor shortcuts in its row actions.
 func (c *ctx) typeRows() []wire.Component {
 	out := []wire.Component{}
 	for _, t := range c.sp.Types {
 		set := c.entitiesOf(t.Key)
+		tl := tallyOf(c.w, set)
 		value := strconv.Itoa(len(set))
-		if pct, ok := tallyOf(c.w, set).percent(); ok && len(t.Flow) > 0 {
+		if pct, ok := tl.percent(); ok && len(t.Flow) > 0 {
 			value = fmt.Sprintf("完成 %d%%", pct)
 		}
-		subtitle := strconv.Itoa(len(set)) + " 条 · 显示成" + viewLabels[t.ViewsOrDefault()[0].Kind]
-		out = append(out, wire.Component{
-			Type: wire.ComponentRow, Icon: iconName(t.Icon), Title: t.Name, Subtitle: subtitle, Value: value,
+		parts := []string{strconv.Itoa(len(set)) + " 条"}
+		if tl.doing > 0 {
+			parts = append(parts, fmt.Sprintf("进行中 %d", tl.doing))
+		}
+		parts = append(parts, "显示成"+viewLabels[t.ViewsOrDefault()[0].Kind])
+		row := wire.Component{
+			Type: wire.ComponentRow, Icon: iconName(t.Icon), Title: t.Name,
+			Subtitle: strings.Join(parts, " · "), Value: value,
 			Action: &wire.Action{ID: "tab:" + t.Key},
-		})
+		}
+		if c.rowActBudget > 0 {
+			c.rowActBudget--
+			row.Actions = []wire.RowAction{
+				{Title: "新建" + t.Name, Swipe: true, Action: wire.Action{ID: "tab:" + t.Key + ":new"}},
+				{Title: "分类设置", Action: *ext.Open("schema:"+t.Key, "", state{S: c.sp.ID, D: t.Key}, "分类设置")},
+			}
+		}
+		out = append(out, row)
 	}
 	return out
+}
+
+// doingEntities returns up to limit entities in phase doing, newest updated first.
+func (c *ctx) doingEntities(limit int) []*kernel.Entity {
+	var out []*kernel.Entity
+	for _, e := range c.sp.Entities {
+		if e != nil && phaseOf(c.w, e) == string(kernel.Doing) {
+			out = append(out, e)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b *kernel.Entity) int { return b.Updated.Compare(a.Updated) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// upcomingSection renders upcoming and recently overdue items detected from date properties across all types.
+func (c *ctx) upcomingSection(items []kernel.DueItem) wire.Section {
+	shown := items
+	if len(shown) > focusRows {
+		shown = shown[:focusRows]
+	}
+	rows := make([]wire.Component, 0, len(shown))
+	for _, it := range shown {
+		badgeText, tone := dueBadge(it.Days)
+		r := wire.Component{
+			Type:     wire.ComponentRow,
+			Icon:     iconName(it.Type.Icon),
+			Title:    cut(it.Entity.Title, maxTitle),
+			Subtitle: cut(it.Type.Name+" · "+it.Prop.Name+" "+it.Date, maxText),
+			Badge:    &wire.Badge{Text: badgeText, Tone: tone},
+			Action:   ext.Open("open:"+it.Entity.ID, PageUI, state{S: c.sp.ID, E: it.Entity.ID}, cut(it.Entity.Title, maxTitle)),
+		}
+		if acts := c.entityRowActions(it.Type, it.Entity); len(acts) > 0 {
+			r.Actions = acts
+		}
+		rows = append(rows, r)
+	}
+	footer := ""
+	if len(items) > focusRows {
+		footer = fmt.Sprintf("共 %d 条近期提醒，其余可在对应分类中查看", len(items))
+	}
+	return wire.Section{Title: fmt.Sprintf("需要关注 · %d", len(items)), Footer: footer, Items: rows}
+}
+
+// dueBadge formats a relative day offset into a concise badge label and tone.
+func dueBadge(days int) (string, string) {
+	switch {
+	case days < 0:
+		return fmt.Sprintf("逾期 %d 天", -days), wire.ToneDanger
+	case days == 0:
+		return "今天", wire.ToneCaution
+	case days == 1:
+		return "明天", wire.ToneCaution
+	case days == 2:
+		return "后天", wire.ToneNeutral
+	default:
+		return fmt.Sprintf("%d 天后", days), wire.ToneNeutral
+	}
+}
+
+// quickSpaceFold is a space-level quick capture form that lets the user pick any type and add a record right from the
+// overview without switching tabs.
+func (c *ctx) quickSpaceFold() wire.Section {
+	choices := []wire.Choice{}
+	for _, ty := range c.sp.Types {
+		if ty != nil {
+			choices = append(choices, wire.Choice{Value: choicePrefix + ty.Key, Title: ty.Name})
+		}
+	}
+	return wire.Section{
+		Span:  wire.SectionSpanFull,
+		Title: "快速记一条",
+		Items: []wire.Component{
+			{Type: wire.ComponentField, Name: "type", Label: "放到哪个分类", Kind: wire.FieldKindChoice, Value: choices[0].Value, Choices: choices},
+			{Type: wire.ComponentField, Name: "title", Label: "标题", Kind: wire.FieldKindText, Placeholder: "写下这一条叫什么"},
+			button("添加", &wire.Action{ID: "quickadd", Submit: true}, wire.ButtonRoleNormal),
+		},
+	}
+}
+
+// acyclicSchemaEdges returns deduplicated non-self schema relation edges filtered to guarantee a DAG for wire.CheckGraph.
+func (c *ctx) acyclicSchemaEdges() []kernel.SchemaEdge {
+	raw := c.w.SchemaEdges()
+	var out []kernel.SchemaEdge
+	seen := map[[2]string]bool{}
+	adj := map[string][]string{}
+	reaches := func(start, goal string) bool {
+		visited := map[string]bool{}
+		queue := []string{start}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			if cur == goal {
+				return true
+			}
+			for _, nxt := range adj[cur] {
+				if !visited[nxt] {
+					visited[nxt] = true
+					queue = append(queue, nxt)
+				}
+			}
+		}
+		return false
+	}
+	for _, e := range raw {
+		if e.FromType == e.ToType {
+			continue
+		}
+		pair := [2]string{e.FromType, e.ToType}
+		if seen[pair] || reaches(e.ToType, e.FromType) {
+			continue
+		}
+		seen[pair] = true
+		adj[e.FromType] = append(adj[e.FromType], e.ToType)
+		out = append(out, e)
+	}
+	return out
+}
+
+// spaceGraphSection renders an interactive layered ontology graph of the space's types and their connections.
+func (c *ctx) spaceGraphSection() wire.Section {
+	nodes := make([]wire.GraphNode, 0, len(c.sp.Types))
+	for _, t := range c.sp.Types {
+		if t == nil {
+			continue
+		}
+		set := c.entitiesOf(t.Key)
+		tl := tallyOf(c.w, set)
+		node := wire.GraphNode{
+			ID:       t.Key,
+			Title:    cut(t.Name, maxTitle),
+			Subtitle: fmt.Sprintf("%d 条", len(set)),
+			Icon:     iconName(t.Icon),
+			Action:   &wire.Action{ID: "tab:" + t.Key},
+		}
+		if pct, ok := tl.percent(); ok && len(t.Flow) > 0 {
+			r := float64(pct) / 100.0
+			node.Progress = &r
+			node.Badge = &wire.Badge{Text: fmt.Sprintf("%d%%", pct), Tone: wire.TonePositive}
+		} else if tl.doing > 0 {
+			node.Badge = &wire.Badge{Text: fmt.Sprintf("进行中 %d", tl.doing), Tone: wire.ToneCaution}
+		}
+		nodes = append(nodes, node)
+	}
+	edges := []wire.GraphEdge{}
+	for _, e := range c.acyclicSchemaEdges() {
+		edges = append(edges, wire.GraphEdge{From: e.FromType, To: e.ToType})
+	}
+	return wire.Section{
+		Span:   wire.SectionSpanFull,
+		Title:  "分类关系图",
+		Footer: "点任意节点即可跳到对应分类",
+		Items: []wire.Component{{
+			Type:      wire.ComponentGraph,
+			Key:       "space_graph_" + c.sp.ID,
+			Layout:    wire.GraphLayoutLayered,
+			Direction: wire.GraphDirectionRight,
+			Nodes:     nodes,
+			Edges:     edges,
+		}},
+	}
 }
 
 // recent are the five latest entities of the space, of any type.
@@ -275,7 +490,7 @@ func (c *ctx) recent() ([]*kernel.Entity, error) {
 // confirmation names what it deletes.
 func (c *ctx) spaceFold() wire.Section {
 	sp := c.sp
-	return wire.Section{Items: []wire.Component{
+	return wire.Section{Span: wire.SectionSpanFull, Items: []wire.Component{
 		{Type: wire.ComponentField, Name: "name", Label: "名称", Kind: wire.FieldKindText, Value: sp.Name},
 		{Type: wire.ComponentField, Name: "about", Label: "简介", Kind: wire.FieldKindText, Value: sp.About,
 			Placeholder: "一句话说明这个空间记什么，例如 家里每月的订阅"},
@@ -297,10 +512,13 @@ func (c *ctx) card() *wire.View {
 	var all tally
 	var doing []located
 	entries := 0
+	upcoming := 0
+	today := c.todayStr()
 	for _, sp := range c.b.Spaces {
 		entries += len(sp.Entities)
 		w := kernel.Open(sp)
 		all.add(tallyOf(w, sp.Entities))
+		upcoming += len(w.Upcoming(today, 7))
 		for _, e := range sp.Entities {
 			if phaseOf(w, e) == string(kernel.Doing) {
 				doing = append(doing, located{sp: sp, e: e})
@@ -315,9 +533,13 @@ func (c *ctx) card() *wire.View {
 	if p, ok := all.percent(); ok {
 		pct, detail, tone = fmt.Sprintf("%d%%", p), fmt.Sprintf("已完成 %d", all.done), wire.TonePositive
 	}
+	todoDetail, todoTone := "", ""
+	if upcoming > 0 {
+		todoDetail, todoTone = fmt.Sprintf("近期提醒 %d", upcoming), wire.ToneCaution
+	}
 	v := &wire.View{Sections: []wire.Section{{Items: []wire.Component{statGrid([]wire.Stat{
 		{Label: "进行中", Value: strconv.Itoa(all.doing), Detail: fmt.Sprintf("%d 个空间，共 %d 条", len(c.b.Spaces), entries)},
-		{Label: "待办", Value: strconv.Itoa(all.todo)},
+		{Label: "待办", Value: strconv.Itoa(all.todo), Detail: todoDetail, Tone: todoTone},
 		{Label: "完成度", Value: pct, Detail: detail, Tone: tone},
 	})}}}}
 	if len(doing) > 0 {
@@ -394,17 +616,27 @@ func phaseOf(w *kernel.World, e *kernel.Entity) string {
 	return p
 }
 
-// spaceStats are the totals of a space: the three phases and the share done.
-func spaceStats(t tally) []wire.Stat {
-	pct := "—"
+// spaceStats are the totals of a space: the three phases and the share done, with subtle tones and upcoming hint.
+func spaceStats(t tally, upcoming int) []wire.Stat {
+	pct, pctTone, pctDetail := "—", "", ""
 	if p, ok := t.percent(); ok {
 		pct = fmt.Sprintf("%d%%", p)
+		if p >= 80 {
+			pctTone = wire.TonePositive
+		}
+	}
+	if upcoming > 0 {
+		pctDetail = fmt.Sprintf("近期提醒 %d", upcoming)
+	}
+	doingTone := ""
+	if t.doing > 0 {
+		doingTone = wire.ToneCaution
 	}
 	return []wire.Stat{
 		{Label: "待办", Value: strconv.Itoa(t.todo)},
-		{Label: "进行中", Value: strconv.Itoa(t.doing)},
+		{Label: "进行中", Value: strconv.Itoa(t.doing), Tone: doingTone},
 		{Label: "已完成", Value: strconv.Itoa(t.done)},
-		{Label: "完成度", Value: pct},
+		{Label: "完成度", Value: pct, Detail: pctDetail, Tone: pctTone},
 	}
 }
 

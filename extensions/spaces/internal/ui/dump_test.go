@@ -56,7 +56,11 @@ func viewText(v *wire.View) string {
 	for _, sec := range v.Sections {
 		b.WriteByte('\n')
 		if sec.Title != "" {
-			line(0, "## %s", sec.Title)
+			title := sec.Title
+			if sec.Link != nil {
+				title += " [" + sec.Link.Title + "]"
+			}
+			line(0, "## %s", title)
 		}
 		for _, it := range sec.Items {
 			componentText(it, line)
@@ -97,6 +101,17 @@ func componentText(it wire.Component, line func(int, string, ...any)) {
 		line(1, "%s", s)
 		if it.Subtitle != "" {
 			line(2, "%s", it.Subtitle)
+		}
+		if len(it.Actions) > 0 {
+			var as []string
+			for _, a := range it.Actions {
+				as = append(as, a.Title)
+			}
+			line(2, "[快捷] %s", strings.Join(as, " | "))
+		}
+	case wire.ComponentGraph:
+		for _, n := range it.Nodes {
+			line(1, "[节点] %s %s%s", n.Title, n.Subtitle, badge(n.Badge))
 		}
 	case wire.ComponentStatGrid:
 		var ss []string
@@ -242,16 +257,20 @@ func pageStates(t *testing.T) []pageState {
 	a := newApp(st)
 	sp := firstSpace(t, st)
 	add("02-space-overview", drawPage(t, a, state{S: sp}, 5), "")
+	add("02-space-overview-v10", drawPage(t, a, state{S: sp}, 10), "")
+	add("02-space-quick-fold", drawPage(t, a, state{S: sp, F: "quick"}, 10), "")
+	add("02-space-graph-fold", drawPage(t, a, state{S: sp, F: "graph"}, 10), "")
 	add("02-space-settings", drawPage(t, a, state{S: sp, F: "space"}, 5), "")
 	add("02-space-new-space-list", drawPage(t, a, state{S: sp, C: pickSlot}, 5), "")
 	add("02-tab-book-progress", drawPage(t, a, state{S: sp, T: "book"}, 5), "")
-	add("02-tab-book-board", drawPage(t, a, state{S: sp, T: "book", V: 1}, 5), "")
-	add("02-tab-book-quick-add", drawPage(t, a, state{S: sp, T: "book", F: "new"}, 5), "")
+	add("02-tab-book-board", drawPage(t, a, state{S: sp, T: "book", V: 1}, 10), "")
+	add("02-tab-book-quick-add", drawPage(t, a, state{S: sp, T: "book", F: "new"}, 10), "")
 	add("02-tab-note-feed", drawPage(t, a, state{S: sp, T: "note"}, 5), "")
 	add("02-tab-clip-table", drawPage(t, a, state{S: sp, T: "clip"}, 5), "")
 	add("02-tab-book-search-none", drawPage(t, a, state{S: sp, T: "book", Q: "没有这本"}, 5), "")
 	book := idOf(t, st, "《慢读的方法》")
-	add("02-entity-book", drawPage(t, a, state{S: sp, E: book}, 5), "")
+	add("02-entity-book", drawPage(t, a, state{S: sp, E: book}, 10), "")
+	add("02-entity-book-linknew", drawPage(t, a, state{S: sp, E: book, F: "linknew:note:book"}, 10), "")
 	add("02-entity-book-edit", drawPage(t, a, state{S: sp, E: book, F: "edit"}, 5), "")
 	add("02-entity-book-derive", drawPage(t, a, state{S: sp, E: book, F: "derive"}, 5), "")
 	add("02-entity-note", drawPage(t, a, state{S: sp, E: idOf(t, st, "先写自己的话，再抄原文")}, 5), "")

@@ -649,8 +649,8 @@ func TestSpaceOverviewShowsEveryPart(t *testing.T) {
 	if head.Type != wire.ComponentHeader || head.Title != "项目与目标" {
 		t.Fatalf("header = %+v", head)
 	}
-	// The four type rows, then the button that adds a type.
-	types := v.Sections[1]
+	// The four type rows, then the button that adds a type, alongside ontology focus sections.
+	types := sectionTitled(t, v, "分类")
 	if types.Title != "分类" || len(types.Items) != 5 || types.Items[4].Title != "新建分类" {
 		t.Fatalf("type rows = %+v", types)
 	}
@@ -660,9 +660,9 @@ func TestSpaceOverviewShowsEveryPart(t *testing.T) {
 	if !strings.Contains(types.Items[0].Subtitle, "看板") {
 		t.Fatalf("idea subtitle = %q", types.Items[0].Subtitle)
 	}
-	// The header's card ends with the settings and new-space buttons.
+	// The header's card holds quick-capture, settings and new-space buttons.
 	hs := v.Sections[0].Items
-	if n := len(hs); n < 2 || hs[n-2].Action.ID != "fold:space" || hs[n-1].Title != "新建空间" || hs[n-1].Action.ID != "new" {
+	if n := len(hs); n < 3 || hs[n-3].Action.ID != "fold:quick" || hs[n-2].Action.ID != "fold:space" || hs[n-1].Title != "新建空间" || hs[n-1].Action.ID != "new" {
 		t.Fatalf("header card = %+v", hs)
 	}
 }
@@ -746,13 +746,16 @@ func TestTypeTabShowsBoardFeedProgressTableAndQuickAdd(t *testing.T) {
 	// The task table: the columns and cells with no caption, since the aggregates are the stats above it; then the
 	// same entities as compact rows, title and status only.
 	v = drawPage(t, a, state{S: id, T: "task", V: 1}, 5)
-	grid := v.Sections[0].Items[len(v.Sections[0].Items)-1]
+	grid := v.Sections[0].Items[1]
 	table := v.Sections[1].Items[0]
 	if table.Type != wire.ComponentTable || len(table.Rows) == 0 || table.Caption != "" {
 		t.Fatalf("table = %+v", table)
 	}
 	if grid.Type != wire.ComponentStatGrid || len(grid.Stats) == 0 {
 		t.Fatalf("table stats = %+v", grid)
+	}
+	if phaseSeg := v.Sections[0].Items[2]; phaseSeg.Type != wire.ComponentSegmented || phaseSeg.Name != "phase" {
+		t.Fatalf("phase filter = %+v", phaseSeg)
 	}
 	index := v.Sections[2]
 	if index.Title != "点开查看" || len(index.Items) != len(table.Rows) {
@@ -771,10 +774,10 @@ func TestTypeTabShowsBoardFeedProgressTableAndQuickAdd(t *testing.T) {
 		t.Fatal("index rows lack the status badge")
 	}
 
-	// Quick add: opened, it shows one title, a caption and a primary add, just above the buttons.
+	// Quick add: opened, it shows the required title, optional schema fields, a caption and a primary add.
 	v = drawPage(t, a, state{S: id, T: "idea", F: "new"}, 5)
 	fold := v.Sections[len(v.Sections)-2]
-	if len(fold.Items) != 3 || fold.Items[0].Name != "title" || fold.Items[1].Type != wire.ComponentText || !fold.Items[2].Action.Submit {
+	if len(fold.Items) < 3 || fold.Items[0].Name != "title" || fold.Items[len(fold.Items)-2].Type != wire.ComponentText || !fold.Items[len(fold.Items)-1].Action.Submit {
 		t.Fatalf("quick add = %+v", fold.Items)
 	}
 }
@@ -937,7 +940,7 @@ func TestFormFieldsAndSubmittedValues(t *testing.T) {
 		{"number unset", kernel.Prop{Key: "n", Name: "数", Kind: kernel.KindNumber}, nil, wire.FieldKindNumber, ""},
 		{"toggle", kernel.Prop{Key: "b", Name: "是否", Kind: kernel.KindBoolean}, true, wire.FieldKindToggle, "true"},
 		{"toggle unset", kernel.Prop{Key: "b", Name: "是否", Kind: kernel.KindBoolean}, nil, wire.FieldKindToggle, "false"},
-		{"date", kernel.Prop{Key: "d", Name: "日期", Kind: kernel.KindDate}, "2026-01-02", wire.FieldKindText, "2026-01-02"},
+		{"date", kernel.Prop{Key: "d", Name: "日期", Kind: kernel.KindDate}, "2026-01-02", wire.FieldKindDate, "2026-01-02"},
 		{"choice", kernel.Prop{Key: "e", Name: "选项", Kind: kernel.KindEnum, Options: []string{"高", "低"}}, "低", wire.FieldKindChoice, "=低"},
 		{"choice unset", kernel.Prop{Key: "e", Name: "选项", Kind: kernel.KindEnum, Options: []string{"高"}}, nil, wire.FieldKindChoice, "="},
 	}
@@ -1015,14 +1018,16 @@ func TestOptionChoicesAndDayTitles(t *testing.T) {
 	if len(got) != 3 || got[0].Title != unsetLabel || got[2].Value != "=乙" {
 		t.Fatalf("option choices = %+v", got)
 	}
-	cases := []struct{ day, today, yesterday, want string }{
-		{"", "2026-11-10", "2026-11-09", unsetLabel},
-		{"2026-11-10", "2026-11-10", "2026-11-09", "今天"},
-		{"2026-11-09", "2026-11-10", "2026-11-09", "昨天"},
-		{"2026-10-01", "2026-11-10", "2026-11-09", "2026-10-01"},
+	cases := []struct{ day, today, yesterday, tomorrow, dayAfter, want string }{
+		{"", "2026-11-10", "2026-11-09", "2026-11-11", "2026-11-12", unsetLabel},
+		{"2026-11-10", "2026-11-10", "2026-11-09", "2026-11-11", "2026-11-12", "今天"},
+		{"2026-11-09", "2026-11-10", "2026-11-09", "2026-11-11", "2026-11-12", "昨天"},
+		{"2026-11-11", "2026-11-10", "2026-11-09", "2026-11-11", "2026-11-12", "明天"},
+		{"2026-11-12", "2026-11-10", "2026-11-09", "2026-11-11", "2026-11-12", "后天"},
+		{"2026-10-01", "2026-11-10", "2026-11-09", "2026-11-11", "2026-11-12", "2026-10-01"},
 	}
 	for _, tc := range cases {
-		if got := dayTitle(tc.day, tc.today, tc.yesterday); got != tc.want {
+		if got := dayTitle(tc.day, tc.today, tc.yesterday, tc.tomorrow, tc.dayAfter); got != tc.want {
 			t.Fatalf("dayTitle(%q) = %q, want %q", tc.day, got, tc.want)
 		}
 	}

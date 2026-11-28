@@ -16,6 +16,15 @@ func lower(v *wire.View, version int) *wire.View {
 	if v == nil || version <= 0 {
 		return v
 	}
+	if version < 10 {
+		v = below10(v)
+	}
+	if version < 8 {
+		v = below8(v)
+	}
+	if version < 6 {
+		v = below6(v)
+	}
 	if version < 4 {
 		v = below4(v)
 	}
@@ -28,6 +37,11 @@ func lower(v *wire.View, version int) *wire.View {
 	return fitItemLimit(v)
 }
 
+// itemWeight matches wire.CheckView's component count for one item.
+func itemWeight(it wire.Component) int {
+	return max(1, len(it.Tiles)+len(it.Nodes)+len(it.Pins)+len(it.Markers))
+}
+
 // fitItemLimit ensures lowering (which expands filters, tabs, stat grids, and segmented controls into extra items)
 // never pushes a view past wire.ItemsMost. Normal views under the limit are returned unchanged.
 func fitItemLimit(v *wire.View) *wire.View {
@@ -37,7 +51,7 @@ func fitItemLimit(v *wire.View) *wire.View {
 	total := 0
 	for _, s := range v.Sections {
 		for _, it := range s.Items {
-			total += max(1, len(it.Tiles))
+			total += itemWeight(it)
 		}
 	}
 	if total <= wire.ItemsMost {
@@ -63,7 +77,144 @@ func fitItemLimit(v *wire.View) *wire.View {
 		}
 		last := out.Sections[best].Items[bestCount-1]
 		out.Sections[best].Items = out.Sections[best].Items[:bestCount-1]
-		total -= max(1, len(last.Tiles))
+		total -= itemWeight(last)
+	}
+	return &out
+}
+
+// below10 lowers UI version 10 components (graph) into plain rows so older clients still see and open every node.
+func below10(v *wire.View) *wire.View {
+	needs := false
+	for _, s := range v.Sections {
+		for _, it := range s.Items {
+			if it.Type == wire.ComponentGraph {
+				needs = true
+				break
+			}
+		}
+		if needs {
+			break
+		}
+	}
+	if !needs {
+		return v
+	}
+	out := *v
+	out.Sections = make([]wire.Section, len(v.Sections))
+	for i, s := range v.Sections {
+		ns := s
+		ns.Items = []wire.Component{}
+		for _, it := range s.Items {
+			if it.Type != wire.ComponentGraph {
+				ns.Items = append(ns.Items, it)
+				continue
+			}
+			for _, n := range it.Nodes {
+				ns.Items = append(ns.Items, wire.Component{
+					Type: wire.ComponentRow, Title: n.Title, Subtitle: n.Subtitle,
+					Icon: n.Icon, Badge: n.Badge, Action: n.Action,
+				})
+			}
+		}
+		out.Sections[i] = ns
+	}
+	return &out
+}
+
+// below8 removes UI version 8 responsive column layout hints and lowers Section.Link to a trailing row.
+func below8(v *wire.View) *wire.View {
+	needs := v.Layout == wire.LayoutColumns
+	if !needs {
+		for _, s := range v.Sections {
+			if s.Span != "" || s.Columns != 0 || s.Link != nil {
+				needs = true
+				break
+			}
+		}
+	}
+	if !needs {
+		return v
+	}
+	out := *v
+	if out.Layout == wire.LayoutColumns {
+		out.Layout = ""
+	}
+	out.Sections = make([]wire.Section, len(v.Sections))
+	for i, s := range v.Sections {
+		ns := s
+		ns.Span = ""
+		ns.Columns = 0
+		if s.Link != nil {
+			link := s.Link
+			ns.Link = nil
+			ns.Items = append(append([]wire.Component(nil), s.Items...), wire.Component{
+				Type: wire.ComponentRow, Title: link.Title, Action: &link.Action,
+			})
+		}
+		out.Sections[i] = ns
+	}
+	return &out
+}
+
+// below6 strips UI version 6 row/tile shortcuts and lowers date/multichoice fields to text/choice inputs.
+func below6(v *wire.View) *wire.View {
+	needs := false
+	for _, s := range v.Sections {
+		for _, it := range s.Items {
+			if len(it.Actions) > 0 || it.Control != nil || it.Spark != nil ||
+				it.Type == wire.ComponentGrid || it.Type == wire.ComponentCarousel ||
+				(it.Type == wire.ComponentField && (it.Kind == wire.FieldKindDate || it.Kind == wire.FieldKindMultichoice)) {
+				needs = true
+				break
+			}
+		}
+		if needs {
+			break
+		}
+	}
+	if !needs {
+		return v
+	}
+	out := *v
+	out.Sections = make([]wire.Section, len(v.Sections))
+	for i, s := range v.Sections {
+		ns := s
+		ns.Items = make([]wire.Component, 0, len(s.Items))
+		for _, it := range s.Items {
+			it.Actions = nil
+			it.Control = nil
+			it.Spark = nil
+			switch it.Type {
+			case wire.ComponentGrid, wire.ComponentCarousel:
+				for _, tl := range it.Tiles {
+					ns.Items = append(ns.Items, wire.Component{
+						Type: wire.ComponentRow, Title: tl.Title, Subtitle: tl.Subtitle,
+						Value: tl.Value, Icon: tl.Icon, Badge: tl.Badge, Action: tl.Action,
+					})
+				}
+				continue
+			case wire.ComponentField:
+				switch it.Kind {
+				case wire.FieldKindDate:
+					it.Kind = wire.FieldKindText
+					if it.Placeholder == "" {
+						it.Placeholder = "例如 2026-12-01"
+					}
+					it.Earliest, it.Latest = "", ""
+				case wire.FieldKindMultichoice:
+					it.Kind = wire.FieldKindChoice
+					choices := make([]wire.Choice, 0, len(it.Choices)+1)
+					choices = append(choices, wire.Choice{Value: choicePrefix, Title: addLabel})
+					for _, ch := range it.Choices {
+						choices = append(choices, wire.Choice{Value: choicePrefix + ch.Value, Title: ch.Title})
+					}
+					it.Choices = choices
+					it.Value = choicePrefix
+				}
+			}
+			ns.Items = append(ns.Items, it)
+		}
+		out.Sections[i] = ns
 	}
 	return &out
 }

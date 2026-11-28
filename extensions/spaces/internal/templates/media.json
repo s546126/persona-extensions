@@ -1,0 +1,83 @@
+{
+  "key": "media",
+  "name": "影音与收藏",
+  "icon": "tv",
+  "about": "想看和在追的电影、剧集与播客，写下观后感，再收进自己的片单。",
+  "types": [
+    {
+      "key": "work",
+      "name": "作品",
+      "icon": "video",
+      "flow": [
+        {"name": "想看", "phase": "todo"},
+        {"name": "在看", "phase": "doing"},
+        {"name": "看完", "phase": "done"},
+        {"name": "弃坑", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "kind", "name": "形式", "kind": "enum", "options": ["电影", "剧集", "动画", "纪录片", "播客"]},
+        {"key": "done_ep", "name": "已看", "kind": "number", "unit": "集"},
+        {"key": "total_ep", "name": "总集数", "kind": "number", "unit": "集"},
+        {"key": "rating", "name": "评分", "kind": "enum", "options": ["★", "★★", "★★★", "★★★★", "★★★★★"]},
+        {"key": "date", "name": "日期", "kind": "date"},
+        {"key": "url", "name": "主页", "kind": "url"},
+        {"key": "summary", "name": "一句话", "kind": "text"},
+        {"key": "reviews", "name": "笔记数", "kind": "rollup", "via": "review.work", "op": "count", "unit": "条"}
+      ],
+      "card": {"lead": "summary", "pills": ["kind", "rating", "reviews"], "progress": {"of": "done_ep", "over": "total_ep"}},
+      "views": [
+        {"name": "追更", "kind": "progress", "where": [{"field": "phase", "op": "eq", "value": "doing"}]},
+        {"name": "看板", "kind": "board"},
+        {"name": "按形式", "kind": "list", "group": "kind"},
+        {"name": "片库", "kind": "table", "agg": [{"op": "count"}]}
+      ]
+    },
+    {
+      "key": "review",
+      "name": "观后感",
+      "icon": "doc",
+      "props": [
+        {"key": "work", "name": "作品", "kind": "relation", "target": "work", "back": "观后感"},
+        {"key": "date", "name": "日期", "kind": "date"},
+        {"key": "gist", "name": "想法", "kind": "text"}
+      ],
+      "card": {"lead": "gist", "pills": ["work", "date"]},
+      "views": [
+        {"name": "动态", "kind": "feed", "sort": [{"by": "date", "desc": true}]},
+        {"name": "按作品", "kind": "list", "sort": [{"by": "date", "desc": true}], "group": "work"}
+      ]
+    },
+    {
+      "key": "shelf",
+      "name": "片单",
+      "icon": "star",
+      "props": [
+        {"key": "note", "name": "主题说明", "kind": "text"},
+        {"key": "works", "name": "包含作品", "kind": "relation", "target": "work", "many": true, "back": "所在片单"},
+        {"key": "count", "name": "作品数", "kind": "rollup", "via": "works", "op": "count", "unit": "部"},
+        {"key": "progress", "name": "看完比例", "kind": "rollup", "via": "works", "op": "percent_done"}
+      ],
+      "card": {"lead": "note", "pills": ["count"], "progress": {"of": "progress"}},
+      "views": [
+        {"name": "进度", "kind": "progress"},
+        {"name": "列表", "kind": "list"}
+      ]
+    }
+  ],
+  "samples": [
+    {"ref": "w_coast", "type": "work", "title": "《海风慢车》", "status": "看完",
+     "values": {"kind": "电影", "done_ep": 1, "total_ep": 1, "rating": "★★★★★", "date": "-12d", "url": "https://example.com/works/coast-train", "summary": "节奏松弛的公路小片，后半段的配乐很耐听。"}},
+    {"ref": "w_city", "type": "work", "title": "《街巷手艺》", "status": "在看",
+     "values": {"kind": "纪录片", "done_ep": 4, "total_ep": 8, "rating": "★★★★", "summary": "每集讲一位手艺人的日常，适合晚饭时看。"}},
+    {"ref": "w_star", "type": "work", "title": "《冬日灯塔》", "status": "想看",
+     "values": {"kind": "剧集", "done_ep": 0, "total_ep": 10, "summary": "口碑很好的悬疑迷你剧，留到周末一口气看。"}},
+    {"ref": "r_1", "type": "review", "title": "镜头留白恰到好处",
+     "values": {"work": "@w_coast", "date": "-12d", "gist": "没有刻意煽情，反而让人记住海边小站的对话。"}},
+    {"ref": "r_2", "type": "review", "title": "第四集木工篇最打动人",
+     "values": {"work": "@w_city", "date": "-2d", "gist": "一把刨子用了三十年，讲工具其实是在讲耐心。"}},
+    {"ref": "r_3", "type": "review", "from": "r_2", "title": "第五集制茶篇随记",
+     "values": {"date": "-1d", "gist": "同样的手艺叙事，镜头里的雨声和焙茶香很有画面感。"}},
+    {"ref": "sh_weekend", "type": "shelf", "title": "周末慢看片单",
+     "values": {"note": "不烧脑、画面舒服，适合下雨天和周末晚上。", "works": ["@w_coast", "@w_city", "@w_star"]}}
+  ]
+}

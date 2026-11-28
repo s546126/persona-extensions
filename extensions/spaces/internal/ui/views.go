@@ -39,15 +39,19 @@ var phaseLabels = []struct{ phase, label string }{
 	{string(kernel.Todo), "待办"}, {string(kernel.Doing), "进行中"}, {string(kernel.Done), "已完成"},
 }
 
-// typePage is the type's tab: the search, the view segmented, the stats of the view, the view's body, the quick-add
-// fold when it is open, and the buttons that add an entity or open the type's structure.
+// typePage is the type's tab: the search, the view segmented, the stats of the view, optional quick phase filter,
+// the view's body (multi-column on wide screens for boards), the quick-add fold when open, and the action buttons.
 func (c *ctx) typePage(t *kernel.Type) (*wire.View, error) {
 	filter, tabs := c.chrome()
 	views := t.ViewsOrDefault()
 	if c.st.V < 0 || c.st.V >= len(views) {
-		c.st.V, c.st.N = 0, 0
+		c.st.V, c.st.P, c.st.N = 0, "", 0
 	}
 	view := views[c.st.V]
+	allowPhaseFilter := len(t.Flow) > 0 && view.Kind != "board" && !lensFiltersPhase(view.Lens)
+	if !allowPhaseFilter {
+		c.st.P = ""
+	}
 	pg, err := c.page(t, view)
 	if err != nil {
 		return nil, err
@@ -60,12 +64,18 @@ func (c *ctx) typePage(t *kernel.Type) (*wire.View, error) {
 		Sections: []wire.Section{}, Filter: filter, Tabs: tabs,
 		Search: &wire.Search{Placeholder: "搜索" + t.Name, Value: c.st.Q, Action: wire.Action{ID: "search"}},
 	}
+	if view.Kind == "board" {
+		v.Layout = wire.LayoutColumns
+	}
 	head := []wire.Component{}
 	if len(views) >= 2 {
 		head = append(head, segmented(views, c.st.V))
 	}
 	head = append(head, statGrid(stats))
-	v.Sections = append(v.Sections, wire.Section{Items: head})
+	if allowPhaseFilter {
+		head = append(head, phaseSegmented(c.st.P))
+	}
+	v.Sections = append(v.Sections, wire.Section{Span: wire.SectionSpanFull, Items: head})
 	if pg.res.Total == 0 {
 		v.Sections = append(v.Sections, c.emptyRows(t))
 	} else {
@@ -74,11 +84,41 @@ func (c *ctx) typePage(t *kernel.Type) (*wire.View, error) {
 	if c.st.F == "new" {
 		v.Sections = append(v.Sections, c.quickAdd(t))
 	}
-	v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{
+	v.Sections = append(v.Sections, wire.Section{Span: wire.SectionSpanFull, Items: []wire.Component{
 		button("新建"+t.Name, &wire.Action{ID: "fold:new"}, wire.ButtonRoleNormal),
 		button("分类设置", ext.Open("schema:"+t.Key, "", state{S: c.sp.ID, D: t.Key}, "分类设置"), wire.ButtonRoleNormal),
 	}})
 	return v, nil
+}
+
+// lensFiltersPhase reports whether a view's lens already constrains phase or status.
+func lensFiltersPhase(l kernel.Lens) bool {
+	for _, cond := range l.Where {
+		if cond.Field == "phase" || cond.Field == "status" {
+			return true
+		}
+	}
+	return false
+}
+
+// phaseSegmented builds the inline phase filter control on type tabs with a lifecycle.
+func phaseSegmented(cur string) wire.Component {
+	val := cur
+	if val == "" {
+		val = "all"
+	}
+	return wire.Component{
+		Type:  wire.ComponentSegmented,
+		Name:  "phase",
+		Value: val,
+		Choices: []wire.Choice{
+			{Value: "all", Title: "全部"},
+			{Value: string(kernel.Todo), Title: "待办"},
+			{Value: string(kernel.Doing), Title: "进行中"},
+			{Value: string(kernel.Done), Title: "已完成"},
+		},
+		Action: &wire.Action{ID: "phase"},
+	}
 }
 
 // page is one run of a view's query: the groups of the page, the grouping used, and whether more entities follow.
@@ -110,6 +150,9 @@ func (c *ctx) page(t *kernel.Type, view kernel.View) (page, error) {
 	}
 	if view.Kind == "feed" {
 		lens.Sort = []kernel.Order{{By: c.feedKey(t, view), Desc: true}}
+	}
+	if c.st.P != "" && len(lens.Where) < kernel.MaxWhere {
+		lens.Where = append(slices.Clone(lens.Where), kernel.Cond{Field: "phase", Op: "eq", Value: c.st.P})
 	}
 	res, err := c.w.Run(kernel.Query{Type: t.Key, Text: c.st.Q, Lens: lens, Limit: limit})
 	if err != nil {
@@ -221,7 +264,7 @@ func (c *ctx) body(t *kernel.Type, view kernel.View, pg page) []wire.Section {
 	return out
 }
 
-// listSections is the list: one section of rows, or one per group titled with its name and count.
+// listSections is the list: one section of rows, or one per group titled with its name, count and group aggregates.
 func (c *ctx) listSections(pg page) []wire.Section {
 	out := []wire.Section{}
 	for _, g := range pg.res.Groups {
@@ -231,10 +274,26 @@ func (c *ctx) listSections(pg page) []wire.Section {
 		s := wire.Section{Items: c.rows(g.Items, false)}
 		if pg.group != "" {
 			s.Title = fmt.Sprintf("%s · %d", groupName(g), g.Count)
+			if aggLine := groupAggSummary(g.Aggs); aggLine != "" {
+				s.Footer = aggLine
+			}
 		}
 		out = append(out, s)
 	}
 	return out
+}
+
+// groupAggSummary formats a group's computed aggregates into a compact footer line, skipping redundant bare counts
+// because the section title already displays the group count.
+func groupAggSummary(cells []kernel.Cell) string {
+	var parts []string
+	for _, cell := range cells {
+		if cell.Text == "" || cell.Name == "数量" {
+			continue
+		}
+		parts = append(parts, cell.Name+" "+cell.Text)
+	}
+	return cut(strings.Join(parts, " · "), maxText)
 }
 
 // boardSections is the board: one section per stage of the grouping, every stage present even when it is empty, and
@@ -262,7 +321,7 @@ func (c *ctx) boardSections(t *kernel.Type, pg page) []wire.Section {
 	return out
 }
 
-// columnSection is one column of a board. An empty column has a dash.
+// columnSection is one column of a board. An empty column has a dash; non-empty columns include group aggregates.
 func columnSection(key string, g kernel.Group, found bool, rows func([]*kernel.Entity, bool) []wire.Component) wire.Section {
 	name, count := key, 0
 	if key == "" {
@@ -277,6 +336,9 @@ func columnSection(key string, g kernel.Group, found bool, rows func([]*kernel.E
 		return s
 	}
 	s.Items = rows(g.Items, false)
+	if aggLine := groupAggSummary(g.Aggs); aggLine != "" {
+		s.Footer = aggLine
+	}
 	return s
 }
 
@@ -338,15 +400,18 @@ func (c *ctx) progressSections(t *kernel.Type, pg page) []wire.Section {
 	return []wire.Section{{Items: items}}
 }
 
-// progress is the bar of an entity: its ratio, its share in words, and positive when it is done.
+// progress is the bar of an entity: its ratio, its share in words, positive when done or full, caution while doing.
 func (c *ctx) progress(t *kernel.Type, e *kernel.Entity) (wire.Component, bool) {
 	ratio, ok := c.w.Ratio(e)
 	if !ok {
 		return wire.Component{}, false
 	}
 	tone := wire.ToneNeutral
-	if phaseOf(c.w, e) == string(kernel.Done) {
+	switch {
+	case phaseOf(c.w, e) == string(kernel.Done) || ratio >= 1:
 		tone = wire.TonePositive
+	case phaseOf(c.w, e) == string(kernel.Doing) && ratio > 0:
+		tone = wire.ToneCaution
 	}
 	return wire.Component{
 		Type: wire.ComponentProgress, Label: c.progressLabel(t, e), Detail: fmt.Sprintf("%d%%", pctOf(ratio)),
@@ -377,13 +442,16 @@ func (c *ctx) progressLabel(t *kernel.Type, e *kernel.Entity) string {
 func (c *ctx) feedSections(t *kernel.Type, view kernel.View, pg page) []wire.Section {
 	key := c.feedKey(t, view)
 	now := c.now.In(c.loc)
-	today, yesterday := now.Format(time.DateOnly), now.AddDate(0, 0, -1).Format(time.DateOnly)
+	today := now.Format(time.DateOnly)
+	yesterday := now.AddDate(0, 0, -1).Format(time.DateOnly)
+	tomorrow := now.AddDate(0, 0, 1).Format(time.DateOnly)
+	dayAfter := now.AddDate(0, 0, 2).Format(time.DateOnly)
 	out := []wire.Section{}
 	last, started := "", false
 	for _, e := range pg.entities() {
 		day, at, hasTime := c.dayOf(e, key)
 		if !started || day != last {
-			out = append(out, wire.Section{Title: dayTitle(day, today, yesterday), Items: []wire.Component{}})
+			out = append(out, wire.Section{Title: dayTitle(day, today, yesterday, tomorrow, dayAfter), Items: []wire.Component{}})
 			last, started = day, true
 		}
 		s := &out[len(out)-1]
@@ -416,8 +484,8 @@ func (c *ctx) dayOf(e *kernel.Entity, key string) (string, time.Time, bool) {
 	return "", time.Time{}, false
 }
 
-// dayTitle names a day: today, yesterday, or its date; "未设置" for no day.
-func dayTitle(day, today, yesterday string) string {
+// dayTitle names a day: today, yesterday, tomorrow, day after tomorrow, or its date; "未设置" for no day.
+func dayTitle(day, today, yesterday, tomorrow, dayAfter string) string {
 	switch day {
 	case "":
 		return unsetLabel
@@ -425,32 +493,52 @@ func dayTitle(day, today, yesterday string) string {
 		return "今天"
 	case yesterday:
 		return "昨天"
+	case tomorrow:
+		return "明天"
+	case dayAfter:
+		return "后天"
 	}
 	return day
 }
 
-// emptyRows is what a type's tab shows with no entity: a search that found nothing, or the first entity to add.
+// emptyRows is what a type's tab shows with no entity: a search or phase filter that found nothing, or the first entity.
 func (c *ctx) emptyRows(t *kernel.Type) wire.Section {
 	if c.st.Q != "" {
-		return wire.Section{Items: []wire.Component{{
+		return wire.Section{Span: wire.SectionSpanFull, Items: []wire.Component{{
 			Type: wire.ComponentEmpty, Title: "没有找到「" + c.st.Q + "」",
 			Detail: "换个词再搜，或者清空搜索框看全部" + t.Name,
 		}}}
 	}
-	return wire.Section{Items: []wire.Component{{
+	if c.st.P != "" {
+		return wire.Section{Span: wire.SectionSpanFull, Items: []wire.Component{{
+			Type:   wire.ComponentEmpty,
+			Title:  "这个进展下还没有" + t.Name,
+			Detail: "切换进展筛选，或者直接新建一条" + t.Name,
+			Button: &wire.EmptyButton{Title: "看全部", Action: wire.Action{ID: "phase:all"}},
+		}}}
+	}
+	return wire.Section{Span: wire.SectionSpanFull, Items: []wire.Component{{
 		Type: wire.ComponentEmpty, Title: "还没有" + t.Name,
 		Detail: cut("点下面的按钮写下第一条；也可以跟助手说「在「"+c.sp.Name+"」里记一条"+t.Name+"：……」。", maxText),
 		Button: &wire.EmptyButton{Title: "新建" + t.Name, Action: wire.Action{ID: "fold:new"}},
 	}}}
 }
 
-// quickAdd is the fold that adds an entity: one title and a primary create. The entity starts at the first stage.
+// quickAdd is the fold that adds an entity: the required title plus up to quickAddMost high-value optional properties
+// from the type's schema, so the user can either jot a title quickly or fill key fields in one step.
 func (c *ctx) quickAdd(t *kernel.Type) wire.Section {
-	return wire.Section{Items: []wire.Component{
+	items := []wire.Component{
 		{Type: wire.ComponentField, Name: "title", Label: "标题", Kind: wire.FieldKindText, Placeholder: "新的" + t.Name + "叫什么"},
-		caption("先写标题就行，其他内容添加后点开这一条再填。"),
-		button("添加", &wire.Action{ID: "add", Submit: true}, wire.ButtonRoleNormal),
-	}}
+	}
+	extra := c.quickAddFields(t, "")
+	items = append(items, extra...)
+	if len(extra) > 0 {
+		items = append(items, caption("标题必填，下面几项可以顺手填，也可以留空之后再补。"))
+	} else {
+		items = append(items, caption("先写标题就行，其他内容添加后点开这一条再填。"))
+	}
+	items = append(items, button("添加", &wire.Action{ID: "add", Submit: true}, wire.ButtonRoleNormal))
+	return wire.Section{Span: wire.SectionSpanFull, Items: items}
 }
 
 // segmented switches the views of a type.
@@ -497,7 +585,66 @@ func (c *ctx) row(e *kernel.Entity, icon bool) wire.Component {
 	if icon {
 		out.Icon = iconName(t.Icon)
 	}
+	if acts := c.entityRowActions(t, e); len(acts) > 0 {
+		out.Actions = acts
+	}
 	return out
+}
+
+// entityRowActions builds up to three direct shortcuts for an entity row (at most one swipe action): advancing along
+// the lifecycle or toggling a primary boolean property, deriving a new entity, and confirmed deletion. Respects
+// wire.RowsWithActionsMost across the whole page via c.rowActBudget.
+func (c *ctx) entityRowActions(t *kernel.Type, e *kernel.Entity) []wire.RowAction {
+	if t == nil || e == nil || c.rowActBudget <= 0 {
+		return nil
+	}
+	acts := []wire.RowAction{}
+	if len(t.Flow) > 0 {
+		if next, ok := t.Next(e.Status); ok {
+			acts = append(acts, wire.RowAction{
+				Title:  "→ " + next,
+				Swipe:  true,
+				Action: wire.Action{ID: "quickstatus:" + e.ID + ":" + next},
+			})
+		}
+	} else if bp, ok := primaryBoolProp(t); ok {
+		cur, _ := e.Values[bp.Key].(bool)
+		title := "标记" + bp.Name
+		if cur {
+			title = "取消" + bp.Name
+		}
+		acts = append(acts, wire.RowAction{
+			Title:  title,
+			Swipe:  true,
+			Action: wire.Action{ID: "toggle:" + e.ID + ":" + bp.Key},
+		})
+	}
+	acts = append(acts,
+		wire.RowAction{
+			Title:  "由它新建",
+			Action: *ext.Open("derive:"+e.ID, PageUI, state{S: c.sp.ID, E: e.ID, F: "derive"}, cut(e.Title, maxTitle)),
+		},
+		wire.RowAction{
+			Title: "删除",
+			Role:  wire.ButtonRoleDestructive,
+			Action: wire.Action{
+				ID:      "quickdelete:" + e.ID,
+				Confirm: c.deleteConfirm(e),
+			},
+		},
+	)
+	c.rowActBudget--
+	return acts
+}
+
+// primaryBoolProp returns the first boolean property declared on t, used for one-swipe checklists on flowless types.
+func primaryBoolProp(t *kernel.Type) (kernel.Prop, bool) {
+	for _, p := range t.Props {
+		if p.Kind == kernel.KindBoolean {
+			return p, true
+		}
+	}
+	return kernel.Prop{}, false
 }
 
 // lead is the text of the type's card lead for an entity, "" for none.

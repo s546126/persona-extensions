@@ -23,7 +23,7 @@ import (
 const (
 	protocolVersion = "2025-06-18"
 	serverName      = "spaces"
-	serverVersion   = "0.1.0"
+	serverVersion   = "0.4.0"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -52,9 +52,9 @@ var destructive = map[string]bool{"space_write": true, "type_write": true, "enti
 // table is the one list of tools. The manifest allows exactly the read-only ones.
 var table = []Tool{
 	{Name: "schema", Read: true, Input: schemaInput, Run: runSchema,
-		About: "读取空间结构：类型、属性、生命周期和视图。不填空间时（有多个空间或还没有空间）列出所有空间、模板和可用词汇。"},
+		About: "读取空间结构：类型、属性、生命周期、视图、汇总概况与类型关联图。不填空间时（有多个空间或还没有空间）列出所有空间、模板（含类型列表）和可用词汇。"},
 	{Name: "query", Read: true, Input: queryInput, Run: runQuery,
-		About: "查询记录：按类型、文字、条件、排序、分组和汇总读取。带记录编号时只读这一条记录。brief 为 true 时每条记录只列 id、type、title、status 和 values，适合列清单；关联属性的条件可以写记录标题。"},
+		About: "查询记录：按类型、视图名、文字、条件、排序、分组和汇总读取。带记录编号时只读这一条记录。brief 为 true 时每条记录只列 id、type、title、status 和 values，适合列清单；关联属性的条件可以写记录标题。"},
 	{Name: "space_write", Input: spaceWriteInput, Run: runSpaceWrite,
 		About: "新建或修改空间。可以从模板新建（可带示例记录），也可以修改名称、图标和简介。"},
 	{Name: "type_write", Input: typeWriteInput, Run: runTypeWrite,
@@ -62,7 +62,7 @@ var table = []Tool{
 	{Name: "entity_write", Input: entityWriteInput, Run: runEntityWrite,
 		About: "新建或修改记录。修改时属性合并写入，值为 null 时清除该属性；状态只能按生命周期走一步。关联属性可以写目标记录的编号或标题。用 entities 一次写多条（最多 50 条），全部成功才保存，按顺序执行，后面的记录可以按标题关联前面新建的记录。"},
 	{Name: "entity_derive", Input: deriveInput, Run: runDerive,
-		About: "从一条记录衍生出另一类型的新记录，结构兼容的属性会带过去；源记录不变。"},
+		About: "从一条记录衍生出另一类型的新记录，结构兼容的属性会带过去；可选同时写入 values 或调整 status，源记录不变。"},
 	{Name: "delete", Input: deleteInput, Run: runDelete,
 		About: "删除一条记录、一个类型（连同它的记录）或一个空间（连同它的全部内容）。不能撤销。"},
 }
@@ -382,10 +382,12 @@ type typeView struct {
 
 // templateInfo is a template as the schema tool lists it.
 type templateInfo struct {
-	Key   string `json:"key"`
-	Name  string `json:"name"`
-	Icon  string `json:"icon"`
-	About string `json:"about"`
+	Key        string   `json:"key"`
+	Name       string   `json:"name"`
+	Icon       string   `json:"icon"`
+	About      string   `json:"about"`
+	Types      []string `json:"types,omitempty"`
+	HasSamples bool     `json:"has_samples,omitempty"`
 }
 
 // countOf is how many records of the type the space holds.
@@ -432,7 +434,14 @@ func vocabulary() map[string]any {
 func templateList() []templateInfo {
 	out := []templateInfo{}
 	for _, t := range templates.All() {
-		out = append(out, templateInfo{Key: t.Key, Name: t.Name, Icon: t.Icon, About: t.About})
+		var names []string
+		for _, ty := range t.Types {
+			names = append(names, ty.Name)
+		}
+		out = append(out, templateInfo{
+			Key: t.Key, Name: t.Name, Icon: t.Icon, About: t.About,
+			Types: names, HasSamples: len(t.Samples) > 0,
+		})
 	}
 	return out
 }
@@ -450,13 +459,15 @@ type schemaOverview struct {
 	Vocabulary map[string]any `json:"vocabulary"`
 }
 
-// schemaSpace answers the schema tool for one space: its complete types.
+// schemaSpace answers the schema tool for one space: its complete types, summary counts and relation edges.
 type schemaSpace struct {
-	ID    string     `json:"id"`
-	Name  string     `json:"name"`
-	Icon  string     `json:"icon,omitempty"`
-	About string     `json:"about,omitempty"`
-	Types []typeView `json:"types"`
+	ID        string              `json:"id"`
+	Name      string              `json:"name"`
+	Icon      string              `json:"icon,omitempty"`
+	About     string              `json:"about,omitempty"`
+	Summary   kernel.SpaceSummary `json:"summary"`
+	Relations []kernel.SchemaEdge `json:"relations,omitempty"`
+	Types     []typeView          `json:"types"`
 }
 
 func schemaInput() map[string]any {
@@ -479,7 +490,11 @@ func runSchema(b *kernel.Base, _ time.Time, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := schemaSpace{ID: sp.ID, Name: sp.Name, Icon: sp.Icon, About: sp.About, Types: []typeView{}}
+	w := kernel.Open(sp)
+	out := schemaSpace{
+		ID: sp.ID, Name: sp.Name, Icon: sp.Icon, About: sp.About,
+		Summary: w.Summary(), Relations: w.SchemaEdges(), Types: []typeView{},
+	}
 	for _, t := range sp.Types {
 		out.Types = append(out.Types, typeOf(sp, t))
 	}
@@ -488,10 +503,11 @@ func runSchema(b *kernel.Base, _ time.Time, raw json.RawMessage) (any, error) {
 
 // ---- query ----
 
-// queryArgs are the arguments of query: a space, a record id, or the query parts, and whether to answer briefly.
+// queryArgs are the arguments of query: a space, a record id, a named view, or the query parts, and whether to answer briefly.
 type queryArgs struct {
 	Space string `json:"space"`
 	ID    string `json:"id"`
+	View  string `json:"view"`
 	Brief bool   `json:"brief"`
 	kernel.Query
 }
@@ -578,6 +594,7 @@ func queryInput() map[string]any {
 	props := s["properties"].(map[string]any)
 	props["space"] = spaceProp()
 	props["id"] = str("只看这一条记录（不需要 type）")
+	props["view"] = str("视图名称：按该类型下已定义的视图条件、排序、分组和汇总查询（需配合 type 使用）")
 	props["brief"] = map[string]any{"type": "boolean",
 		"description": "只要每条记录的 id、type、title、status 和 values（不要 moves、out、in 和时间），适合列清单；默认 false"}
 	props["type"].(map[string]any)["description"] = "类型 key 或名称；不填则跨类型，只能用内置字段"
@@ -608,6 +625,11 @@ func runQuery(b *kernel.Base, _ time.Time, raw json.RawMessage) (any, error) {
 	if a.Where, err = relatedConds(sp, t, a.Where); err != nil {
 		return nil, err
 	}
+	if a.View != "" {
+		if err := applyViewLens(t, a.View, &a.Query.Lens); err != nil {
+			return nil, err
+		}
+	}
 	w := kernel.Open(sp)
 	res, err := w.Run(a.Query)
 	if err != nil {
@@ -625,6 +647,39 @@ func runQuery(b *kernel.Base, _ time.Time, raw json.RawMessage) (any, error) {
 		}
 	}
 	return briefly(out, a.Brief), nil
+}
+
+// applyViewLens resolves a named view on t and merges its Lens beneath the caller's overrides.
+func applyViewLens(t *kernel.Type, name string, lens *kernel.Lens) error {
+	if t == nil {
+		return errors.New("按视图查询需要指定类型")
+	}
+	views := t.ViewsOrDefault()
+	i := slices.IndexFunc(views, func(v kernel.View) bool { return v.Name == name })
+	if i < 0 {
+		names := make([]string, 0, len(views))
+		for _, v := range views {
+			names = append(names, v.Name)
+		}
+		return fmt.Errorf("类型「%s」没有视图「%s」。可选：%s", t.Name, name, strings.Join(names, "、"))
+	}
+	vl := views[i].Lens
+	if len(vl.Where) > 0 {
+		merged := make([]kernel.Cond, 0, len(vl.Where)+len(lens.Where))
+		merged = append(merged, vl.Where...)
+		merged = append(merged, lens.Where...)
+		lens.Where = merged
+	}
+	if len(lens.Sort) == 0 && len(vl.Sort) > 0 {
+		lens.Sort = slices.Clone(vl.Sort)
+	}
+	if lens.Group == "" && vl.Group != "" {
+		lens.Group = vl.Group
+	}
+	if len(lens.Agg) == 0 && len(vl.Agg) > 0 {
+		lens.Agg = slices.Clone(vl.Agg)
+	}
+	return nil
 }
 
 // queryOne answers a query for one record. The other query parts are not used.
@@ -1011,9 +1066,11 @@ func writeEntity(b *kernel.Base, space string, in kernel.EntityInput, now time.T
 // ---- entity_derive ----
 
 type deriveArgs struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Title string `json:"title"`
+	ID     string         `json:"id"`
+	Type   string         `json:"type"`
+	Title  string         `json:"title"`
+	Status *string        `json:"status,omitempty"`
+	Values map[string]any `json:"values,omitempty"`
 }
 
 // deriveOut is the new record and the keys that were carried over from its source.
@@ -1024,9 +1081,11 @@ type deriveOut struct {
 
 func deriveInput() map[string]any {
 	return object(map[string]any{
-		"id":    str("源记录的编号"),
-		"type":  str("新记录的类型 key 或名称（同一空间）"),
-		"title": map[string]any{"type": "string", "maxLength": kernel.MaxTitle, "description": "新记录的标题；不填则沿用源记录的标题"},
+		"id":     str("源记录的编号"),
+		"type":   str("新记录的类型 key 或名称（同一空间）"),
+		"title":  map[string]any{"type": "string", "maxLength": kernel.MaxTitle, "description": "新记录的标题；不填则沿用源记录的标题"},
+		"status": str("可选，衍生后顺手设置的状态名（生命周期中的一个阶段）"),
+		"values": map[string]any{"type": "object", "description": "可选，衍生后补充或覆盖的属性 key → 值，关联属性可写目标编号或标题"},
 	}, "id", "type")
 }
 
@@ -1052,6 +1111,19 @@ func runDerive(b *kernel.Base, now time.Time, raw json.RawMessage) (any, error) 
 		inherited = append(inherited, k)
 	}
 	slices.Sort(inherited)
+	if a.Status != nil || len(a.Values) > 0 {
+		in := kernel.EntityInput{ID: e.ID, Status: a.Status, Values: a.Values}
+		if err := checkChoices(t, in); err != nil {
+			return nil, err
+		}
+		if in.Values, err = relatedValues(sp, t, in.Values); err != nil {
+			return nil, err
+		}
+		e, err = sp.PutEntity(b, in, now)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return deriveOut{Entity: entityOf(sp, kernel.Open(sp), e), Inherited: inherited}, nil
 }
 

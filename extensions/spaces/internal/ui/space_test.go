@@ -499,8 +499,12 @@ func TestOverviewButtonsSitInTheirCards(t *testing.T) {
 						titles = append(titles, it.Title)
 					}
 				}
-				if fmt.Sprint(titles) != "[空间设置 新建空间]" {
-					t.Fatalf("header card buttons = %v", titles)
+				wantButtons := "[空间设置 新建空间]"
+				if tc.types {
+					wantButtons = "[快速记一条 空间设置 新建空间]"
+				}
+				if fmt.Sprint(titles) != wantButtons {
+					t.Fatalf("header card buttons = %v, want %s", titles, wantButtons)
 				}
 				if fold == "space" && !fieldNamedOK(&wire.View{Sections: v.Sections[1:2]}, "about") {
 					t.Fatalf("the settings fold is not right under the header card: %+v", v.Sections[1])

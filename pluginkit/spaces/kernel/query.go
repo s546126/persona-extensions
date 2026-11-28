@@ -467,9 +467,13 @@ func (tp *typePlan) matches(w *World, e *Entity) bool {
 	return true
 }
 
-// matchText reports whether a lower-cased needle is in the title or in a text property of the entity.
+// matchText reports whether a lower-cased needle is in the title, status, text/enum properties, or linked titles of
+// the entity. URLs, numbers, booleans, dates and rollups are not searched.
 func (w *World) matchText(e *Entity, needle string) bool {
 	if strings.Contains(strings.ToLower(e.Title), needle) {
+		return true
+	}
+	if e.Status != "" && strings.Contains(strings.ToLower(e.Status), needle) {
 		return true
 	}
 	t := w.typeOf(e)
@@ -477,11 +481,20 @@ func (w *World) matchText(e *Entity, needle string) bool {
 		return false
 	}
 	for i := range t.Props {
-		if !isTextProp(&t.Props[i]) {
-			continue
-		}
-		if s, ok := e.Values[t.Props[i].Key].(string); ok && strings.Contains(strings.ToLower(s), needle) {
-			return true
+		p := &t.Props[i]
+		switch p.Kind {
+		case KindText, KindEnum:
+			if s, ok := e.Values[p.Key].(string); ok && strings.Contains(strings.ToLower(s), needle) {
+				return true
+			}
+		case KindRelation:
+			if k, ok := KindOf(p.Kind); ok && k.Refs != nil {
+				for _, id := range k.Refs(e.Values[p.Key]) {
+					if title := w.title(id); title != "" && strings.Contains(strings.ToLower(title), needle) {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false

@@ -938,8 +938,8 @@ func TestHostileEntityPageStaysValid(t *testing.T) {
 		t.Fatalf("outgoing rows = %d", len(out.Items))
 	}
 	in := sectionTitled(t, v, "连到它的")
-	if len(in.Items) != linksMost+1 || in.Items[linksMost].Text != "还有 5 条没有显示" {
-		t.Fatalf("incoming = %d rows, last %+v", len(in.Items), in.Items[len(in.Items)-1])
+	if len(in.Items) != linksMost+2 || in.Items[linksMost].Text != "还有 5 条没有显示" || in.Items[linksMost+1].Type != wire.ComponentButton {
+		t.Fatalf("incoming = %d items, last %+v", len(in.Items), in.Items[len(in.Items)-1])
 	}
 
 	// With the edit fold open, every link out of the hub is removable.

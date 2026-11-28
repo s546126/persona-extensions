@@ -1,0 +1,68 @@
+{
+  "key": "finance",
+  "name": "记账与预算",
+  "icon": "money",
+  "about": "定好各类月度预算，随手记每笔花销，看清钱花在哪里、还剩多少额度。",
+  "types": [
+    {
+      "key": "budget",
+      "name": "预算",
+      "icon": "wallet",
+      "flow": [
+        {"name": "正常", "phase": "doing"},
+        {"name": "紧张", "phase": "doing"},
+        {"name": "已结清", "phase": "done"},
+        {"name": "停用", "phase": "dropped"}
+      ],
+      "props": [
+        {"key": "limit", "name": "月度预算", "kind": "number", "unit": "元"},
+        {"key": "group", "name": "大类", "kind": "enum", "options": ["日常", "固定", "娱乐", "储蓄"]},
+        {"key": "note", "name": "说明", "kind": "text"},
+        {"key": "spent", "name": "已花", "kind": "rollup", "via": "expense.budget", "op": "sum", "of": "amount", "unit": "元"},
+        {"key": "entries", "name": "笔数", "kind": "rollup", "via": "expense.budget", "op": "count", "unit": "笔"}
+      ],
+      "card": {"lead": "note", "pills": ["group", "spent", "entries"], "progress": {"of": "spent", "over": "limit"}},
+      "views": [
+        {"name": "额度", "kind": "progress", "where": [{"field": "phase", "op": "eq", "value": "doing"}]},
+        {"name": "按大类", "kind": "list", "group": "group", "agg": [{"op": "sum", "of": "limit"}, {"op": "sum", "of": "spent"}]},
+        {"name": "表格", "kind": "table", "agg": [{"op": "sum", "of": "limit"}, {"op": "sum", "of": "spent"}]}
+      ]
+    },
+    {
+      "key": "expense",
+      "name": "账单",
+      "icon": "chart",
+      "props": [
+        {"key": "budget", "name": "预算", "kind": "relation", "target": "budget", "back": "账单"},
+        {"key": "amount", "name": "金额", "kind": "number", "unit": "元"},
+        {"key": "date", "name": "日期", "kind": "date"},
+        {"key": "way", "name": "方式", "kind": "enum", "options": ["扫码", "银行卡", "现金", "自动扣款"]},
+        {"key": "note", "name": "备注", "kind": "text"}
+      ],
+      "card": {"lead": "note", "pills": ["budget", "amount", "date", "way"]},
+      "views": [
+        {"name": "流水", "kind": "feed", "sort": [{"by": "date", "desc": true}], "agg": [{"op": "count"}, {"op": "sum", "of": "amount"}]},
+        {"name": "按预算", "kind": "list", "sort": [{"by": "date", "desc": true}], "group": "budget", "agg": [{"op": "sum", "of": "amount"}]},
+        {"name": "明细表", "kind": "table", "sort": [{"by": "date", "desc": true}], "agg": [{"op": "count"}, {"op": "sum", "of": "amount"}, {"op": "avg", "of": "amount"}]}
+      ]
+    }
+  ],
+  "samples": [
+    {"ref": "b_food", "type": "budget", "title": "餐饮买菜", "status": "正常",
+     "values": {"group": "日常", "limit": 2000, "note": "工作日午饭、周末买菜和水果。"}},
+    {"ref": "b_transit", "type": "budget", "title": "通勤出行", "status": "正常",
+     "values": {"group": "固定", "limit": 400, "note": "地铁、公交和偶尔打车。"}},
+    {"ref": "b_fun", "type": "budget", "title": "休闲聚会", "status": "紧张",
+     "values": {"group": "娱乐", "limit": 600, "note": "看电影、喝咖啡和朋友吃饭。"}},
+    {"ref": "ex_1", "type": "expense", "title": "菜市场买菜",
+     "values": {"budget": "@b_food", "amount": 135, "date": "-5d", "way": "扫码", "note": "买了青菜、鸡蛋和两斤水果。"}},
+    {"ref": "ex_2", "type": "expense", "title": "地铁月卡充值",
+     "values": {"budget": "@b_transit", "amount": 150, "date": "-4d", "way": "银行卡"}},
+    {"ref": "ex_3", "type": "expense", "title": "周末朋友聚餐",
+     "values": {"budget": "@b_fun", "amount": 320, "date": "-2d", "way": "扫码", "note": "四个人平摊后的费用。"}},
+    {"ref": "ex_4", "type": "expense", "title": "电影票两张",
+     "values": {"budget": "@b_fun", "amount": 110, "date": "-1d", "way": "扫码"}},
+    {"ref": "ex_5", "type": "expense", "from": "ex_1", "title": "超市补买水果和牛奶",
+     "values": {"amount": 86, "date": "+0d", "note": "顺路补了一箱牛奶和苹果。"}}
+  ]
+}

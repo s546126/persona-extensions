@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -17,6 +19,7 @@ const (
 	choicePrefix = "="
 	unsetLabel   = "未设置"
 	pickLimit    = 100 // the newest entities offered by a relation's choice
+	quickAddMost = 4   // the most optional fields shown in a quick-add fold
 )
 
 // fieldKinds maps the abstract control of a kind one to one to the field kind the apps draw. A computed kind has no
@@ -40,19 +43,137 @@ func (c *ctx) field(p kernel.Prop, name string, v any) (wire.Component, bool) {
 	if !ok {
 		return wire.Component{}, false
 	}
+	if p.Kind == kernel.KindDate && c.uiAtLeast(6) {
+		kind = wire.FieldKindDate
+	}
 	f := wire.Component{
 		Type: wire.ComponentField, Name: name, Label: p.Name, Kind: kind,
 		Value: fieldValue(k, v),
 	}
-	switch k.Input {
-	case kernel.InLine:
+	switch {
+	case kind == wire.FieldKindDate:
+		// Native date picker: no text placeholder needed.
+	case k.Input == kernel.InLine:
 		f.Placeholder = kindPlaceholder(k)
-	case kernel.InChoice:
+	case k.Input == kernel.InChoice:
 		f.Choices = optionChoices(k.Enum(&p))
-	case kernel.InPick:
+	case k.Input == kernel.InPick:
 		f.Choices = c.targetChoices(p, v)
 	}
 	return f, true
+}
+
+// multiRelationField renders a many-relation as a native multichoice on UI >= 6 when its targets fit the control's
+// choice limit, and falls back to the single-add choice field otherwise.
+func (c *ctx) multiRelationField(p kernel.Prop, name string, e *kernel.Entity) (wire.Component, bool) {
+	if !c.uiAtLeast(6) || c.sp == nil {
+		return c.addField(p, name, e)
+	}
+	k, ok := kernel.KindOf(p.Kind)
+	if !ok || k.Refs == nil {
+		return wire.Component{}, false
+	}
+	held := k.Refs(e.Values[p.Key])
+	if len(held) > wire.MultiChoicesMost {
+		return c.addField(p, name, e)
+	}
+	var set []*kernel.Entity
+	have := map[string]bool{}
+	for _, id := range held {
+		if target := c.w.Entity(id); target != nil && target.Type == p.Target && !have[target.ID] {
+			have[target.ID] = true
+			set = append(set, target)
+		}
+	}
+	var rest []*kernel.Entity
+	for _, ent := range c.sp.Entities {
+		if ent != nil && ent.Type == p.Target && !have[ent.ID] {
+			rest = append(rest, ent)
+		}
+	}
+	slices.SortStableFunc(rest, func(a, b *kernel.Entity) int { return b.Updated.Compare(a.Updated) })
+	for _, ent := range rest {
+		if len(set) >= wire.MultiChoicesMost {
+			break
+		}
+		set = append(set, ent)
+	}
+	if len(set) == 0 {
+		return c.addField(p, name, e)
+	}
+	choices := make([]wire.Choice, 0, len(set))
+	for _, ent := range set {
+		choices = append(choices, wire.Choice{Value: ent.ID, Title: cut(ent.Title, maxTitle)})
+	}
+	val := ""
+	if len(held) > 0 {
+		var selected []string
+		for _, id := range held {
+			if have[id] {
+				selected = append(selected, id)
+			}
+		}
+		if len(selected) > 0 {
+			raw, _ := json.Marshal(selected)
+			val = string(raw)
+		}
+	}
+	return wire.Component{
+		Type: wire.ComponentField, Name: name, Label: p.Name,
+		Kind: wire.FieldKindMultichoice, Value: val, Choices: choices,
+	}, true
+}
+
+// parseMultichoice decodes a multichoice JSON array of entity ids. ok is false when raw is not a JSON array (such as
+// a single-choice "=id" value sent by an older client).
+func parseMultichoice(raw string) (ids []string, isMulti bool, err error) {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "[") {
+		return nil, false, nil
+	}
+	if err := json.Unmarshal([]byte(trimmed), &ids); err != nil {
+		return nil, true, errors.New("多选内容没有读懂，请重新选择")
+	}
+	return ids, true, nil
+}
+
+// quickAddFields selects up to quickAddMost high-value stored properties of t for quick capture, prioritizing card
+// pills and lead first, then remaining stored properties in schema order. skipProp omits a pre-bound relation.
+func (c *ctx) quickAddFields(t *kernel.Type, skipProp string) []wire.Component {
+	card := t.CardOrDefault()
+	var keys []string
+	addKey := func(k string) {
+		if k == "" || k == skipProp || slices.Contains(keys, k) {
+			return
+		}
+		p, ok := propOf(t, k)
+		if !ok || p.Many {
+			return
+		}
+		kind, known := kernel.KindOf(p.Kind)
+		if !known || kind.Input == kernel.InNone {
+			return
+		}
+		keys = append(keys, k)
+	}
+	for _, k := range card.Pills {
+		addKey(k)
+	}
+	addKey(card.Lead)
+	for _, p := range t.Props {
+		addKey(p.Key)
+	}
+	if len(keys) > quickAddMost {
+		keys = keys[:quickAddMost]
+	}
+	var out []wire.Component
+	for _, key := range keys {
+		p, _ := propOf(t, key)
+		if f, ok := c.field(p, "p_"+p.Key, nil); ok {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // fieldValue is the text a field starts with: a choice is sent as "=" and its value, a number as its plain decimal, a

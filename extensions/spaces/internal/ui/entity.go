@@ -40,12 +40,16 @@ func (c *ctx) entityPage() (*wire.View, error) {
 	if len(t.Flow) > 0 {
 		v.Sections = append(v.Sections, c.lifecycle(t, e))
 	}
-	v.Sections = append(v.Sections, c.outLinks(t, e), c.inLinks(e))
-	switch c.st.F {
-	case "edit":
+	v.Sections = append(v.Sections, c.outLinks(t, e), c.inLinks(t, e))
+	switch {
+	case c.st.F == "edit":
 		v.Sections = append(v.Sections, c.editFold(t, e))
-	case "derive":
+	case c.st.F == "derive":
 		v.Sections = append(v.Sections, c.deriveFold(e))
+	case strings.HasPrefix(c.st.F, "linknew:"):
+		if fold, ok := c.linkNewFold(e, strings.TrimPrefix(c.st.F, "linknew:")); ok {
+			v.Sections = append(v.Sections, fold)
+		}
 	}
 	v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{
 		button("编辑", &wire.Action{ID: "fold:edit"}, wire.ButtonRoleNormal),
@@ -201,8 +205,8 @@ func (c *ctx) outLinks(t *kernel.Type, e *kernel.Entity) wire.Section {
 }
 
 // inLinks is the section of the links into the entity: a row per source, subtitled with the relation's back label (the
-// derived entities read 衍生).
-func (c *ctx) inLinks(e *kernel.Entity) wire.Section {
+// derived entities read 由它新建), followed by contextual quick-create buttons for types that link to this type.
+func (c *ctx) inLinks(t *kernel.Type, e *kernel.Entity) wire.Section {
 	var items []wire.Component
 	for _, l := range c.w.In(e) {
 		src := c.w.Entity(l.From)
@@ -211,11 +215,93 @@ func (c *ctx) inLinks(e *kernel.Entity) wire.Section {
 		}
 		items = append(items, c.linkRow(src, c.backLabel(src, l.Prop)))
 	}
-	return wire.Section{Title: "连到它的", Items: orEmpty(capped(items), noBacklinks)}
+	items = orEmpty(capped(items), noBacklinks)
+	for _, edge := range c.quickBacklinkEdges(t.Key) {
+		items = append(items, button("新建"+edge.FromName, &wire.Action{ID: "fold:linknew:" + edge.FromType + ":" + edge.PropKey}, wire.ButtonRoleNormal))
+	}
+	return wire.Section{Title: "连到它的", Items: items}
+}
+
+// quickBacklinkEdges returns up to three distinct non-self incoming relation edges for targetType so an entity page
+// offers one-tap creation of linked child records (e.g. adding a task to a goal or a note to a book).
+func (c *ctx) quickBacklinkEdges(targetType string) []kernel.SchemaEdge {
+	var out []kernel.SchemaEdge
+	seen := map[string]bool{}
+	for _, edge := range c.w.BacklinkProps(targetType) {
+		if edge.FromType == targetType || seen[edge.FromType] {
+			continue
+		}
+		seen[edge.FromType] = true
+		out = append(out, edge)
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
+}
+
+// linkNewFold renders a contextual quick-add fold that creates a new record of srcType already linked to e via propKey.
+func (c *ctx) linkNewFold(e *kernel.Entity, spec string) (wire.Section, bool) {
+	srcKey, propKey, ok := strings.Cut(spec, ":")
+	if !ok || srcKey == "" || propKey == "" {
+		return wire.Section{}, false
+	}
+	st := c.typeOf(srcKey)
+	if st == nil {
+		return wire.Section{}, false
+	}
+	p, ok := propOf(st, propKey)
+	if !ok || p.Kind != kernel.KindRelation || p.Target != e.Type {
+		return wire.Section{}, false
+	}
+	items := []wire.Component{
+		caption(cut("新建一条「"+st.Name+"」，并自动连到「"+e.Title+"」。", maxText)),
+		{Type: wire.ComponentField, Name: "title", Label: "标题", Kind: wire.FieldKindText, Placeholder: "新的" + st.Name + "叫什么"},
+	}
+	items = append(items, c.quickAddFields(st, propKey)...)
+	items = append(items,
+		button("添加", &wire.Action{ID: "linkadd:" + srcKey + ":" + propKey, Submit: true}, wire.ButtonRoleNormal),
+		button("取消", &wire.Action{ID: "fold:" + c.st.F}, wire.ButtonRoleNormal),
+	)
+	return wire.Section{Title: "新建" + st.Name, Items: items}, true
+}
+
+// actLinkAdd creates a new entity of srcType pre-linked to the currently open entity via propKey, keeping the user on
+// the parent entity so its backlinks and rollups update immediately.
+func actLinkAdd(c *ctx, arg string) (*wire.ActionResult, error) {
+	parent, _, err := c.shown()
+	if err != nil {
+		return nil, err
+	}
+	srcKey, propKey, ok := strings.Cut(arg, ":")
+	if !ok || srcKey == "" || propKey == "" {
+		return nil, errors.New("连接信息不完整，请重新打开再试")
+	}
+	st := c.typeOf(srcKey)
+	if st == nil {
+		return nil, errors.New("找不到这个分类，它可能刚被删掉了")
+	}
+	p, ok := propOf(st, propKey)
+	if !ok || p.Kind != kernel.KindRelation || p.Target != parent.Type {
+		return nil, errors.New("这条连接已经不在了，请重新打开再试")
+	}
+	title := strings.TrimSpace(c.r.Values["title"])
+	if title == "" {
+		return nil, errors.New("标题是空的。请先写下这一条叫什么，再点添加")
+	}
+	vals, err := c.submittedNewValues(st, map[string]any{propKey: []string{parent.ID}})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.sp.PutEntity(c.b, kernel.EntityInput{Type: st.Key, Title: &title, Values: vals}, c.now); err != nil {
+		return nil, err
+	}
+	c.st.F = ""
+	return &wire.ActionResult{Toast: "已添加「" + cut(title, maxTitle) + "」"}, nil
 }
 
 // linkRow is the row of a linked entity: its title, the label of the link, its toned status and its type's icon; it
-// opens the entity.
+// opens the entity and carries quick actions when budget allows.
 func (c *ctx) linkRow(target *kernel.Entity, label string) wire.Component {
 	row := wire.Component{
 		Type: wire.ComponentRow, Title: cut(target.Title, maxTitle), Subtitle: label,
@@ -225,6 +311,9 @@ func (c *ctx) linkRow(target *kernel.Entity, label string) wire.Component {
 		row.Icon = iconName(t.Icon)
 		if target.Status != "" {
 			row.Badge = &wire.Badge{Text: target.Status, Tone: toneOf(t, target.Status)}
+		}
+		if acts := c.entityRowActions(t, target); len(acts) > 0 {
+			row.Actions = acts
 		}
 	}
 	return row
@@ -281,7 +370,7 @@ func (c *ctx) deleteConfirm(e *kernel.Entity) string {
 }
 
 // editFold is the edit fold: the title, then one field for each stored property, built from the descriptor, then 保存
-// and 取消. A relation with many targets offers 添加…, which adds the target chosen to the ones it has.
+// and 取消. A relation with many targets uses a multichoice on UI >= 6 (when targets fit), else 添加….
 func (c *ctx) editFold(t *kernel.Type, e *kernel.Entity) wire.Section {
 	items := []wire.Component{{Type: wire.ComponentField, Name: "title", Label: "标题", Kind: wire.FieldKindText, Value: e.Title}}
 	for i := range t.Props {
@@ -290,7 +379,7 @@ func (c *ctx) editFold(t *kernel.Type, e *kernel.Entity) wire.Section {
 		var f wire.Component
 		var ok bool
 		if p.Many {
-			f, ok = c.addField(p, name, e)
+			f, ok = c.multiRelationField(p, name, e)
 		} else {
 			f, ok = c.field(p, name, e.Values[p.Key])
 		}
@@ -392,11 +481,24 @@ func actUpdate(c *ctx, _ string) (*wire.ActionResult, error) {
 		if !ok || !sent || k.Input == kernel.InNone {
 			continue
 		}
+		cur := e.Values[p.Key]
+		if p.Many {
+			if ids, isMulti, merr := parseMultichoice(raw); isMulti {
+				if merr != nil {
+					return nil, merr
+				}
+				if len(ids) == 0 {
+					vals[p.Key] = nil
+				} else {
+					vals[p.Key] = ids
+				}
+				continue
+			}
+		}
 		v, err := submitted(p, raw)
 		if err != nil {
 			return nil, err
 		}
-		cur := e.Values[p.Key]
 		switch {
 		case p.Many:
 			if v != nil {

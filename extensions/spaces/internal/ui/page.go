@@ -47,12 +47,13 @@ func New(st kernel.Storage) *App {
 func (a *App) SetHub(n Notifier) { a.hub = n }
 
 // state is the page's own state, sent back with every request. The fields name what is shown: the space, the type
-// tab, the view, the search text, the extra pages loaded, the entity page, the schema editor for a type, the one
-// open fold and the new space being created.
+// tab, the view, the quick phase filter, the search text, the extra pages loaded, the entity page, the schema editor
+// for a type, the one open fold and the new space being created.
 type state struct {
 	S string `json:"s,omitempty"` // space
 	T string `json:"t,omitempty"` // type; "" = the space overview
 	V int    `json:"v,omitempty"` // view index
+	P string `json:"p,omitempty"` // quick phase filter on type tabs ("" | todo | doing | done)
 	Q string `json:"q,omitempty"` // search text
 	N int    `json:"n,omitempty"` // extra pages loaded
 	E string `json:"e,omitempty"` // entity page
@@ -69,10 +70,11 @@ type ctx struct {
 	now time.Time
 	loc *time.Location
 
-	b  *kernel.Base   // the base being read or changed; valid only inside the storage call
-	sp *kernel.Space  // the space shown; nil when there is none
-	w  *kernel.World  // the index of sp
-	e  *kernel.Entity // the entity shown on the entity page
+	b            *kernel.Base   // the base being read or changed; valid only inside the storage call
+	sp           *kernel.Space  // the space shown; nil when there is none
+	w            *kernel.World  // the index of sp
+	e            *kernel.Entity // the entity shown on the entity page
+	rowActBudget int            // remaining rows allowed to carry RowActions (<= wire.RowsWithActionsMost)
 }
 
 // errKeep ends a storage update without saving: nothing changed, or the change was refused.
@@ -82,19 +84,25 @@ var errKeep = errors.New("keep")
 // argument. A handler returns nil to draw the page again from the state it changed, or a result; an error is refused
 // and shown as a toast, and nothing is saved.
 var actions = map[string]func(c *ctx, arg string) (*wire.ActionResult, error){
-	"tab":    actTab,
-	"view":   actView,
-	"search": actSearch,
-	"more":   actMore,
-	"fold":   actFold,
-	"space":  actSpace,
-	"new":    actNew,
-	"cancel": actCancel,
-	"create": actCreate,
-	"add":    actAdd,
-	"save":   actSave,
-	"drop":   actDrop,
-	"back":   actBack,
+	"tab":         actTab,
+	"view":        actView,
+	"phase":       actPhase,
+	"search":      actSearch,
+	"more":        actMore,
+	"fold":        actFold,
+	"space":       actSpace,
+	"new":         actNew,
+	"cancel":      actCancel,
+	"create":      actCreate,
+	"add":         actAdd,
+	"quickadd":    actQuickAddSpace,
+	"quickstatus": actQuickStatus,
+	"toggle":      actToggle,
+	"quickdelete": actQuickDelete,
+	"linkadd":     actLinkAdd,
+	"save":        actSave,
+	"drop":        actDrop,
+	"back":        actBack,
 	// The entity page.
 	"status": actStatus,
 	"update": actUpdate,
@@ -102,19 +110,20 @@ var actions = map[string]func(c *ctx, arg string) (*wire.ActionResult, error){
 	"derive": actDerive,
 	"delete": actDelete,
 	// The schema editor.
-	"typenew":   actTypeNew,
-	"typeset":   actTypeSet,
-	"typedrop":  actTypeDrop,
-	"stagesave": actStageSave,
-	"stageup":   actStageUp,
-	"stagedrop": actStageDrop,
-	"propnew":   actPropNew,
-	"propsave":  actPropSave,
-	"propup":    actPropUp,
-	"propdrop":  actPropDrop,
-	"cardsave":  actCardSave,
-	"viewsave":  actViewSave,
-	"viewdrop":  actViewDrop,
+	"typenew":     actTypeNew,
+	"typeset":     actTypeSet,
+	"typedrop":    actTypeDrop,
+	"stagesave":   actStageSave,
+	"stagepreset": actStagePreset,
+	"stageup":     actStageUp,
+	"stagedrop":   actStageDrop,
+	"propnew":     actPropNew,
+	"propsave":    actPropSave,
+	"propup":      actPropUp,
+	"propdrop":    actPropDrop,
+	"cardsave":    actCardSave,
+	"viewsave":    actViewSave,
+	"viewdrop":    actViewDrop,
 }
 
 // Page draws the nav page for the request.
@@ -207,6 +216,7 @@ const maxStateToken = 64
 func (st *state) clean() {
 	st.S = cut(strings.TrimSpace(st.S), maxStateToken)
 	st.T = cut(strings.TrimSpace(st.T), maxStateToken)
+	st.P = cleanPhase(st.P)
 	st.E = cut(strings.TrimSpace(st.E), maxStateToken)
 	st.D = cut(strings.TrimSpace(st.D), maxStateToken)
 	st.F = cut(strings.TrimSpace(st.F), maxStateToken)
@@ -222,9 +232,18 @@ func (st *state) clean() {
 	}
 }
 
+func cleanPhase(p string) string {
+	switch strings.TrimSpace(p) {
+	case string(kernel.Todo), string(kernel.Doing), string(kernel.Done):
+		return strings.TrimSpace(p)
+	}
+	return ""
+}
+
 // render draws the nav page for the state of c and returns it with that state.
 func (a *App) render(c *ctx) (*wire.View, error) {
 	c.st.clean()
+	c.rowActBudget = wire.RowsWithActionsMost
 	var v *wire.View
 	err := a.st.View(func(b *kernel.Base) error {
 		c.b = b
@@ -241,13 +260,23 @@ func (a *App) render(c *ctx) (*wire.View, error) {
 }
 
 func newCtx(a *App, r *ext.UIRequest) *ctx {
-	c := &ctx{app: a, r: r, now: a.clock(), loc: location(r.TZ)}
+	c := &ctx{app: a, r: r, now: a.clock(), loc: location(r.TZ), rowActBudget: wire.RowsWithActionsMost}
 	var st state
 	if r.DecodeState(&st) == nil {
 		st.clean()
 		c.st = st
 	}
 	return c
+}
+
+// uiAtLeast reports whether the client's UI version supports features introduced at minVer (0 means newest).
+func (c *ctx) uiAtLeast(minVer int) bool {
+	return c.r == nil || c.r.UIVersion <= 0 || c.r.UIVersion >= minVer
+}
+
+// todayStr is the current local calendar date in YYYY-MM-DD format.
+func (c *ctx) todayStr() string {
+	return c.now.In(c.loc).Format(time.DateOnly)
 }
 
 // clock is the app's time.
@@ -291,7 +320,7 @@ func (c *ctx) route() (*wire.View, error) {
 	if t := c.typeOf(c.st.T); t != nil {
 		return c.typePage(t)
 	}
-	c.st.T, c.st.V, c.st.N = "", 0, 0
+	c.st.T, c.st.V, c.st.P, c.st.N = "", 0, "", 0
 	return c.overview()
 }
 
@@ -369,14 +398,15 @@ func (c *ctx) ago(t time.Time) string {
 // Actions that navigate, and the handlers.
 
 func actTab(c *ctx, arg string) (*wire.ActionResult, error) {
-	key := c.pick(arg, "tab")
+	raw := c.pick(arg, "tab")
+	key, fold, _ := strings.Cut(raw, ":")
 	if key == overTab {
 		key = ""
 	}
 	if key != "" && c.typeOf(key) == nil {
 		return nil, fmt.Errorf("找不到分类「%s」，它可能刚被删掉了。请回到概览重新选", key)
 	}
-	c.st = state{S: c.st.S, T: key}
+	c.st = state{S: c.st.S, T: key, F: cut(strings.TrimSpace(fold), maxStateToken)}
 	return nil, nil
 }
 
@@ -386,7 +416,17 @@ func actView(c *ctx, arg string) (*wire.ActionResult, error) {
 	if t == nil || err != nil || i < 0 || i >= len(t.ViewsOrDefault()) {
 		return nil, errors.New("找不到这个显示方式，它可能刚被删掉了。请重新选一个")
 	}
-	c.st.V, c.st.N, c.st.F = i, 0, ""
+	c.st.V, c.st.P, c.st.N, c.st.F = i, "", 0, ""
+	return nil, nil
+}
+
+func actPhase(c *ctx, arg string) (*wire.ActionResult, error) {
+	val := c.pick(arg, "phase")
+	if val == "all" {
+		val = ""
+	}
+	c.st.P = cleanPhase(val)
+	c.st.N = 0
 	return nil, nil
 }
 
@@ -491,7 +531,8 @@ func samplesChoice(t *templates.Template, values map[string]string, fromForm boo
 	return false, fmt.Errorf("「先放几条示例」的开关没有读懂（收到「%s」）。请重新打开或关上这个开关，再点创建", v)
 }
 
-// actAdd creates an entity of the type tab's type with the title of the quick-add fold. It starts at the first stage.
+// actAdd creates an entity of the type tab's type with the title and any optional fields of the quick-add fold.
+// It starts at the first stage.
 func actAdd(c *ctx, _ string) (*wire.ActionResult, error) {
 	t := c.typeOf(c.st.T)
 	if t == nil {
@@ -501,11 +542,140 @@ func actAdd(c *ctx, _ string) (*wire.ActionResult, error) {
 	if title == "" {
 		return nil, errors.New("标题是空的。请先写下这一条叫什么（例如书名），再点添加")
 	}
-	if _, err := c.sp.PutEntity(c.b, kernel.EntityInput{Type: t.Key, Title: &title}, c.now); err != nil {
+	vals, err := c.submittedNewValues(t, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.sp.PutEntity(c.b, kernel.EntityInput{Type: t.Key, Title: &title, Values: vals}, c.now); err != nil {
 		return nil, err
 	}
 	c.st.F = ""
 	return &wire.ActionResult{Toast: "已添加「" + title + "」"}, nil
+}
+
+// actQuickAddSpace creates an entity from the space overview's quick-capture fold, choosing any type in the space.
+func actQuickAddSpace(c *ctx, _ string) (*wire.ActionResult, error) {
+	if c.sp == nil {
+		return nil, errors.New("还没有空间。请先从模板新建一个空间")
+	}
+	typKey := strings.TrimPrefix(c.r.Values["type"], choicePrefix)
+	t := c.typeOf(typKey)
+	if t == nil {
+		return nil, errors.New("还没选分类。请选一个分类再添加")
+	}
+	title := strings.TrimSpace(c.r.Values["title"])
+	if title == "" {
+		return nil, errors.New("标题是空的。请先写下这一条叫什么，再点添加")
+	}
+	if _, err := c.sp.PutEntity(c.b, kernel.EntityInput{Type: t.Key, Title: &title}, c.now); err != nil {
+		return nil, err
+	}
+	c.st.F = ""
+	return &wire.ActionResult{Toast: "已添加到「" + t.Name + "」：" + cut(title, maxTitle)}, nil
+}
+
+// actQuickStatus advances or changes an entity's status directly from a list, board or overview row action.
+func actQuickStatus(c *ctx, arg string) (*wire.ActionResult, error) {
+	if c.sp == nil {
+		return nil, errors.New("还没有空间。请先从模板新建一个空间")
+	}
+	id, stage, ok := strings.Cut(arg, ":")
+	if !ok || id == "" || stage == "" {
+		return nil, errors.New("状态信息不完整，请刷新后再试")
+	}
+	sp, e, err := c.b.Find(id)
+	if err != nil {
+		return nil, errors.New("找不到这一条，它可能刚被删掉了")
+	}
+	if _, err := sp.PutEntity(c.b, kernel.EntityInput{ID: e.ID, Status: &stage}, c.now); err != nil {
+		return nil, err
+	}
+	return &wire.ActionResult{Toast: "「" + cut(e.Title, maxTitle) + "」已改为「" + stage + "」"}, nil
+}
+
+// actToggle flips a boolean property of an entity directly from a row action.
+func actToggle(c *ctx, arg string) (*wire.ActionResult, error) {
+	if c.sp == nil {
+		return nil, errors.New("还没有空间。请先从模板新建一个空间")
+	}
+	id, propKey, ok := strings.Cut(arg, ":")
+	if !ok || id == "" || propKey == "" {
+		return nil, errors.New("操作信息不完整，请刷新后再试")
+	}
+	sp, e, err := c.b.Find(id)
+	if err != nil {
+		return nil, errors.New("找不到这一条，它可能刚被删掉了")
+	}
+	t := typeIn(sp, e.Type)
+	if t == nil {
+		return nil, errors.New("找不到这个分类，请刷新后再试")
+	}
+	p, ok := propOf(t, propKey)
+	if !ok || p.Kind != kernel.KindBoolean {
+		return nil, errors.New("这个填写项不能快速切换")
+	}
+	cur, _ := e.Values[propKey].(bool)
+	next := !cur
+	if _, err := sp.PutEntity(c.b, kernel.EntityInput{ID: e.ID, Values: map[string]any{propKey: next}}, c.now); err != nil {
+		return nil, err
+	}
+	stateWord := "已标记" + p.Name
+	if !next {
+		stateWord = "已取消" + p.Name
+	}
+	return &wire.ActionResult{Toast: "「" + cut(e.Title, maxTitle) + "」" + stateWord}, nil
+}
+
+// actQuickDelete deletes an entity directly from a confirmed row action and stays on the current screen.
+func actQuickDelete(c *ctx, arg string) (*wire.ActionResult, error) {
+	id := strings.TrimSpace(arg)
+	if id == "" {
+		return nil, errors.New("找不到要删除的条目")
+	}
+	sp, e, err := c.b.Find(id)
+	if err != nil {
+		return nil, errors.New("找不到这一条，它可能已经被删掉了")
+	}
+	title := cut(e.Title, maxTitle)
+	if _, err := sp.Drop(e.ID); err != nil {
+		return nil, err
+	}
+	if c.st.E == e.ID {
+		c.st = state{S: sp.ID}
+		return &wire.ActionResult{Toast: "已删除「" + title + "」", Pop: true}, nil
+	}
+	return &wire.ActionResult{Toast: "已删除「" + title + "」"}, nil
+}
+
+// submittedNewValues collects optional property values submitted alongside a newly created entity.
+func (c *ctx) submittedNewValues(t *kernel.Type, fixed map[string]any) (map[string]any, error) {
+	vals := map[string]any{}
+	for k, v := range fixed {
+		vals[k] = v
+	}
+	for i := range t.Props {
+		p := t.Props[i]
+		if _, preset := fixed[p.Key]; preset {
+			continue
+		}
+		k, ok := kernel.KindOf(p.Kind)
+		raw, sent := c.r.Values["p_"+p.Key]
+		if !ok || !sent || k.Input == kernel.InNone {
+			continue
+		}
+		v, err := submitted(p, raw)
+		if err != nil {
+			return nil, err
+		}
+		if v == nil || (k.Input == kernel.InToggle && v == false) {
+			continue
+		}
+		vals[p.Key] = v
+	}
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	return vals, nil
 }
 
 // actSave changes the name and the about of the space shown, from its settings fold.
