@@ -539,6 +539,49 @@ func TestAgyAssistantWrites(t *testing.T) {
 	}
 }
 
+func TestNodeRefreshKeepsAgyThroughStatusAndCleanup(t *testing.T) {
+	e := newAgyTestEnv(t, `{"toolPermission":"always-proceed"}`)
+	config, err := json.Marshal(map[string]any{
+		"machines": []string{"m1"},
+		"agy_dirs": []string{e.gemini},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &node{bin: "/opt/bin/" + currentExtensionID}
+	in := &ext.Init{}
+	in.Extension = &wire.ExtensionInfo{ID: currentExtensionID, DataDir: e.data}
+	in.InitializeParams.Config = config
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := false
+	t.Cleanup(func() {
+		if !finished {
+			cancel()
+			n.cleanup()
+		}
+	})
+	if _, err := n.init(ctx, in, nil); err != nil {
+		t.Fatal(err)
+	}
+	hooksFile := filepath.Join(e.gemini, "config", "hooks.json")
+	if !hasAgyHook(hooksFile) {
+		t.Fatal("agy hook not installed before refresh")
+	}
+
+	n.refresh()
+	states := n.check()
+	if len(states) != 2 || !states[1].agy || !states[1].Installed {
+		t.Errorf("refresh dropped the agy status: %+v", states)
+	}
+
+	cancel()
+	n.cleanup()
+	finished = true
+	if hasAgyHook(hooksFile) {
+		t.Error("cleanup after refresh left the agy hook installed")
+	}
+}
+
 func TestAgyAssistantWritesRuntimeWorkspaces(t *testing.T) {
 	e := newAgyTestEnv(t, `{"toolPermission":"request-review","agentMode":"default"}`)
 	const conversationID = "34c13c41-220e-4c50-98c4-a2fa536c8f32"

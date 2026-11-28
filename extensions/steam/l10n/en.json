@@ -1,6 +1,6 @@
 {
   "name": "Steam",
-  "description": "Research Steam Store games in Persona. Sign in with the Steam Mobile App to read player status, playtime, library, achievements, official updates and regional wishlist prices. Track progress locally and opt in to wishlist alerts. A Web API key can read public account data.",
+  "description": "Research Steam Store games in Persona. Read your library, achievements, updates, wishlist prices and playtime recaps, and track progress locally. Opt in to Friends Radar, wishlist alerts or gaming profile memory. Use Steam Mobile QR or a read-only Web API key.",
   "configuration": {
     "auth_mode": {
       "title": "Sign-in method",
@@ -48,16 +48,21 @@
       "description": "When at least three wishlist games are discounted, replace their individual price alerts with one roundup. Requires Steam Inbox events. Off by default."
     },
     "memory_export_enabled": {
-      "title": "Export gaming preferences to assistant memory",
-      "description": "Share personal gaming preferences through memory_sources. Loading them into the assistant uses context tokens. Off by default."
+      "title": "Export gaming profile to assistant memory",
+      "description": "Let Persona use a compact Steam gaming profile. Turning this off returns no entries, makes zero Steam requests, and uses zero extra context tokens. Off by default."
+    },
+    "memory_export_dimensions": {
+      "title": "Gaming profile dimensions",
+      "description": "Choose the details to share. All are selected by default. Clear all selections to stop exporting.",
+      "choices": {"playstyle": "Game and genre preferences", "active_games": "Active games", "backlog_progress": "Backlog progress", "milestones": "Milestones"}
     },
     "memory_max_items": {
-      "title": "Gaming preference export limit",
-      "description": "Maximum number of personal gaming preference items exported when memory export is enabled. Range 1–30, default 10."
+      "title": "Gaming profile export limit",
+      "description": "Export up to this many gaming profile entries. Range 1–100, default 20. Entries share a 2,048-byte text budget."
     },
     "discovery_tools_enabled": {
       "title": "Steam game research tools and skill",
-      "description": "Allow game research tools to add results to the assistant's context. Tools are on by default. The skill can be enabled separately under Contributions. Turning this setting off disables both."
+      "description": "Game research tools are on by default. The skill has a separate switch under Contributions and follows Hub delivery rules. Turning this setting off disables both."
     },
     "discovery_max_results": {
       "title": "Game research result limit",

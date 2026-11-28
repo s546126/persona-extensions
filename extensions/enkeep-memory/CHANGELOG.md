@@ -1,5 +1,21 @@
 # enkeep-memory changelog
 
+## 0.4.1
+
+- **Profile isolation.** Sensitive `profile:cat:*` sections hold only the user's own records; people-facet records stay
+  on the person's card. The world section leads with the user's own facts, and people cards and world relation lines
+  between other contacts are capped at one line per person and two in total. `LOW_CONFIDENCE` entries and
+  single-sighting `one_off` persona entries no longer reach the profile (the user's own entries are exempt). A
+  work-method pattern keeps a stored category only while payload-first rules still find it, so bookkeeping is no
+  longer read as personal finance.
+- **Compact 4/8/16 KB standing set.** Section shares are now 22/43/35 with elastic profile/principle growth (at most
+  25%/47%), shorter `[画]`/`[原]`/`[硬]` tags, compact two-pole principles, and clustering of near-duplicate cold-start
+  lines. The `resident_bytes` maximum is raised to 16384.
+- **migrate-v04 Phase 1 and graph clean-ups.** Stable persona entries flagged `LOW_CONFIDENCE` and seen once are
+  demoted to candidate; known `legal_id` false positives on non-work facets are cleared while real labels are kept.
+  Person nodes whose name ends in a software/service suffix are merged into the matching project/system node or
+  retyped (reversible via Unmerge).
+
 ## 0.4.0
 
 - **Four-tier source authority, six memory classes, and payload-first privacy (`daily/19`).**

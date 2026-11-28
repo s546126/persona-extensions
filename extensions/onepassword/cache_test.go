@@ -305,7 +305,7 @@ func TestANameThatHeldAValueStillMatchesWithoutShowingIt(t *testing.T) {
 
 func TestAReadAcrossAClearKeepsNothing(t *testing.T) {
 	a, _, _ := clocked(t)
-	_, err := cachedRead(a, false, func(c *metaCache) (kept[[]vaultInfo], bool) { return c.getVaults() },
+	_, err := cachedRead(context.Background(), a, false, func(c *metaCache) (kept[[]vaultInfo], bool) { return c.getVaults() },
 		func(c *metaCache, k kept[[]vaultInfo]) { c.vaults = &k },
 		func() ([]vaultInfo, error) {
 			a.forgetMeta() // Check again, or a start, while 1Password answers

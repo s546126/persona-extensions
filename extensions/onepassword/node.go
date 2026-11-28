@@ -96,6 +96,9 @@ type nodeParams struct {
 	// WithinMS is how long the hub program still waits for the answer: op gets no longer, so nothing (a value least
 	// of all) is read for a caller that has given up.
 	WithinMS int64 `json:"within_ms"`
+	// Quiet: the caller has an earlier answer to fall back on, so op must not prompt the user (quiet.go): asked only
+	// while op whoami says the authorization holds, codeLocked at once otherwise.
+	Quiet bool `json:"quiet"`
 }
 
 // handoffMargin is the part of the caller's time kept for the answer's way back through the node and the hub.
@@ -140,6 +143,11 @@ func (n *nodeApp) handle(ctx context.Context, method string, raw json.RawMessage
 	if ctx.Err() != nil { // waited behind another op call until the caller gave up
 		return nil, &ext.Error{Code: codeLocked, Message: "op was busy with an earlier request that waited for the 1Password app"}
 	}
+	if in.Quiet && method != "store" {
+		if err := n.authorized(ctx); err != nil {
+			return nil, err
+		}
+	}
 	switch method {
 	case "vaults":
 		return n.vaults(ctx)
@@ -169,6 +177,26 @@ func (n *nodeApp) handle(ctx context.Context, method string, raw json.RawMessage
 	}
 	return nil, ext.UnknownMethod("op." + method)
 }
+
+// authorized is nil while op may run without the 1Password app asking the user: op whoami never prompts, and answers
+// the account only while this program's authorization holds (10 idle minutes, 12 hours, until the app locks). Not, it
+// is codeLocked at once (op missing stays codeMissing). whoami's identity output is discarded.
+func (n *nodeApp) authorized(ctx context.Context) error {
+	c, cancel := context.WithTimeout(ctx, authorizedTimeout)
+	defer cancel()
+	out, err := n.run(c, "whoami", "--format", "json")
+	clear(out)
+	if err == nil {
+		return nil
+	}
+	if opCode(err) == codeMissing {
+		return err
+	}
+	return &ext.Error{Code: codeLocked, Message: "1Password has not authorized op now, and this ask may not prompt: an earlier answer stands in"}
+}
+
+// authorizedTimeout bounds op whoami (it answers in milliseconds: it asks the app nothing the user sees).
+const authorizedTimeout = 5 * time.Second
 
 func (n *nodeApp) status(ctx context.Context) nodeStatus {
 	out, err := n.run(ctx, "--version")

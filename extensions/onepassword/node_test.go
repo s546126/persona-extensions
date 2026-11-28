@@ -63,6 +63,7 @@ func newFakeCLI() *fakeCLI {
 	itemList := fmt.Sprintf(`[{"id": %q, "title": "GitHub token", "category": "API_CREDENTIAL", "vault": {"id": %q, "name": "Dev"}, "tags": ["ci"], "additional_information": "me@example.com", "urls": [{"href": "https://me:synthetic-password-Zq81@example.com/login?x=1"}], "updated_at": "2026-02-03T04:05:06Z"}]`, fixItem, fixVault)
 	answers := map[string]string{}
 	answers["--version"] = version
+	answers["whoami --format json"] = `{"url": "my.1password.com", "email": "me@example.com", "user_uuid": "U1", "account_uuid": "A1"}`
 	answers["account list --format json"] = accountList
 	answers["vault list --format json"] = vaultList
 	answers["item list --vault "+fixVault+" --format json"] = itemList
@@ -97,7 +98,13 @@ func (f *fakeCLI) ran() []string {
 // that computer. left gets every answer that left the computer, as the hub would get it.
 func onComputer(t *testing.T, cli *fakeCLI) (a *app, left func() []string) {
 	t.Helper()
-	n := &nodeApp{run: cli.run}
+	return onComputerRun(t, cli.run)
+}
+
+// onComputerRun is onComputer with op answered by run.
+func onComputerRun(t *testing.T, run runner) (a *app, left func() []string) {
+	t.Helper()
+	n := &nodeApp{run: run}
 	a = newApp(func(context.Context, string) (opAPI, error) {
 		t.Error("signed in with a token while a computer is picked")
 		return nil, errors.New("no")

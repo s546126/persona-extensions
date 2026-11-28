@@ -117,6 +117,10 @@ func itemFromOverview(it op.ItemOverview) itemInfo {
 // one-time codes and other field details are dropped here; any of those values that also appears in a name it keeps
 // (a title, a tag, a website, a field or section name) is replaced first, so nothing it returns can carry one.
 func itemFromSDK(it op.Item) itemDetail {
+	return itemMetadata(it, nameKey)
+}
+
+func itemMetadata(it op.Item, key func(string) string) itemDetail {
 	var values []string
 	for _, f := range it.Fields {
 		values = append(values, f.Value)
@@ -157,9 +161,9 @@ func itemFromSDK(it op.Item) itemDetail {
 	}
 	for _, f := range it.Fields {
 		sid := sectionOf(f, sections)
-		fi := fieldInfo{Title: s.clean(f.Title), Type: string(f.FieldType), ID: f.ID, SectionID: sid, TitleKey: nameKey(f.Title)}
+		fi := fieldInfo{Title: s.clean(f.Title), Type: string(f.FieldType), ID: f.ID, SectionID: sid, TitleKey: key(f.Title)}
 		if sid != "" {
-			fi.SectionKey = nameKey(sections[sid].Title)
+			fi.SectionKey = key(sections[sid].Title)
 		}
 		ref := "op://" + it.VaultID + "/" + it.ID + "/"
 		if sid != "" {

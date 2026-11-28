@@ -561,6 +561,38 @@ func tags(st *store.State, p *Pattern, ids []string) (cats []string, space strin
 	return cats, space
 }
 
+// effectiveCategories are the categories a pattern still carries under today's Payload-First rules: a
+// work-methodology pattern (interaction, tools, workflow, judgement) or a contract keeps a stored category only while
+// tags still finds it on the pattern's own payload or its user-labelled evidence, so a label an older detector put on
+// a general working rule (bookkeeping by the user's own conventions read as personal finance) is not carried into the
+// profile's sensitive sections. Never adds a category; a persona or world pattern keeps what it has.
+func effectiveCategories(st *store.State, p *Pattern) []string {
+	if p == nil || len(p.Categories) == 0 {
+		return nil
+	}
+	if st == nil || (!entry.IsWorkMethodFacet(entry.Facet(p.Facet)) && !p.IsContract()) {
+		return slices.Clone(p.Categories)
+	}
+	ids := followMerges(st, p.EvidenceIDs)
+	live := liveIDs(st, ids)
+	if p.IsProfileCore() || p.IsOpsRunbook() || p.IsContract() {
+		// As recount: live user-owned evidence counts even when the pool filters it out.
+		for _, id := range ids {
+			if e := st.Entries[id]; e != nil && e.Live() && isUserOwned(e) && !slices.Contains(live, id) {
+				live = append(live, id)
+			}
+		}
+	}
+	now, _ := tags(st, p, append(live, liveIDs(st, followMerges(st, p.CounterIDs))...))
+	var out []string
+	for _, c := range p.Categories {
+		if slices.Contains(now, c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // subjects are the names that bring a pattern in: its evidence's (memsrc.Subjects), at most MaxSubjects.
 func subjects(st *store.State, ids []string) []string {
 	var out []string

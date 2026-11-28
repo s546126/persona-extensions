@@ -245,7 +245,14 @@ func (a *app) callDiscoveryTool(ctx context.Context, name string, raw json.RawMe
 	case storeSearchTool:
 		err = a.searchStore(ctx, raw, country, fallbackLanguage, limit, t, out)
 	case gameDetailsTool:
+		var memory *steamData
+		if a.config.exportsMemoryDimension(memoryPlaystyle) {
+			memory = a.memoryData()
+		}
 		err = a.discovery.gameDetails(ctx, raw, country, fallbackLanguage, min(limit, detailBatchLimit), t, out)
+		if games, ok := out["games"].([]discoveryGame); err == nil && ok && memory != nil {
+			memory.rememberGenres(games)
+		}
 	}
 	if err != nil {
 		return wire.ConnectorCallResult{}, err

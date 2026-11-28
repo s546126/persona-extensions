@@ -2053,7 +2053,7 @@ func collabContainsEntity(situation, name string) bool {
 // near-identical rules emitted by standing, UserOwned, L1, local recall, and 1-hop entity expansion.
 func collabStripRecallPrefix(ln string) string {
 	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "-"))
-	s = strings.TrimPrefix(s, "【原则】")
+	s = memsrc.StripStandingTag(s)
 	if strings.HasPrefix(s, "跨事模式（") {
 		if i := strings.Index(s, "）："); i >= 0 {
 			s = s[i+len("）："):]

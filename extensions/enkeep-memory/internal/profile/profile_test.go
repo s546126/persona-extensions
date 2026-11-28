@@ -429,3 +429,127 @@ func TestV04ProfileSensitiveSSOTNoResurrectionAndNoOpsRunbook(t *testing.T) {
 		t.Errorf("work-by-user expected in relationships, got %+v", sensIDs)
 	}
 }
+
+// v0.4.1: the sensitive sections hold only the user's own records (someone else's money or diet stays on their card),
+// the world section leads with the user's own facts and carries at most MaxWorldPeople people lines, one per person,
+// and LOW_CONFIDENCE / single one-off persona misreads never reach the profile.
+func TestProfileIsolatesOthersAndMisreads(t *testing.T) {
+	stable := func(e *entry.Entry) *entry.Entry {
+		e.Status, e.Tagged, e.Origin = entry.Stable, true, entry.Behavior
+		if e.Count == 0 {
+			e.Count = 1
+		}
+		if e.Last == "" {
+			e.Last = "2026-11-20"
+		}
+		if e.Kinds == nil {
+			e.Kinds = []string{"S8"}
+		}
+		return e
+	}
+	fin := []entry.Category{{Name: entry.CatFinance, By: entry.ByModel}}
+	st := &store.State{
+		Entries: map[string]*entry.Entry{},
+		Contacts: map[string]*entry.Contact{
+			"person:a": {Person: "person:a", Name: "user-a", Score: 900},
+			"person:b": {Person: "person:b", Name: "user-b", Score: 500},
+			"person:c": {Person: "person:c", Name: "user-c", Score: 400},
+			"person:d": {Person: "person:d", Name: "user-d", Score: 300},
+		},
+	}
+	add := func(e *entry.Entry) { st.Entries[e.ID] = stable(e) }
+	add(&entry.Entry{ID: "u-fin", Facet: entry.Persona, Grain: entry.Action, Text: "用户把财务自由定为攒够一笔净资产后退休", Categories: fin})
+	for i, p := range []string{"person:a", "person:b", "person:c", "person:d", "person:a", "person:b", "person:c"} {
+		add(&entry.Entry{ID: "p-fin-" + string(rune('a'+i)), Facet: entry.People, Person: p, Part: entry.PartFact, Count: 5,
+			Text: "群友自述贷款买房的情况 " + string(rune('a'+i)), Categories: fin})
+	}
+	add(&entry.Entry{ID: "p-health", Facet: entry.People, Person: "person:b", Part: entry.PartFact, Count: 3, Text: "群友在减肥控制饮食",
+		Categories: []entry.Category{{Name: entry.CatHealth, By: entry.ByModel}}})
+	for i := 0; i < 6; i++ {
+		add(&entry.Entry{ID: "p-a-" + string(rune('0'+i)), Facet: entry.People, Person: "person:a", Part: entry.PartFact, Count: 6,
+			Text: "负责工程链路第 " + string(rune('0'+i)) + " 段的落地"})
+	}
+	add(&entry.Entry{ID: "p-b-0", Facet: entry.People, Person: "person:b", Part: entry.PartFact, Count: 4, Text: "负责评测数据维护"})
+	add(&entry.Entry{ID: "p-c-0", Facet: entry.People, Person: "person:c", Part: entry.PartFact, Count: 4, Text: "负责值班告警"})
+	for i, pair := range [][2]string{{"person:a", "person:b"}, {"person:b", "person:a"}, {"person:a", "person:c"}, {"person:c", "person:a"}} {
+		add(&entry.Entry{ID: "w-rel-" + string(rune('0'+i)), Facet: entry.World, Grain: entry.Class, Type: "collaborates_with",
+			Subject: pair[0], Predicate: "collaborates_with", Target: pair[1], Count: 15, Text: pair[0] + " 和 " + pair[1] + " 合作"})
+	}
+	add(&entry.Entry{ID: "w-own-1", Facet: entry.World, Grain: entry.Class, Text: "用户拆解方案时把每个环节点名到负责人"})
+	add(&entry.Entry{ID: "w-own-2", Facet: entry.World, Grain: entry.Class, Text: "用户把协作与依赖关系明确记录下来"})
+	add(&entry.Entry{ID: "u-low", Facet: entry.Persona, Grain: entry.Action, Text: "用户拒了个面试被告状，回顾读博的时间",
+		Flags: []string{entry.FlagLowConfidence, "standalone"}, Leverage: &entry.Leverage{Reach: entry.ReachOneOff},
+		Categories: []entry.Category{{Name: entry.CatEmotion, By: entry.ByModel}}})
+	add(&entry.Entry{ID: "u-oneoff", Facet: entry.Persona, Grain: entry.Action, Text: "用户那天对一次排期临时吐槽",
+		Leverage: &entry.Leverage{Reach: entry.ReachOneOff}})
+	add(&entry.Entry{ID: "u-own", Facet: entry.Persona, Grain: entry.Action, Text: "用户以凌晨三点到上午八点为清醒窗口", Count: 4})
+
+	sum := Build(st, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC), "zh-Hans")
+
+	for _, ssec := range sum.Sensitive {
+		for _, pt := range ssec.Points {
+			if strings.HasPrefix(pt.ID, "p-") {
+				t.Errorf("someone else's record %s in profile:cat:%s", pt.ID, ssec.Category)
+			}
+		}
+	}
+	var finance SensitiveSection
+	ok := false
+	for _, ssec := range sum.Sensitive {
+		if ssec.Category == entry.CatFinance {
+			finance, ok = ssec, true
+		}
+	}
+	if !ok || len(finance.Points) != 1 || finance.Points[0].ID != "u-fin" {
+		t.Fatalf("finance section should hold the user's own record only: %+v", sum.Sensitive)
+	}
+	world, ok := sum.SectionByFacet(entry.World)
+	if !ok || len(world.Points) < 2 || !strings.HasPrefix(world.Points[0].ID, "w-own-") || !strings.HasPrefix(world.Points[1].ID, "w-own-") {
+		t.Fatalf("world section should lead with the user's own facts: %+v", world.Points)
+	}
+	perPerson := map[string]int{}
+	people := 0
+	for _, pt := range world.Points {
+		e := st.Entries[pt.ID]
+		if e == nil {
+			continue
+		}
+		var names []string
+		switch {
+		case e.Facet == entry.People:
+			names = []string{e.Person}
+		case strings.HasPrefix(e.Subject, "person:"):
+			names = []string{e.Subject, e.Target}
+		default:
+			continue
+		}
+		people++
+		for _, n := range names {
+			if perPerson[n]++; perPerson[n] > 1 {
+				t.Errorf("person %s holds %d world lines: %+v", n, perPerson[n], world.Points)
+			}
+		}
+	}
+	if people > MaxWorldPeople || people == 0 {
+		t.Errorf("world people lines = %d, want 1..%d: %+v", people, MaxWorldPeople, world.Points)
+	}
+	all := sum.Overview + strings.Join(sum.Recent, "")
+	for _, sec := range sum.Sections {
+		for _, pt := range sec.Points {
+			all += pt.ID + pt.Text
+		}
+	}
+	for _, ssec := range sum.Sensitive {
+		for _, pt := range ssec.Points {
+			all += pt.ID + pt.Text
+		}
+	}
+	for _, bad := range []string{"读博", "u-low", "u-oneoff", "临时吐槽"} {
+		if strings.Contains(all, bad) {
+			t.Errorf("misread %q reached the profile", bad)
+		}
+	}
+	if !strings.Contains(all, "u-own") {
+		t.Error("the user's own persona entry is missing")
+	}
+}

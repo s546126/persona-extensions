@@ -51,6 +51,7 @@ func newSteamStores(dataDir string) steamStores {
 func (s steamStores) clearMemory() {
 	s.prices.file.clearMemory()
 	s.playtime.file.clearMemory()
+	s.playtime.recaps.clearMemory()
 	s.cursors.file.clearMemory()
 }
 
@@ -439,11 +440,15 @@ func snapshotPlaytime(list *gameList, at time.Time) PlaytimeSnapshot {
 }
 
 type PlaytimeSnapshotStore struct {
-	file *snapshotFile[[]PlaytimeSnapshot]
+	file   *snapshotFile[[]PlaytimeSnapshot]
+	recaps *snapshotFile[[]recapSnapshot]
 }
 
 func NewPlaytimeSnapshotStore(dataDir string) *PlaytimeSnapshotStore {
-	return &PlaytimeSnapshotStore{newSnapshotFile[[]PlaytimeSnapshot](dataDir, "playtime")}
+	return &PlaytimeSnapshotStore{
+		file:   newSnapshotFile[[]PlaytimeSnapshot](dataDir, "playtime"),
+		recaps: newSnapshotFile[[]recapSnapshot](dataDir, "playtime-recap"),
+	}
 }
 
 // Record keeps one snapshot per UTC day within 400 days of the latest observation.
@@ -480,6 +485,72 @@ func (s *PlaytimeSnapshotStore) History(steamID string) ([]PlaytimeSnapshot, err
 	var out []PlaytimeSnapshot
 	err := s.file.view(func(entries map[string][]PlaytimeSnapshot) { out = slices.Clone(entries[steamID]) })
 	return out, err
+}
+
+type recapSnapshot struct {
+	At       time.Time                `json:"at"`
+	Minutes  map[uint32]uint32        `json:"minutes"`
+	Statuses map[uint32]BacklogStatus `json:"statuses"`
+}
+
+// All calendar recap periods start at a month boundary. Keep each month's first
+// observed day and the latest observed day, in a separate file so overview reads
+// keep using the small aggregate history. The first recap on a UTC day writes once.
+func (s *PlaytimeSnapshotStore) observeRecap(id string, current recapSnapshot) ([]recapSnapshot, error) {
+	var history []recapSnapshot
+	err := s.recaps.update(func(entries map[string][]recapSnapshot) (bool, error) {
+		prior := entries[id]
+		cutoff := utcDay(current.At).AddDate(0, 0, 1-maxPlaytimeDays)
+		first := slices.IndexFunc(prior, func(p recapSnapshot) bool { return !p.At.Before(cutoff) })
+		if first >= 0 {
+			prior = prior[first:]
+		} else {
+			prior = nil
+		}
+		history = prior
+		n := len(prior)
+		if n > 0 && !utcDay(current.At).After(utcDay(prior[n-1].At)) {
+			return false, nil
+		}
+		if n > 1 && monthStart(prior[n-2].At).Equal(monthStart(prior[n-1].At)) {
+			prior = prior[:n-1]
+		}
+		entries[id] = append(slices.Clone(prior), current)
+		trimRecapHistory(entries)
+		return true, nil
+	})
+	return history, err
+}
+
+func trimRecapHistory(entries map[string][]recapSnapshot) {
+	latest := func(history []recapSnapshot) time.Time {
+		if len(history) == 0 {
+			return time.Time{}
+		}
+		return history[len(history)-1].At
+	}
+	trimOldest(entries, maxPlaytimeAccounts, latest)
+	// Budget the JSON cost at up to 26 bytes for each integer item or status.
+	// This leaves room for the enclosing records within the 16 MiB store limit.
+	const maxItems = 600_000
+	costs := make(map[string]int, len(entries))
+	total := 0
+	for id, history := range entries {
+		for _, p := range history {
+			costs[id] += len(p.Minutes) + len(p.Statuses)
+		}
+		total += costs[id]
+	}
+	for total > maxItems {
+		oldest := slices.MinFunc(slices.Collect(maps.Keys(entries)), func(a, b string) int {
+			if order := latest(entries[a]).Compare(latest(entries[b])); order != 0 {
+				return order
+			}
+			return cmp.Compare(a, b)
+		})
+		total -= costs[oldest]
+		delete(entries, oldest)
+	}
 }
 
 type BacklogStatus string

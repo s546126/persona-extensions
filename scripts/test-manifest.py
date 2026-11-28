@@ -192,6 +192,64 @@ class LooksFileTests(unittest.TestCase):
         self.assertIn('scripts/package.sh would leave it out', bad[0])
 
 
+class ReservedFeatureTests(unittest.TestCase):
+    """A manifest may not declare the hub's module feature names (nwverse/persona#16254): "modules" is the marker
+    and "module.<id>" a module's flag, which only the hub announces. An ordinary feature still passes."""
+
+    def make_ext(self, m):
+        d = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        ext = d / 'extensions' / 'feat'
+        ext.mkdir(parents=True)
+        (ext / manifest.NEW).write_text(json.dumps(dict({'id': 'feat', 'version': '0.1.0'}, **m)))
+        old = manifest.ROOT
+        manifest.ROOT = str(d)
+        self.addCleanup(setattr, manifest, 'ROOT', old)
+
+    @staticmethod
+    def api(*features):
+        return {'contributes': {'api': [{'id': 'feed', 'prefix': 'feed', 'features': list(features)}]}}
+
+    def test_ordinary_features_pass(self):
+        for features in ([], ['feed_sync'], ['modulesx', 'module', 'module_volc', 'my_modules', 'volc']):
+            m = self.api(*features)
+            self.assertEqual(manifest.check_features('feat', m), [], features)
+            self.make_ext(m)
+            self.assertTrue(manifest.check(), features)
+
+    def test_the_modules_marker_and_module_flags_are_refused(self):
+        for f in ('modules', 'module.volc', 'module.', 'module.lark'):
+            m = self.api('feed_sync', f)
+            bad = manifest.check_features('feat', m)
+            self.assertEqual(len(bad), 1, (f, bad))
+            self.assertIn('contributes.api feed: features declares the reserved feature %r' % f, bad[0])
+            self.make_ext(m)
+            with redirect_stderr(io.StringIO()) as stderr:
+                self.assertFalse(manifest.check(), f)
+            self.assertIn('reserved feature %r' % f, stderr.getvalue())
+
+    def test_every_reserved_name_is_named(self):
+        m = self.api('modules', 'ok', 'module.volc')
+        m['contributes']['api'].append({'id': 'other', 'prefix': 'other', 'features': ['module.screen']})
+        bad = manifest.check_features('feat', m)
+        self.assertEqual([b.split('reserved feature ')[1].split(';')[0] for b in bad],
+                         ["'modules'", "'module.volc'", "'module.screen'"])
+
+    def test_other_places_that_could_carry_features(self):
+        for m, where in (({'features': ['module.volc']}, 'features'),
+                         ({'api': {'features': ['modules']}}, 'api.features'),
+                         ({'contributes': {'transcription': [{'id': 'volc', 'features': ['module.volc']}]}},
+                          'contributes.transcription volc: features')):
+            bad = manifest.check_features('feat', m)
+            self.assertEqual(len(bad), 1, (m, bad))
+            self.assertIn(where + ' declares the reserved feature', bad[0])
+
+    def test_malformed_feature_lists_are_left_to_the_schema(self):
+        for m in ({'contributes': {'api': {'features': 'modules'}}}, {'contributes': {'api': [{'features': 'modules'}]}},
+                  {'contributes': {'api': [{'features': [1, None]}]}}, {'contributes': []}):
+            self.assertEqual(manifest.check_features('feat', m), [], m)
+
+
 class GitFailureTests(unittest.TestCase):
     """Issue #100: git failing for a reason other than a name git does not know must surface and fail, not look
     like nothing changed (empty release) or every extension changed (a release of everything)."""

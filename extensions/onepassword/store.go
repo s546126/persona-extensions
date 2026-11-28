@@ -43,6 +43,30 @@ func storeRandom() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// Native OTP fields require the CLI's TOTP_ identity as well as an otpauth URI.
+// Retyping between ordinary and OTP fields replaces the ID in the same template slot; labels and sections stay intact.
+func hasNativeOTPPrefix(id string) bool {
+	return strings.HasPrefix(id, "TOTP_") && len(id) > len("TOTP_")
+}
+
+func storeFieldID(typ, existing string) string {
+	if typ == "OTP" {
+		if !hasNativeOTPPrefix(existing) {
+			return "TOTP_" + storeRandom()[:26]
+		}
+		return existing
+	}
+	if existing == "" || hasNativeOTPPrefix(existing) {
+		return storeRandom()[:26]
+	}
+	return existing
+}
+
+func storeOTPFailure() error {
+	return &ext.Error{Code: codeFailed, Message: "1Password OTP write verification failed: expected native OTP type and a nonempty live totp code; inspect item metadata before retrying"}
+}
+
 func decodeStore(raw []byte, v any) error {
 	if len(raw) > wire.SecretStoreSealedMost*2 {
 		return storeFailure()
@@ -160,7 +184,9 @@ func (a *app) store(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, storeFailure()
 	}
 	if in.Phase == "commit" {
-		a.forgetMeta()
+		if err := a.forgetMeta(); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -359,7 +385,7 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 	}
 
 	// Process deletions first so removing a duplicate field in the same edit clears label ambiguity.
-	deletedIDs := map[string]string{}
+	var removedIDs []string
 	for _, tf := range t.Fields {
 		if !tf.Delete {
 			continue
@@ -384,7 +410,9 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 		}
 		var delID string
 		_ = json.Unmarshal(fields[match]["id"], &delID)
-		deletedIDs[tf.Name] = delID
+		if delID != "" {
+			removedIDs = append(removedIDs, delID)
+		}
 		for _, b := range fields[match] {
 			clear(b)
 		}
@@ -449,8 +477,17 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 			clear(f["value"])
 			put(f, "value", nextVal)
 			put(f, "type", tf.Type)
-			var fid string
-			_ = json.Unmarshal(f["id"], &fid)
+			var oldID string
+			_ = json.Unmarshal(f["id"], &oldID)
+			fid := storeFieldID(tf.Type, oldID)
+			if fid != oldID {
+				if oldID != "" {
+					removedIDs = append(removedIDs, oldID)
+				}
+				delete(f, "totp")
+				delete(f, "reference")
+				put(f, "id", fid)
+			}
 			writtenID[tf.Name] = fid
 			continue
 		}
@@ -477,7 +514,7 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 				writtenID[tf.Name] = bid
 				writtenPurpose[tf.Name] = bpurpose
 			} else {
-				newID := storeRandom()[:26]
+				newID := storeFieldID(tf.Type, "")
 				put(nf, "id", newID)
 				put(nf, "label", tf.Name)
 				put(nf, "type", tf.Type)
@@ -491,19 +528,27 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 		if err := checkSection(f); err != nil {
 			return nil, err
 		}
-		var fid, fpurpose string
-		_ = json.Unmarshal(f["id"], &fid)
+		var oldID, fpurpose string
+		_ = json.Unmarshal(f["id"], &oldID)
 		_ = json.Unmarshal(f["purpose"], &fpurpose)
-		if tf.Type == "OTP" {
-			delete(f, "totp")
-		}
-		clear(f["value"])
-		put(f, "value", nextVal)
 		typ := tf.Type
-		if bid, _, bpurpose, btype, ok := builtinFieldSpec(category, tf.Name, tf.Type); ok && (fid == bid || strings.EqualFold(fpurpose, bpurpose)) {
+		if bid, _, bpurpose, btype, ok := builtinFieldSpec(category, tf.Name, tf.Type); ok && (oldID == bid || strings.EqualFold(fpurpose, bpurpose)) {
 			typ = btype
 			writtenPurpose[tf.Name] = bpurpose
 		}
+		fid := storeFieldID(typ, oldID)
+		if typ == "OTP" || fid != oldID {
+			delete(f, "totp")
+		}
+		if fid != oldID {
+			if oldID != "" {
+				removedIDs = append(removedIDs, oldID)
+			}
+			delete(f, "reference")
+			put(f, "id", fid)
+		}
+		clear(f["value"])
+		put(f, "value", nextVal)
 		put(f, "type", typ)
 		writtenID[tf.Name] = fid
 	}
@@ -533,10 +578,7 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 	if json.Unmarshal(out, &saved) != nil || !opID.MatchString(saved.ID) || saved.Vault.ID != t.Vault {
 		return nil, storeFailure()
 	}
-	for _, delID := range deletedIDs {
-		if delID == "" {
-			continue
-		}
+	for _, delID := range removedIDs {
 		for _, sf := range saved.Fields {
 			if sf.ID == delID {
 				return nil, storeFailure()
@@ -581,6 +623,18 @@ func (n *nodeApp) writeStore(ctx context.Context, t wire.SecretStoreTarget, vals
 		}
 		if id == "" || !refSafe(id) {
 			return nil, storeFailure()
+		}
+		if f.Type == "OTP" {
+			verified := false
+			for _, sf := range saved.Fields {
+				if sf.ID == id && hasNativeOTPPrefix(sf.ID) && sf.Type == "OTP" && strings.TrimSpace(sf.TOTP) != "" {
+					verified = true
+					break
+				}
+			}
+			if !verified {
+				return nil, storeOTPFailure()
+			}
 		}
 		refs[f.Name] = "op://" + saved.Vault.ID + "/" + saved.ID + "/" + id
 	}

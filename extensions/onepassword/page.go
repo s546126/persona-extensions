@@ -28,7 +28,9 @@ func (a *app) page() ext.Page {
 				return nil, fmt.Errorf("unknown page action %q", r.Action)
 			}
 			if limited, _ := a.limited(); !limited { // Check again asks 1Password anew, unless its limit holds
-				a.forgetMeta()
+				if err := a.forgetMeta(); err != nil {
+					return nil, err
+				}
 			}
 			return &wire.ActionResult{View: a.view(ctx, r)}, nil
 		},

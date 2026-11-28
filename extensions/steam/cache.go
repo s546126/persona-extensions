@@ -149,6 +149,33 @@ func (s *cacheSlot[T]) clear() {
 	s.retryScope, s.retryAt = "", time.Time{}
 }
 
+// peek reads an already observed value without modifying cache state or waiting
+// for a foreground fetch. It can also read a previous Web API key run's record.
+func (s *cacheSlot[T]) peek(scope string, maxAge time.Duration) *T {
+	select {
+	case s.gate <- struct{}{}:
+		defer func() { <-s.gate }()
+	default:
+		return nil
+	}
+	if s.session != nil {
+		s.session.auth.mu.Lock()
+		defer s.session.auth.mu.Unlock()
+		if !s.ownsScopeLocked(scope) {
+			return nil
+		}
+	}
+	record := s.record
+	if !s.loaded {
+		record = readRecord[T](s.path)
+	}
+	age := s.now().Sub(record.At)
+	if record.Scope == scope && age >= 0 && age <= maxAge {
+		return record.Data
+	}
+	return nil
+}
+
 func (s *cacheSlot[T]) ownsScopeLocked(scope string) bool {
 	id, _, _ := strings.Cut(scope, "/") // Wishlist scopes also include country and language.
 	return s.session.currentLocked() && s.session.reads.config.AuthMode == modeQR && s.session.tokens.secret.SteamID == id

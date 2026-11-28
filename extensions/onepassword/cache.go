@@ -5,8 +5,8 @@ package main
 // scrubbed), for metaTTL, so repeated describes, searches and item looks do not each spend requests of the service
 // account's hourly and daily limits (or ask op on the computer again). Never a value: secrets.resolve always asks.
 //
-// Only in this process's memory. A new token, computer or setting restarts the program, so it starts empty; the
-// page's Check again empties it. While 1Password's rate limit holds (rateWindow after it refused), reads answer from
+// A bounded snapshot survives restarts in the Hub's sealed connector secret (cache_store.go). A new token or
+// computer starts empty; the page's Check again empties it. While 1Password's rate limit holds (rateWindow after it refused), reads answer from
 // what is kept, however old, and ask 1Password nothing; with nothing kept they answer the limit at once.
 
 import (
@@ -51,17 +51,29 @@ func (a *app) limited() (bool, error) {
 }
 
 // forgetMeta empties the cache; a read that started before it keeps nothing it got.
-func (a *app) forgetMeta() {
+func (a *app) forgetMeta() error {
+	a.metaIO.Lock()
+	defer a.metaIO.Unlock()
 	a.metaMu.Lock()
-	defer a.metaMu.Unlock()
 	a.meta = metaCache{}
 	a.metaGen++
+	a.metaRev++
+	store := a.metaStore
+	a.metaMu.Unlock()
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
+		defer cancel()
+		if err := store.Delete(ctx); err != nil {
+			return errMetadataStore
+		}
+	}
+	return nil
 }
 
 // cachedRead answers what get finds kept while it is fresh (unless again asks for a new answer), or at any age under
 // the rate limit; otherwise it fetches, keeps the answer with put (unless the cache was emptied meanwhile) and answers
 // it. A fetch refused for the rate limit answers what was kept, if anything was.
-func cachedRead[T any](a *app, again bool, get func(*metaCache) (kept[T], bool), put func(*metaCache, kept[T]), fetch func() (T, error)) (T, error) {
+func cachedRead[T any](ctx context.Context, a *app, again bool, get func(*metaCache) (kept[T], bool), put func(*metaCache, kept[T]), fetch func() (T, error)) (T, error) {
 	now := a.now()
 	limited, limitErr := a.limited()
 	a.metaMu.Lock()
@@ -69,6 +81,9 @@ func cachedRead[T any](a *app, again bool, get func(*metaCache) (kept[T], bool),
 	gen := a.metaGen
 	a.metaMu.Unlock()
 	if ok && (limited || !again && now.Sub(k.at) < metaTTL) {
+		if err := a.saveMeta(ctx, gen); err != nil {
+			return *new(T), err
+		}
 		return k.v, nil
 	}
 	var zero T
@@ -77,16 +92,25 @@ func cachedRead[T any](a *app, again bool, get func(*metaCache) (kept[T], bool),
 	}
 	v, err := fetch()
 	if err != nil {
-		if ok && kindOf(err) == errRate { // refused for the limit just now: what is kept answers instead
+		// Refused for the limit just now, or op on the computer would have to ask the user (quiet.go): what is kept
+		// answers instead, however old.
+		if ok && (kindOf(err) == errRate || needsUser(err)) {
+			if err := a.saveMeta(ctx, gen); err != nil {
+				return zero, err
+			}
 			return k.v, nil
 		}
 		return zero, err
 	}
 	a.metaMu.Lock()
 	if gen == a.metaGen {
-		put(&a.meta, kept[T]{v: v, at: now})
+		put(&a.meta, kept[T]{v: v, at: a.now()})
+		a.metaRev++
 	}
 	a.metaMu.Unlock()
+	if err := a.saveMeta(ctx, gen); err != nil {
+		return zero, err
+	}
 	return v, nil
 }
 
@@ -140,18 +164,29 @@ func (a *app) itemHaving(ctx context.Context, vaultID, itemID string, has func(f
 	return a.readItem(ctx, vaultID, itemID, true)
 }
 
-// nameKey is a name as lookups compare it (case and surrounding spaces aside), keyed with a secret of this process:
+// nameKey is a name as lookups compare it (case and surrounding spaces aside), keyed with a private random seed:
 // itemFromSDK keeps it beside a field's or section's name, so a reference that names one whose name held a value
 // (and is kept scrubbed) still finds it, and what is kept carries no form of that value anyone can read back.
-func nameKey(name string) string {
-	m := hmac.New(sha256.New, nameSecret[:])
+func nameKey(name string) string { return keyedName(nameSecret, name) }
+
+func keyedName(seed [32]byte, name string) string {
+	m := hmac.New(sha256.New, seed[:])
 	m.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
 	return hex.EncodeToString(m.Sum(nil)[:16])
 }
 
-var nameSecret = func() (k [32]byte) {
+func newNameSecret() (k [32]byte) {
 	if _, err := rand.Read(k[:]); err != nil {
 		panic(err)
 	}
 	return k
-}()
+}
+
+var nameSecret = newNameSecret()
+
+func (a *app) metaNameKey(name string) string {
+	a.metaMu.Lock()
+	seed := a.metaSeed
+	a.metaMu.Unlock()
+	return keyedName(seed, name)
+}

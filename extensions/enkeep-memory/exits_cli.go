@@ -130,48 +130,52 @@ func recallCmd(args []string) error {
 
 // ReviewBundleSummary captures machine-checkable acceptance metrics for the 6 v0.4.0 review artifacts (§4.3).
 type ReviewBundleSummary struct {
-	StateDir                 string         `json:"state_dir"`
-	OutDir                   string         `json:"out_dir"`
-	Today                    string         `json:"today"`
-	ResidentBytesLimit       int            `json:"resident_bytes_limit"`
-	ResidentBytesActual      int            `json:"resident_bytes_actual"`
-	ResidentLines            int            `json:"resident_lines"`
-	ResidentHotLines         int            `json:"resident_hot_lines"`
-	ResidentProfileLines     int            `json:"resident_profile_lines"`
-	ResidentPrincipleLines   int            `json:"resident_principle_lines"`
-	ResidentContractLines    int            `json:"resident_contract_lines"`
-	ResidentOpsHits          int            `json:"resident_ops_hits"`
-	ResidentS6Hits           int            `json:"resident_s6_hits"`
-	ResidentOWCHits          int            `json:"resident_owc_hits"`
-	ResidentSensitiveHits    int            `json:"resident_sensitive_hits"`
-	ResidentDuplicates       int            `json:"resident_duplicates"`
-	ResidentTruncatedLines   int            `json:"resident_truncated_lines"`
-	ProfileCoreUsed          int            `json:"profile_core_used"`
-	PrinciplesUsed           int            `json:"principles_used"`
-	PrinciplesTotal          int            `json:"principles_total"`
-	PrinciplesWithPoles      int            `json:"principles_with_poles"`
-	ContractsUsed            int            `json:"contracts_used"`
-	OpsRunbooksUsed          int            `json:"ops_runbooks_used"`
-	ProfileSupervisorHits    int            `json:"profile_supervisor_hits"`
-	ProfileEmoWorkHits       int            `json:"profile_emotion_work_hits"`
-	ProfileHealthWorkHits    int            `json:"profile_health_work_hits"`
-	ProfileSensitiveWorkHits int            `json:"profile_sensitive_work_hits"`
-	GraphNodesTotal          int            `json:"graph_nodes_total"`
-	GraphNodesActive         int            `json:"graph_nodes_active"`
-	GraphTasksArchived       int            `json:"graph_tasks_archived"`
-	GraphTasksActive         int            `json:"graph_tasks_active"`
-	GraphAboutArchived       int            `json:"graph_about_archived"`
-	GraphAboutActive         int            `json:"graph_about_active"`
-	GraphMerges              int            `json:"graph_merges"`
-	GraphCollabMirrors       int            `json:"graph_collab_mirrors"`
-	ContactsShown            int            `json:"contacts_shown"`
-	SensitiveByCat           map[string]int `json:"sensitive_by_cat"`
-	ColdstartLines           int            `json:"coldstart_lines"`
-	ColdstartBytes           int            `json:"coldstart_bytes"`
-	ColdstartProfileLines    int            `json:"coldstart_profile_lines"`
-	ColdstartPrincipleLines  int            `json:"coldstart_principle_lines"`
-	ColdstartContractLines   int            `json:"coldstart_contract_lines"`
-	Files                    []string       `json:"files"`
+	StateDir                   string         `json:"state_dir"`
+	OutDir                     string         `json:"out_dir"`
+	Today                      string         `json:"today"`
+	ResidentBytesLimit         int            `json:"resident_bytes_limit"`
+	ResidentBytesActual        int            `json:"resident_bytes_actual"`
+	ResidentLines              int            `json:"resident_lines"`
+	ResidentHotLines           int            `json:"resident_hot_lines"`
+	ResidentProfileLines       int            `json:"resident_profile_lines"`
+	ResidentPrincipleLines     int            `json:"resident_principle_lines"`
+	ResidentContractLines      int            `json:"resident_contract_lines"`
+	ResidentOpsHits            int            `json:"resident_ops_hits"`
+	ResidentS6Hits             int            `json:"resident_s6_hits"`
+	ResidentOWCHits            int            `json:"resident_owc_hits"`
+	ResidentSensitiveHits      int            `json:"resident_sensitive_hits"`
+	ResidentDuplicates         int            `json:"resident_duplicates"`
+	ResidentTruncatedLines     int            `json:"resident_truncated_lines"`
+	ProfileCoreUsed            int            `json:"profile_core_used"`
+	PrinciplesUsed             int            `json:"principles_used"`
+	PrinciplesTotal            int            `json:"principles_total"`
+	PrinciplesWithPoles        int            `json:"principles_with_poles"`
+	ContractsUsed              int            `json:"contracts_used"`
+	OpsRunbooksUsed            int            `json:"ops_runbooks_used"`
+	ProfileSupervisorHits      int            `json:"profile_supervisor_hits"`
+	ProfileEmoWorkHits         int            `json:"profile_emotion_work_hits"`
+	ProfileHealthWorkHits      int            `json:"profile_health_work_hits"`
+	ProfileSensitivePeopleHits int            `json:"profile_sensitive_people_hits"`
+	ProfileWorldPeopleLines    int            `json:"profile_world_people_lines"`
+	ProfileWorldMaxPerPerson   int            `json:"profile_world_max_per_person"`
+	ProfileLowConfidenceHits   int            `json:"profile_low_confidence_hits"`
+	ProfileSensitiveWorkHits   int            `json:"profile_sensitive_work_hits"`
+	GraphNodesTotal            int            `json:"graph_nodes_total"`
+	GraphNodesActive           int            `json:"graph_nodes_active"`
+	GraphTasksArchived         int            `json:"graph_tasks_archived"`
+	GraphTasksActive           int            `json:"graph_tasks_active"`
+	GraphAboutArchived         int            `json:"graph_about_archived"`
+	GraphAboutActive           int            `json:"graph_about_active"`
+	GraphMerges                int            `json:"graph_merges"`
+	GraphCollabMirrors         int            `json:"graph_collab_mirrors"`
+	ContactsShown              int            `json:"contacts_shown"`
+	SensitiveByCat             map[string]int `json:"sensitive_by_cat"`
+	ColdstartLines             int            `json:"coldstart_lines"`
+	ColdstartBytes             int            `json:"coldstart_bytes"`
+	ColdstartProfileLines      int            `json:"coldstart_profile_lines"`
+	ColdstartPrincipleLines    int            `json:"coldstart_principle_lines"`
+	ColdstartContractLines     int            `json:"coldstart_contract_lines"`
+	Files                      []string       `json:"files"`
 }
 
 // reviewBundleCmd: enkeep-memory review-bundle -state <dir> -out <dir> [-lang zh-Hans] [-resident-bytes 4096] [-today YYYY-MM-DD]
@@ -180,7 +184,7 @@ func reviewBundleCmd(args []string) error {
 	stateDir := fs.String("state", "", "state directory containing state.json, overview-state.json, profile-summary.json")
 	outDir := fs.String("out", "", "output directory for the 6 v0.4.0 review artifacts")
 	lang := fs.String("lang", "zh-Hans", "language for rendering")
-	residentBytes := fs.Int("resident-bytes", 4096, "resident budget in bytes")
+	residentBytes := fs.Int("resident-bytes", 4096, "resident budget in bytes (800-16384: the hub's 4, 8 or 16 KB)")
 	today := fs.String("today", "", "reference date YYYY-MM-DD (default: latest active day)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -215,6 +219,7 @@ func GenerateReviewBundle(stateDir, outDir, lang string, residentBytes int, toda
 	if residentBytes <= 0 {
 		residentBytes = 4096
 	}
+	residentBytes = memsrc.ClampResidentBytes(residentBytes)
 	if lang == "" {
 		lang = "zh-Hans"
 	}
@@ -368,7 +373,8 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 		return "", err
 	}
 	var b strings.Builder
-	b.WriteString("# 新版 4 KB 常驻全文（resident-v04）\n\n")
+	fmt.Fprintf(&b, "# 新版 %s 常驻全文（resident-v04）\n\n", residentRoomLabel(residentBytes))
+	b.WriteString("> 以下编号、条目 ID 与字节标注仅用于审阅，不占用实际注入的常驻字节；每条实际注入的就是正文本身（hub 另加行首「- 」与换行）。\n\n")
 
 	totalBytes := 0
 	seenText := map[string]bool{}
@@ -421,10 +427,10 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 		key   string
 		title string
 	}{
-		{memsrc.BucketHot, "热槽（Hot Slot，0–10%）"},
-		{memsrc.BucketProfile, "第 1 段 · 关于你与防误读边界（~20%）"},
-		{memsrc.BucketPrinciple, "第 2 段 · 核心认知与决策原则（~28%）"},
-		{memsrc.BucketContract, "第 3 段 · 通用协作契约（~52%）"},
+		{memsrc.BucketHot, "热槽（0–10%）"},
+		{memsrc.BucketProfile, fmt.Sprintf("第 1 段 · 关于你与防误读边界（约 %.0f%%）", memsrc.ProfileShare*100)},
+		{memsrc.BucketPrinciple, fmt.Sprintf("第 2 段 · 核心认知与决策原则（约 %.0f%%）", memsrc.PrincipleShare*100)},
+		{memsrc.BucketContract, fmt.Sprintf("第 3 段 · 通用协作契约（约 %.0f%%）", memsrc.ContractShare*100)},
 	}
 	for _, s := range sections {
 		items := grouped[s.key]
@@ -434,12 +440,40 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 			continue
 		}
 		for i, e := range items {
-			fmt.Fprintf(&b, "%d. `[%s]` (facet=%s, rank=%d, %dB) %s\n",
-				i+1, e.ID, e.Facet, e.Rank, len(e.Text), e.Text)
+			fmt.Fprintf(&b, "%d. %s　〔%s · %s · %d 字节〕\n", i+1, e.Text, facetNameZH(e.Facet), e.ID, len(e.Text))
 		}
 		b.WriteString("\n")
 	}
 	return b.String(), nil
+}
+
+// residentRoomLabel names a resident room for a report title: "4 KB" for 4096, "1400 B" otherwise.
+func residentRoomLabel(n int) string {
+	if n%1024 == 0 {
+		return fmt.Sprintf("%d KB", n/1024)
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+// facetNameZH is a facet's short Chinese name for review reports.
+func facetNameZH(f string) string {
+	switch entry.Facet(f) {
+	case entry.Interaction:
+		return "协作"
+	case entry.Tools:
+		return "工具"
+	case entry.Judgement:
+		return "判断"
+	case entry.Workflow:
+		return "做事"
+	case entry.World:
+		return "人和事"
+	case entry.People:
+		return "人物"
+	case entry.Persona:
+		return "画像"
+	}
+	return f
 }
 
 func renderPrinciplesV04(ov *overview.State, sum *ReviewBundleSummary) string {
@@ -602,10 +636,66 @@ func renderProfileV04(st *store.State, ov *overview.State, prof *profile.Summary
 		}
 	}
 
+	// Someone else's records in the sensitive sections, people lines in the world section (and the most of any one
+	// person), and LOW_CONFIDENCE / one-off misreads anywhere in the profile.
+	raw := func(id string) *entry.Entry {
+		if st == nil {
+			return nil
+		}
+		return st.Entries[id]
+	}
+	for _, ssec := range prof.Sensitive {
+		for _, pt := range ssec.Points {
+			if e := raw(pt.ID); e != nil && e.Facet == entry.People {
+				sum.ProfileSensitivePeopleHits++
+			}
+		}
+	}
+	perPerson := map[string]int{}
+	for _, sec := range prof.Sections {
+		for _, pt := range sec.Points {
+			e := raw(pt.ID)
+			if e == nil {
+				continue
+			}
+			if entry.IsUnreliableOneOff(e) {
+				sum.ProfileLowConfidenceHits++
+			}
+			if sec.Facet != entry.World {
+				continue
+			}
+			var names []string
+			if e.Facet == entry.People {
+				names = []string{e.Person}
+			} else if strings.HasPrefix(e.Subject, "person:") {
+				names = []string{e.Subject}
+				if strings.HasPrefix(e.Target, "person:") {
+					names = append(names, e.Target)
+				}
+			}
+			if len(names) > 0 {
+				sum.ProfileWorldPeopleLines++
+			}
+			for _, n := range names {
+				perPerson[n]++
+				sum.ProfileWorldMaxPerPerson = max(sum.ProfileWorldMaxPerPerson, perPerson[n])
+			}
+		}
+	}
+	for _, ssec := range prof.Sensitive {
+		for _, pt := range ssec.Points {
+			if e := raw(pt.ID); e != nil && entry.IsUnreliableOneOff(e) {
+				sum.ProfileLowConfidenceHits++
+			}
+		}
+	}
+
 	fmt.Fprintf(&b, "- 模式：%s | 语言：%s | 日期：%s | 覆盖源条目：%d/%d\n",
 		prof.Mode, prof.Lang, prof.Day, prof.CoveredCount, prof.SourceCount)
-	fmt.Fprintf(&b, "- 红线审计：AI主管幻觉=%d | 敏感区混入工作规矩/手册=%d（emotion=%d, health=%d）\n\n",
-		sum.ProfileSupervisorHits, sum.ProfileSensitiveWorkHits, sum.ProfileEmoWorkHits, sum.ProfileHealthWorkHits)
+	fmt.Fprintf(&b, "- 红线审计：AI主管幻觉=%d | 敏感区混入工作规矩/手册=%d（emotion=%d, health=%d）| 敏感区混入他人记录=%d | 低置信/孤立误抽=%d\n",
+		sum.ProfileSupervisorHits, sum.ProfileSensitiveWorkHits, sum.ProfileEmoWorkHits, sum.ProfileHealthWorkHits,
+		sum.ProfileSensitivePeopleHits, sum.ProfileLowConfidenceHits)
+	fmt.Fprintf(&b, "- 人和事分区：他人人物卡片与他人关系 %d 条（单人最多 %d 条）\n\n", sum.ProfileWorldPeopleLines, sum.ProfileWorldMaxPerPerson)
 
 	if prof.Overview != "" {
 		b.WriteString("## 总览\n\n")

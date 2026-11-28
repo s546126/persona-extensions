@@ -22,18 +22,21 @@ const (
 	gameNewsAction     = "game-news"
 	newsPageLimit      = 5
 	backlogStatusField = "backlog_status"
+	recapAction        = "playtime-recap"
+	recapPeriodAction  = "recap-period"
 )
 
 type pageState struct {
-	Query          string `json:"query,omitempty"`
-	Sort           string `json:"sort,omitempty"`
-	RecentPage     int    `json:"recent_page,omitempty"`
-	LibraryPage    int    `json:"library_page,omitempty"`
-	WishPage       int    `json:"wishlist_page,omitempty"`
-	AppID          uint32 `json:"appid,omitempty"`
-	From           string `json:"from,omitempty"`
-	News           bool   `json:"news,omitempty"`
-	BacklogAccount string `json:"backlog_account,omitempty"`
+	Query          string      `json:"query,omitempty"`
+	Sort           string      `json:"sort,omitempty"`
+	RecentPage     int         `json:"recent_page,omitempty"`
+	LibraryPage    int         `json:"library_page,omitempty"`
+	WishPage       int         `json:"wishlist_page,omitempty"`
+	AppID          uint32      `json:"appid,omitempty"`
+	From           string      `json:"from,omitempty"`
+	News           bool        `json:"news,omitempty"`
+	BacklogAccount string      `json:"backlog_account,omitempty"`
+	Recap          recapPeriod `json:"recap,omitempty"`
 }
 
 type snapshot struct {
@@ -81,6 +84,7 @@ func (a *app) readState(r *ext.UIRequest, t *text) (pageState, error) {
 		st.RecentPage < 0 || st.RecentPage > maxGames/pageSize ||
 		st.LibraryPage < 0 || st.LibraryPage > maxGames/pageSize ||
 		st.WishPage < 0 || st.WishPage > maxWishlistItems/pageSize ||
+		(st.Recap != "" && (!slices.Contains(recapPeriods[:], st.Recap) || st.News || st.AppID != 0)) ||
 		(st.AppID != 0 && (st.News || (st.From != recentSection && st.From != librarySection))) {
 		return pageState{}, invalid(t.invalidPage)
 	}
@@ -129,9 +133,17 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		st.Sort, st.LibraryPage = order, 0
 	case "back":
-		st.AppID, st.From, st.News = 0, "", false
+		st.AppID, st.From, st.News, st.Recap = 0, "", false, ""
 	case gameNewsAction:
-		st.AppID, st.From, st.News = 0, "", true
+		st.AppID, st.From, st.News, st.Recap = 0, "", true, ""
+	case recapAction:
+		st.AppID, st.From, st.News, st.Recap = 0, "", false, recapMonth
+	case recapPeriodAction:
+		period := recapPeriod(r.Values["period"])
+		if st.Recap == "" || !slices.Contains(recapPeriods[:], period) {
+			return nil, invalid(t.invalidAction)
+		}
+		st.Recap = period
 	case "recent-next":
 		st.RecentPage++
 	case "recent-previous":
@@ -152,7 +164,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		if !ok || parseErr != nil || id == 0 || (from != recentSection && from != librarySection) {
 			return nil, invalid(t.invalidAction)
 		}
-		st.AppID, st.From, st.News = uint32(id), from, false
+		st.AppID, st.From, st.News, st.Recap = uint32(id), from, false, ""
 	}
 	view := a.page(ctx, t, st, refresh)
 	if refresh && r.Hub != nil {
@@ -174,6 +186,8 @@ func (a *app) accountPage(ctx context.Context, d *steamData, t *text, st pageSta
 	var view *wire.View
 	st.BacklogAccount = ""
 	switch {
+	case st.Recap != "":
+		view = a.recapPage(ctx, d, t, st, refresh)
 	case st.News:
 		view = a.gameNewsPage(ctx, d, t, st)
 	case st.AppID != 0:
@@ -226,7 +240,7 @@ func (a *app) overview(ctx context.Context, d *steamData, t *text, st pageState,
 	profile.Items = append(profile.Items, wire.Component{Type: wire.ComponentStatGrid, Stats: []wire.Stat{
 		{Label: t.recentTime, Value: recentValue(t, s.recent)},
 		{Label: t.owned, Value: countValue(s.library.Data)},
-	}}, button(t.refresh, "refresh"), button(t.recentNews, gameNewsAction))
+	}}, button(t.refresh, "refresh"), button(t.recentNews, gameNewsAction), button(t.recap.title, recapAction))
 	view.Search = &wire.Search{Placeholder: t.search, Value: st.Query, Action: wire.Action{ID: "search"}}
 	view.Filter = &wire.Filter{
 		Name: "order", Title: t.sort, Value: st.Sort, Action: wire.Action{ID: "sort"},
@@ -265,10 +279,96 @@ func (a *app) gameNewsPage(ctx context.Context, d *steamData, t *text, st pageSt
 	if news.Available && len(news.Updates) == 0 {
 		section.Items = append(section.Items, empty(t.noRecentNews))
 	}
+	seen := make(map[string]bool)
 	for _, warning := range news.Warnings {
-		section.Footer = joinText(section.Footer, warning.Message)
+		if !seen[warning.Message] {
+			section.Footer = joinText(section.Footer, warning.Message)
+			seen[warning.Message] = true
+		}
 	}
 	return &wire.View{Title: t.recentNews, State: ext.EncodeState(st), Sections: []wire.Section{section}}
+}
+
+func (a *app) recapPage(ctx context.Context, d *steamData, t *text, st pageState, refresh bool) *wire.View {
+	r := a.readPlaytimeRecap(ctx, d, t, st.Recap, defaultRecapTop, refresh)
+	choices := make([]wire.Choice, 0, len(recapPeriods))
+	for _, period := range recapPeriods {
+		choices = append(choices, wire.Choice{Value: string(period), Title: t.recap.periods[period]})
+	}
+	view := &wire.View{Title: t.recap.title, State: ext.EncodeState(st), Filter: &wire.Filter{
+		Name: "period", Title: t.recap.period, Choices: choices, Value: string(st.Recap), Action: wire.Action{ID: recapPeriodAction},
+	}}
+	summary := wire.Section{Items: []wire.Component{button(t.back, "back"), button(t.refresh, "refresh")}, Footer: r.Hint}
+	var stats []wire.Stat
+	if library := r.Library; library != nil {
+		if r.Truncated {
+			summary.Footer = joinText(summary.Footer, t.message(problemPartialLibrary, false))
+		}
+		stats = append(stats,
+			wire.Stat{Label: t.owned, Value: strconv.FormatUint(uint64(library.OwnedGames), 10)},
+			wire.Stat{Label: t.totalTime, Value: t.playtime(library.TotalMinutes)},
+			wire.Stat{Label: t.backlog.bucketTitle(neverPlayed), Value: strconv.FormatUint(uint64(library.UnplayedGames), 10)})
+	}
+	if r.Recent != nil {
+		stats = append(stats, wire.Stat{Label: t.recentTime, Value: t.playtime(r.Recent.Playtime)})
+	}
+	if len(stats) > 0 {
+		summary.Items = append(summary.Items, wire.Component{Type: wire.ComponentStatGrid, Stats: stats})
+	}
+	for _, warning := range r.Warnings {
+		summary.Footer = joinText(summary.Footer, warning.Message)
+	}
+	view.Sections = []wire.Section{summary}
+	if delta := r.Delta; delta != nil {
+		window := fmt.Sprintf(t.recap.window, delta.From.UTC().Format(time.DateOnly), delta.To.UTC().Format(time.DateOnly))
+		section := wire.Section{Title: t.recap.topGames, Footer: window, Items: []wire.Component{{Type: wire.ComponentStatGrid, Stats: []wire.Stat{
+			{Label: t.recap.addedTime, Value: t.playtime(delta.PlaytimeMinutes)},
+			{Label: t.recap.newGames, Value: strconv.Itoa(delta.NewGames)},
+		}}}}
+		addRecapGames(&section, t, delta.TopGames)
+		view.Sections = append(view.Sections, section)
+		if p := delta.Progress; p != nil {
+			stats := make([]wire.Stat, 0, len(recapBuckets)+1)
+			for _, bucket := range recapBuckets {
+				label := t.backlog.statuses[BacklogStatus(bucket)]
+				if bucket == recapBacklog {
+					label = t.recap.backlog
+				}
+				stats = append(stats, wire.Stat{Label: label, Value: fmt.Sprintf("%+d", p.CountChanges[bucket]),
+					Detail: fmt.Sprintf(t.recap.movedInto, p.MovedInto[bucket])})
+			}
+			if p.Rate != nil {
+				stats = append(stats, wire.Stat{Label: t.recap.consumption, Value: fmt.Sprintf("%.0f%%", *p.Rate*100),
+					Detail: fmt.Sprintf("%d / %d", p.Consumed, p.AtStart)})
+			}
+			view.Sections = append(view.Sections, wire.Section{Title: t.recap.progress,
+				Items: []wire.Component{{Type: wire.ComponentStatGrid, Stats: stats}}})
+		}
+	} else if r.Recent != nil {
+		section := wire.Section{Title: t.recent}
+		addRecapGames(&section, t, r.Recent.TopGames)
+		if len(section.Items) == 0 {
+			section.Items = []wire.Component{empty(t.noRecent)}
+		}
+		view.Sections = append(view.Sections, section)
+	}
+	if r.Annotations != nil {
+		stats := make([]wire.Stat, 0, len(backlogStatuses))
+		for _, status := range backlogStatuses {
+			stats = append(stats, wire.Stat{Label: t.backlog.statuses[status], Value: strconv.Itoa(r.Annotations[status])})
+		}
+		view.Sections = append(view.Sections, wire.Section{Title: t.recap.annotations,
+			Items: []wire.Component{{Type: wire.ComponentStatGrid, Stats: stats}}})
+	}
+	return view
+}
+
+func addRecapGames(section *wire.Section, t *text, games []recapGame) {
+	for _, game := range games {
+		section.Items = append(section.Items, wire.Component{
+			Type: wire.ComponentRow, Key: appIDText(game.AppID), Title: game.Name, Value: t.playtime(uint64(game.Minutes)),
+		})
+	}
 }
 
 func (a *app) card(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {

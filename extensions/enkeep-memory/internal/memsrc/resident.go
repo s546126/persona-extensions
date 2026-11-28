@@ -19,11 +19,14 @@ import (
 //   - Bucket 0 (Hot Slot): dynamic 0%–10% (at most HotSlotMaxBytes=400 B and HotSlotMax=2 entries) for genuinely
 //     user-owned Pinned entries and active 7-day de-shelled non-ops Fast-Path corrections. Unused hot-slot bytes
 //     return to the three main sections.
-//   - Section 1 (Profile Core, ~20%): user identity, stage, constraints, and anti-misread boundaries (A1).
-//   - Section 2 (Cognitive Principles, ~28%): reconciled cross-scene decision/thinking principles with Poles/Exception (A2).
-//   - Section 3 (Universal Contracts, ~52%): cross-tool universal AI collaboration rules (B), enforcing polarity balance
-//     (check <= 45%, act <= 35%, communicate <= 30%, route <= 30%) and a strict cap of HardContractLimit=3 【硬】 lines
+//   - Section 1 (Profile Core, ~22%): user identity, stage, constraints, and anti-misread boundaries (A1).
+//   - Section 2 (Cognitive Principles, ~43%): reconciled cross-scene decision/thinking principles with Poles/Exception (A2).
+//   - Section 3 (Universal Contracts, ~35%): cross-tool universal AI collaboration rules (B), enforcing polarity balance
+//     (check <= 45%, act <= 35%, communicate <= 30%, route <= 30%) and a strict cap of HardContractLimit=3 [硬] lines
 //     (remaining contracts stay neutral).
+//   - Unused room flows downstream: profile -> principles -> contracts, then back up into L1 principles and profile.
+//     An L1 profile or principle section with lines left over may grow to ProfileShareMax / PrincipleShareMax first.
+//   - Line tags are short ([画] / [原] / [硬], 5 bytes) so the room goes to content, not labels.
 //
 // Hard invariants enforced in code:
 //   - 0 ops_runbook entries (entry.IsOpsRunbookEntry) in global standing.
@@ -42,12 +45,23 @@ const (
 	HotSlotMax      = 2
 	HotSlotTTLDays  = 7
 
-	// Main section shares of the room left after Bucket 0 (0.20 + 0.28 + 0.52 = 1.00).
-	ProfileShare   = 0.20
-	PrincipleShare = 0.28
-	ContractShare  = 0.52
+	// Main section shares of the room left after Bucket 0 (0.22 + 0.43 + 0.35 = 1.00): in 4 KB the six profile-core
+	// lines and the core principles fit whole, the contracts keep the strongest universal rules.
+	ProfileShare   = 0.22
+	PrincipleShare = 0.43
+	ContractShare  = 0.35
+	// ProfileShareMax and PrincipleShareMax are how far an L1 profile or principle section may grow past its share,
+	// taking room from the contracts, while it still has lines that do not fit (a sixth profile-core line, the tenth
+	// principle): the contracts keep at least 1 - 0.25 - 0.47 = 28%.
+	ProfileShareMax   = 0.25
+	PrincipleShareMax = 0.47
 
-	// HardContractLimit caps how many contracts receive the 【硬】 prefix in Section 3 (v0.4.0 §1.7).
+	// MinResidentBytes and MaxResidentBytes bound the resident_bytes setting (persona-extension.json): the hub's
+	// standing room is 4, 8 or 16 KB.
+	MinResidentBytes = 800
+	MaxResidentBytes = 16384
+
+	// HardContractLimit caps how many contracts receive the [硬] prefix in Section 3 (v0.4.0 §1.7).
 	HardContractLimit = 3
 
 	// PolarityShare is the default cap for an unspecified contract polarity; specific polarities use polarityShareOf
@@ -65,14 +79,37 @@ const (
 
 	// sameRule is the bigram Jaccard threshold above which two standing lines are treated as duplicates.
 	sameRule = 0.45
+	// sameColdRule / sameColdShared catch near-duplicate cold-start L0 lines (several sightings of one rule worded
+	// apart, e.g. "逐条对照验收标准给证据"): the shorter line's bigrams are mostly in the longer one (overlap) and they
+	// share enough bigrams that a short generic line is not mistaken for a copy of a long one on another subject.
+	sameColdRule   = 0.45
+	sameColdShared = 12
+	// coldDedupTop is how many of a cold-start section's best lines are clustered (more never fit in 16 KB).
+	coldDedupTop = 240
 	// rankHot is the first hot-slot rank (995..994); rankStand is the first main-section rank (989 down).
 	rankHot   = 995
 	rankStand = 989
 	// residentOverhead is what the hub adds to each line ("- " and a line end).
 	residentOverhead = 3
 
-	hardTagPrefix = "【硬】"
+	hardTagPrefix = "[硬]"
 )
+
+// Short section tags prepended to standing lines (5 bytes each instead of 12 for 【画像】/【原则】/【硬】).
+const (
+	ProfileTag   = "[画]"
+	PrincipleTag = "[原]"
+	HardTag      = hardTagPrefix
+)
+
+// ClampResidentBytes bounds a resident_bytes setting to [MinResidentBytes, MaxResidentBytes]; 0 or less means the
+// default ResidentBytes.
+func ClampResidentBytes(n int) int {
+	if n <= 0 {
+		return ResidentBytes
+	}
+	return max(MinResidentBytes, min(MaxResidentBytes, n))
+}
 
 // Bucket names for three-section + hot-slot standing selection.
 const (
@@ -130,18 +167,28 @@ func polarityShareOf(pol string) float64 {
 }
 
 // StandingPrefix returns the lightweight semantic tier tag prepended to standing lines:
-//   - BucketProfile: "【画像】"
-//   - BucketPrinciple: "【原则】"
-//   - BucketContract: "" (the <=3 【硬】 tags are applied deterministically inside ResidentWithin)
+//   - BucketProfile: ProfileTag "[画]"
+//   - BucketPrinciple: PrincipleTag "[原]"
+//   - BucketContract: "" (the <=3 [硬] tags are applied deterministically inside ResidentWithin)
 func StandingPrefix(bucket string, hard bool, polarity string) string {
 	switch bucket {
 	case BucketProfile:
-		return "【画像】"
+		return ProfileTag
 	case BucketPrinciple:
-		return "【原则】"
+		return PrincipleTag
 	default:
 		return ""
 	}
+}
+
+// StripStandingTag removes a leading section tag (current or pre-0.4.1 form) from a standing line.
+func StripStandingTag(s string) string {
+	for _, t := range []string{ProfileTag, PrincipleTag, HardTag, "【画像】", "【原则】", "【硬】"} {
+		if rest, ok := strings.CutPrefix(s, t); ok {
+			return rest
+		}
+	}
+	return s
 }
 
 func (c Candidate) bucket() string {
@@ -223,12 +270,26 @@ func ResidentWithin(cands []Candidate, total, most int) []Candidate {
 	sortPrinciples(profPool)
 	sortPrinciples(princPool)
 	sortContracts(contPool)
+	if !profIsL1 {
+		profPool = dedupCold(profPool)
+	}
+	if !princIsL1 {
+		princPool = dedupCold(princPool)
+	}
+	if !contIsL1 {
+		contPool = dedupCold(contPool)
+	}
 
 	taken := map[string]bool{}
 	var allChosen []Candidate
 	alike := func(c Candidate) bool {
 		for _, x := range allChosen {
 			if norm.Jaccard(x.Text, c.Text) >= sameRule {
+				return true
+			}
+			// Cold-start L0 lines are raw sightings: the same rule worded apart slips under sameRule, so two L0 lines
+			// in one section are also the same when the shorter is mostly inside the longer.
+			if !c.L1 && !x.L1 && x.Bucket == c.Bucket && coldAlike(x.Text, c.Text) {
 				return true
 			}
 		}
@@ -257,7 +318,7 @@ func ResidentWithin(cands []Candidate, total, most int) []Candidate {
 		allChosen = append(allChosen, c)
 	}
 
-	// Step 2: Allocate remaining room across the three main sections (~20% Profile, ~28% Principles, ~52% Contracts).
+	// Step 2: Allocate remaining room across the three main sections (~22% Profile, ~43% Principles, ~35% Contracts).
 	rem := total - hotUsed
 	profBase := int(float64(rem) * ProfileShare)
 	princBase := int(float64(rem) * PrincipleShare)
@@ -358,14 +419,24 @@ func ResidentWithin(cands []Candidate, total, most int) []Candidate {
 		}
 	}
 
-	// Pass A: fill each section within its nominal budget.
+	// Pass A: fill each section within its nominal budget; unused room flows downstream profile -> principles ->
+	// contracts (never from an L1 section into L0 fragments, except during a pure cold start when all are L0).
 	fillProfile(profBase)
-	fillPrinciples(princBase, false)
-
-	// Unused profile/principle room flows into contracts if contracts are L1 (or during pure cold-start when all
-	// sections are L0). Never spill L1 leftover into L0 fragments.
 	unusedProf := max(0, profBase-profUsed)
-	unusedPrinc := max(0, princBase-princUsed)
+	if profIsL1 {
+		fillProfile(int(float64(rem) * ProfileShareMax)) // elastic: the rest of the profile core, from the contracts
+	}
+	princEff := princBase
+	if princIsL1 || !profIsL1 {
+		princEff += unusedProf
+		unusedProf = 0
+	}
+	fillPrinciples(princEff, false)
+	unusedPrinc := max(0, princEff-princUsed)
+	if princIsL1 {
+		fillPrinciples(max(princEff, int(float64(rem)*PrincipleShareMax)), false) // elastic, from the contracts
+		unusedPrinc = 0
+	}
 	contEff := contBase
 	if contIsL1 || (!profIsL1 && !princIsL1) {
 		contEff += unusedProf + unusedPrinc
@@ -412,6 +483,64 @@ func ResidentWithin(cands []Candidate, total, most int) []Candidate {
 		}
 	}
 	return out
+}
+
+// coldAlike says whether two cold-start lines state the same rule: Jaccard misses a short sighting inside a longer
+// one, so overlap (|A∩B| / min) counts, with enough shared bigrams that a short line is not a copy by chance. The
+// section tags and the "原则：" lead do not count.
+func coldAlike(a, b string) bool {
+	a, b = coldCore(a), coldCore(b)
+	return norm.Shared(a, b) >= sameColdShared && norm.Overlap(a, b) >= sameColdRule
+}
+
+// dedupCold keeps the best line of each cluster of near-duplicate cold-start lines in a sorted pool. Clusters are
+// single-linkage over coldAlike, so a third wording that is close only to the second still joins the first's cluster
+// (three sightings of "逐条对照验收标准给证据" stand as one line).
+func dedupCold(pool []Candidate) []Candidate {
+	n := min(len(pool), coldDedupTop)
+	if n < 2 {
+		return pool
+	}
+	parent := make([]int, n)
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			if coldAlike(pool[i].Text, pool[j].Text) {
+				ri, rj := find(i), find(j)
+				if ri != rj {
+					parent[max(ri, rj)] = min(ri, rj) // the better-ranked line leads the cluster
+				}
+			}
+		}
+	}
+	out := make([]Candidate, 0, len(pool))
+	for i := 0; i < n; i++ {
+		if find(i) == i {
+			out = append(out, pool[i])
+		}
+	}
+	return append(out, pool[n:]...)
+}
+
+func coldCore(s string) string {
+	s = StripStandingTag(strings.TrimSpace(s))
+	s = strings.TrimPrefix(s, "原则：")
+	for _, lead := range []string{"用户要求助手", "用户要求", "用户希望助手", "用户希望", "助手应", "助手"} {
+		if rest, ok := strings.CutPrefix(s, lead); ok {
+			return rest
+		}
+	}
+	return s
 }
 
 func sortHot(cs []Candidate) {

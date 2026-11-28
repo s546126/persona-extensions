@@ -23,10 +23,24 @@ type text struct {
 
 	recentNews, noRecentNews string
 	backlog                  backlogText
+	recap                    recapText
+	memory                   memoryText
 
 	inboxPrice, inboxGiveaway, inboxRelease, inboxDemo, inboxRoundup string
 	inboxGiveawayHint, inboxReleaseHint, inboxDemoHint               string
 	inboxThreshold, inboxTarget, inboxNewLow, inboxUnits, inboxTop   string
+}
+
+type recapText struct {
+	title, period, invalidArgs, noBaseline, window string
+	topGames, addedTime, newGames, annotations     string
+	progress, backlog, movedInto, consumption      string
+	periods                                        map[recapPeriod]string
+}
+
+type memoryText struct {
+	favorites, genres, backlog, annotations, playing, recent string
+	milestone, completed, achievements, hours, separator     string
 }
 
 type backlogText struct {
@@ -60,6 +74,20 @@ var english = text{
 	achievements: "Achievements", noAchievements: "Steam lists no achievements for this game.", unlocked: "%d of %d unlocked",
 	game: "App %d", playing: "Playing %s", unknown: "Status unavailable",
 	recentNews: "Recent official updates", noRecentNews: "No recent official game updates were found.",
+	recap: recapText{
+		title: "Playtime recap", period: "Period", invalidArgs: "Use month, quarter, year or all, with top_n from 1 to 20.",
+		noBaseline: "This period needs a start snapshot. Open the recap on another day to track playtime changes automatically.",
+		window:     "Observed %s through %s (UTC).", topGames: "Most played in this period", addedTime: "Playtime added", newGames: "New in library",
+		annotations: "Current local annotations", progress: "Backlog progress", backlog: "Backlog", movedInto: "%d moved in", consumption: "Backlog started or completed",
+		periods: map[recapPeriod]string{recapMonth: "Monthly", recapQuarter: "Quarterly", recapYear: "Yearly", recapAll: "All observed history"},
+	},
+	memory: memoryText{
+		favorites: "Most-played Steam games include %s.", genres: "Frequently played Steam genres include %s, based on available Store details.",
+		backlog:     "Visible Steam library has %d waiting or paused, %d marked playing, %d completed, and %d dropped.",
+		annotations: "Local Steam annotations mark %d waiting or paused, %d playing, %d completed, and %d dropped.",
+		playing:     "Currently working through %s on Steam.", recent: "Recently played %s on Steam.",
+		milestone: "Steam milestone for %s (%s).", completed: "marked completed", achievements: "%d/%d achievements unlocked", hours: "%d h played", separator: ", ",
+	},
 	inboxPrice: "Wishlist price alert", inboxGiveaway: "100% off", inboxRelease: "Released on Steam", inboxDemo: "Demo available",
 	inboxRoundup: "Top wishlist deals", inboxGiveawayHint: "Check the Steam Store page to claim this limited-time offer.",
 	inboxReleaseHint: "This wishlist game has launched. Open its Steam Store page for details.", inboxDemoHint: "Open the Steam Store page to try the free demo.",
@@ -103,6 +131,7 @@ var english = text{
 		problemAuthDelete:         "Persona could not delete the saved Steam sign-in. Try signing out again.",
 		problemAuthClearing:       "Persona is clearing the saved Steam sign-in. Try again in a moment.",
 		problemBacklogStore:       "Persona could not access your local Steam backlog.",
+		problemRecapStore:         "Persona could not access your local playtime history.",
 
 		problemGlobalAchievements:     "Steam did not share global unlock rates for this game.",
 		problemAchievementSchema:      "Steam did not share this game's achievement names and hidden status.",
@@ -170,6 +199,20 @@ var chinese = text{
 	achievements: "成就", noAchievements: "Steam 没有列出这款游戏的成就。", unlocked: "已解锁 %d / %d",
 	game: "应用 %d", playing: "游戏中 · %s", unknown: "状态不可用",
 	recentNews: "近期官方更新", noRecentNews: "暂未找到近期官方游戏更新。",
+	recap: recapText{
+		title: "游玩复盘", period: "周期", invalidArgs: "请选择 month、quarter、year 或 all，top_n 可设为 1–20。",
+		noBaseline: "尚缺可对比的周期起点快照。改天再打开复盘，即可自动累计游玩增量。",
+		window:     "观测区间为 %s 至 %s（UTC）。", topGames: "周期内最常玩", addedTime: "新增游玩时长", newGames: "新入库游戏",
+		annotations: "当前本机标注", progress: "吃灰消化与进度", backlog: "待消化", movedInto: "%d 款移入", consumption: "吃灰消化率",
+		periods: map[recapPeriod]string{recapMonth: "月度", recapQuarter: "季度", recapYear: "年度", recapAll: "全部"},
+	},
+	memory: memoryText{
+		favorites: "Steam 最常玩的游戏包括 %s。", genres: "根据已有商店资料，Steam 常玩的游戏类型包括 %s。",
+		backlog:     "可见 Steam 游戏库中有 %d 款待玩或暂停、%d 款标注为正在推进、%d 款已通关、%d 款已搁置。",
+		annotations: "Steam 本机标注中有 %d 款待玩或暂停、%d 款正在推进、%d 款已通关、%d 款已搁置。",
+		playing:     "正在推进 Steam 游戏《%s》。", recent: "近两周玩过 Steam 游戏《%s》。",
+		milestone: "Steam 游戏《%s》的里程碑（%s）。", completed: "已标注通关", achievements: "已解锁 %d/%d 项成就", hours: "已玩 %d 小时", separator: "、",
+	},
 	inboxPrice: "愿望单价格提醒", inboxGiveaway: "喜加一", inboxRelease: "Steam 已发售", inboxDemo: "免费试玩已开放",
 	inboxRoundup: "愿望单大促精选", inboxGiveawayHint: "前往 Steam 商店页面查看并领取限时免费优惠。",
 	inboxReleaseHint: "这款愿望单游戏已发售，可前往 Steam 商店查看。", inboxDemoHint: "前往 Steam 商店页面下载免费试玩。",
@@ -213,6 +256,7 @@ var chinese = text{
 		problemAuthDelete:         "Persona 无法删除已保存的 Steam 登录，请重试登出。",
 		problemAuthClearing:       "Persona 正在清除已保存的 Steam 登录，请稍后重试。",
 		problemBacklogStore:       "Persona 无法访问本机 Steam 游戏标注。",
+		problemRecapStore:         "Persona 无法访问本机 Steam 游玩历史。",
 
 		problemGlobalAchievements:     "Steam 未共享这款游戏的全球成就达成率。",
 		problemAchievementSchema:      "Steam 未共享这款游戏的成就名称和隐藏状态。",

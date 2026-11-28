@@ -33,6 +33,7 @@ type steamData struct {
 	friendList  *cacheSlot[friendRoster]
 	friendState *cacheSlot[[]player]
 	stores      steamStores
+	memory      memoryObservations
 	lastAccount atomic.Pointer[reading[player]]
 	inbox       atomic.Pointer[[]wishlistDelivery]
 }
@@ -149,6 +150,8 @@ func (d *steamData) clearLocked() {
 		d.friendState.clear()
 	}
 	d.stores.clearMemory()
+	d.memory.genres.clearMemory()
+	d.memory.achievements.clearMemory()
 	d.inbox.Store(nil)
 }
 
@@ -293,6 +296,7 @@ func (d *steamData) achievements(ctx context.Context, p reading[player], appID u
 		return reading[achievementProgress]{Issue: issue}
 	}
 	progress, issue := c.achievements(ctx, id, appID, language)
+	d.rememberAchievement(id, progress)
 	return reading[achievementProgress]{Data: progress, Issue: issue}
 }
 

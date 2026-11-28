@@ -52,7 +52,12 @@ func (a *app) secrets(ctx context.Context, method string, raw json.RawMessage) (
 		if !ok || a.validate(ctx, in.Reference) != nil {
 			return nil, &ext.Error{Code: "invalid", Message: "not a 1Password reference (op://vault/item/[section/]field)"}
 		}
-		title, detail := a.describe(ctx, ref)
+		// Words for a page or a card never have the user authorize op (quiet.go): Persona keeps the words it got, and
+		// shows the reference itself until op can answer without asking.
+		title, detail, err := a.describe(withQuiet(ctx), ref)
+		if err != nil {
+			return nil, err
+		}
 		return wire.SecretsDescribeResult{Title: title, Detail: detail}, nil
 	case "resolve":
 		var in wire.SecretsResolveParams
@@ -61,6 +66,14 @@ func (a *app) secrets(ctx context.Context, method string, raw json.RawMessage) (
 		}
 		ctx, cancel := context.WithTimeout(ctx, secretTimeout)
 		defer cancel()
+		var hint struct {
+			// Quiet (Persona's SecretsResolveParams.quiet, #17636): Persona keeps an earlier value and uses it if this
+			// fails, so op must not prompt the user (quiet.go).
+			Quiet bool `json:"quiet"`
+		}
+		if json.Unmarshal(raw, &hint) == nil && hint.Quiet {
+			ctx = withQuiet(ctx)
+		}
 		value, err := a.resolve(ctx, in.Reference)
 		if err != nil {
 			return nil, err
@@ -122,16 +135,27 @@ func parseReference(s string) (reference, bool) {
 
 // describe names what a reference points at for people: "item › field", and the vault alone as the detail. The names
 // come from the item as 1Password has it (scrubbed of every value, as the tools' are), or from the reference itself when
-// it cannot be looked up (not signed in, not found, no answer): Persona shows these, it never decides anything by them.
-func (a *app) describe(ctx context.Context, r reference) (title, detail string) {
+// it cannot be found (not found, more than one, an error of 1Password's): Persona shows these, it never decides anything
+// by them. When op on the computer would have to ask the user first (quiet.go), it answers not_signed_in instead, so
+// Persona keeps no words made from the reference alone and asks again later.
+func (a *app) describe(ctx context.Context, r reference) (title, detail string, err error) {
 	title, detail = joinNames(r.item, r.section, r.field), r.vault
-	if vault, item, section, field, ok := a.lookup(ctx, r); ok {
+	vault, item, section, field, ok, err := a.lookup(ctx, r)
+	a.mu.Lock()
+	token, t := a.token, textsFor(a.locale)
+	onComputer := a.machine != ""
+	a.mu.Unlock()
+	if err != nil && onComputer && needsUser(err) {
+		title, guide, _ := opWords(t, err)
+		if title == "" {
+			title, guide = t.opLocked, t.opLockedGuide
+		}
+		return "", "", &ext.Error{Code: "not_signed_in", Message: title + ". " + guide}
+	}
+	if ok {
 		title, detail = joinNames(item, section, field), vault
 	}
-	a.mu.Lock()
-	token := a.token
-	a.mu.Unlock()
-	return oneLine(redact(title, token), describeTitleMost), oneLine(redact(detail, token), describeDetailMost)
+	return oneLine(redact(title, token), describeTitleMost), oneLine(redact(detail, token), describeDetailMost), nil
 }
 
 // joinNames is "item › field", or "item › section › field" when the section is needed to tell the field from another.
@@ -145,30 +169,30 @@ func joinNames(item, section, field string) string {
 // lookup finds a reference's vault, item and field by ID or by name (case aside; a name must match one only), and the
 // field's section when another field of the item has its name (two "password" fields in two sections read alike
 // otherwise on the card the user approves).
-func (a *app) lookup(ctx context.Context, r reference) (vault, item, section, field string, ok bool) {
+func (a *app) lookup(ctx context.Context, r reference) (vault, item, section, field string, ok bool, err error) {
 	// Through the cache (cache.go): a name the kept answers lack is looked up again once, as it may be new.
 	vaults, err := a.vaultsHaving(ctx, func(v vaultInfo) bool {
 		return v.ID == r.vault || strings.EqualFold(strings.TrimSpace(v.Title), r.vault)
 	})
 	if err != nil {
-		return "", "", "", "", false
+		return "", "", "", "", false, err
 	}
 	v, found := pick(vaults, r.vault, func(v vaultInfo) (string, string) { return v.ID, v.Title })
 	if !found {
-		return "", "", "", "", false
+		return "", "", "", "", false, nil
 	}
 	items, err := a.itemsHaving(ctx, v.ID, func(it itemInfo) bool {
 		return it.ID == r.item || strings.EqualFold(strings.TrimSpace(it.Title), r.item)
 	})
 	if err != nil {
-		return "", "", "", "", false
+		return "", "", "", "", false, err
 	}
 	it, found := pick(items, r.item, func(it itemInfo) (string, string) { return it.ID, it.Title })
 	if !found {
-		return "", "", "", "", false
+		return "", "", "", "", false, nil
 	}
 	// Names compare by their keys (nameKey): the kept names may be scrubbed of a value the reference spells out.
-	sectionKey, fieldKey := nameKey(r.section), nameKey(r.field)
+	sectionKey, fieldKey := a.metaNameKey(r.section), a.metaNameKey(r.field)
 	inSection := func(f fieldInfo) bool {
 		return r.section == "" || f.SectionID != "" && (f.SectionID == r.section || f.SectionKey == sectionKey)
 	}
@@ -176,7 +200,7 @@ func (a *app) lookup(ctx context.Context, r reference) (vault, item, section, fi
 		return inSection(f) && (f.ID == r.field || f.TitleKey == fieldKey)
 	})
 	if err != nil {
-		return "", "", "", "", false
+		return "", "", "", "", false, err
 	}
 	match := -1
 	for i, f := range d.Fields {
@@ -189,13 +213,13 @@ func (a *app) lookup(ctx context.Context, r reference) (vault, item, section, fi
 		}
 		if f.TitleKey == fieldKey {
 			if match >= 0 {
-				return "", "", "", "", false // two fields of that name: 1Password would not resolve it either
+				return "", "", "", "", false, nil // two fields of that name: 1Password would not resolve it either
 			}
 			match = i
 		}
 	}
 	if match < 0 {
-		return "", "", "", "", false
+		return "", "", "", "", false, nil
 	}
 	named := 0
 	for _, f := range d.Fields {
@@ -206,7 +230,7 @@ func (a *app) lookup(ctx context.Context, r reference) (vault, item, section, fi
 	if named > 1 {
 		section = d.Fields[match].Section
 	}
-	return clip(redact(v.Title, ""), describeDetailMost), d.Title, section, d.Fields[match].Title, true
+	return clip(redact(v.Title, ""), describeDetailMost), d.Title, section, d.Fields[match].Title, true, nil
 }
 
 // pick is the one entry whose ID is want, else the only one whose name is want (case aside).

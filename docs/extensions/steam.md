@@ -2,7 +2,7 @@
 
 [Documentation](../README.md) · [Source](../../extensions/steam/README.md)
 
-Steam researches games in the Store and reads player status, playtime, library, achievements, official game updates and wishlist prices. Open **Personal › Steam** to search the library, sort it by lifetime playtime or name and review your backlog. Game details show achievement progress, local annotations and a link to the Steam Store. **Recent official updates** loads up to five dated headlines with links to their Steam announcements when you open it. The Overview card opens the main Steam page.
+Steam 0.3.0 researches games in the Store and reads player status, playtime, library, achievements, official game updates and wishlist prices. Open **Personal › Steam** to search and sort the library, review the backlog, or open **Playtime recap**. Game details show achievement progress, local annotations and a link to the Steam Store. **Recent official updates** loads up to five dated Steam announcements when you open it. The Overview card opens the main Steam page. Friends Radar, wishlist alerts and gaming profile memory are optional.
 
 ## Sign in with Steam Mobile QR
 
@@ -10,7 +10,7 @@ Steam researches games in the Store and reads player status, playtime, library, 
 2. Open **Settings › Extensions › Steam** and select **Sign In**. New installations use QR by default. If you already have a Steam player ID and Web API key, select **Steam Mobile QR** as the sign-in method and save before signing in.
 3. Open Steam Guard in the Steam Mobile App, scan the QR code and approve the sign-in on your phone. The extension reads the SteamID of the account you approved. A pending scan expires after five minutes. Start again if the code expires or Steam ends the request. [Steam Guard Mobile Authenticator](https://help.steampowered.com/faqs/view/7EFD-3CAE-64D3-1C31)
 
-QR sign-in can read the signed-in account's private library and wishlist when Steam shares them. Each dataset can be unavailable independently. Presence shows as unknown when Steam omits it. An ambiguous wishlist reply shows as unavailable, and an explicitly empty wishlist shows as empty.
+QR sign-in can read the signed-in account's private library and wishlist when Steam shares them. Each dataset can be unavailable independently. Presence shows as unknown when Steam omits it. An ambiguous wishlist reply shows as unavailable, and an explicitly empty wishlist shows as empty. Remote account data and observations stay in the signed-in session's memory. The Hub encrypts the refresh token. Signing out clears the session and preserves explicit local annotations.
 
 ## Use a Web API key
 
@@ -21,6 +21,8 @@ Web API key mode uses read-only calls for publicly visible data. Set the profile
 In either mode, set **Store country or region** to a two-letter ISO 3166-1 alpha-2 code for Store prices, currency and research budgets. The default is `US`. [ISO 3166 country codes](https://www.iso.org/iso-3166-country-codes.html)
 
 ## Assistant tools
+
+The extension advertises these tools through its Steam connector, including to coding Agents. With `memory_sources` routing, Persona uses the curated gaming profile for recall and withholds the extension's connector reads and data-directory skill from ordinary assistant conversations. The `memory_export_enabled` setting controls what the profile shares. The navigation page provides the playtime recap and other account views. [Persona memory source routing](https://github.com/nwverse/persona/blob/main/docs/extensions/extensions.md#memory-sources)
 
 | Tool | Result |
 | --- | --- |
@@ -35,6 +37,12 @@ In either mode, set **Store country or region** to a two-letter ISO 3166-1 alpha
 | `steam_backlog_summary` | Library counts by playtime, activity and local status, with optional paged titles. |
 | `steam_backlog_mark` | Saves or clears one game's local annotation and returns the current annotation. |
 | `steam_tonight_pick` | Ranked owned games with a short reason for each pick. |
+| `steam_playtime_recap` | Period playtime, top games, new library entries and local progress changes. |
+| `steam_store_tags` | Localized Store tags and IDs when game research is enabled. |
+| `steam_store_search` | Store games filtered by tags, price, language or platform when game research is enabled. |
+| `steam_game_details` | Store details, Deck compatibility, prices and review summaries when game research is enabled. |
+| `steam_friends_radar` | Friends' visible online and in-game activity when Friends Radar is enabled. |
+| `steam_coop_overlap` | Shared games for up to five selected friends when Friends Radar is enabled. |
 
 The recent games, library, wishlist and backlog list results accept an `offset` from 0 through 20,000 and a `limit` from 1 through 50, with 20 items by default. Continue with `next_offset` using the same filters and sort. Playtime is returned in minutes. An unavailable dataset reports a reason. A partial or cached result carries a warning when a request fails.
 
@@ -63,6 +71,29 @@ The recent games, library, wishlist and backlog list results accept an `offset` 
 `steam_tonight_pick` accepts `available_minutes` from 1 to 1,440 (default 60) and a `mood` of `quick_session`, `continue_playing`, `clear_backlog`, `hidden_gem` or `any` (default). Quick picks favor games with recorded playtime within your budget. Continuing favors manually marked or recently active games. Clearing the backlog favors queued and unopened titles. Hidden gems favor games you tried briefly and haven't played in the last two weeks. The ranking uses aggregate playtime as a heuristic for time fit.
 
 Filter tonight's candidates by an exact local `tag` or a title substring in `query`. Both ignore case and surrounding whitespace. The result defaults to five candidates, with a `limit` of 1 to 20. Set `include_completed: true` to consider completed games. Dropped games stay excluded.
+
+## Playtime recap
+
+Open **Personal › Steam › Playtime recap** to switch between **Monthly**, **Quarterly**, **Yearly** and **All observed history**. Only the recap page and `steam_playtime_recap` load the detailed history. The tool accepts `period` (`month`, `quarter`, `year`, or `all`, default `month`) and `top_n` (1–20, default 5).
+
+Calendar periods begin at midnight UTC. The recap compares the first retained observation in the selected period with the current complete library observation. `all` starts at the earliest retained observation. The tool includes the actual `from` and `to` timestamps, so an observation that starts late in the period shows the shorter coverage. Its playtime and ranking use positive per-game minute differences for games in the current library. A newly visible AppID counts as a new library entry. Removals and downward corrections never make playtime negative.
+
+With local annotations available at both ends, the recap reports net counts and games that moved into `completed`, `playing`, `backlog` or `dropped`. The backlog includes games marked unplayed, queued or paused and unmarked games with zero lifetime minutes. The backlog consumption rate is the share of games in that starting group that gained playtime or moved to playing or completed. The rate is null when the starting group is empty. The recap compares observed states at the two endpoints.
+
+Until there is a detailed baseline from an earlier UTC day, you see the current library, two weeks of recent playtime and current local annotation counts. Reopen the recap on another day to track deltas automatically. Older aggregate playtime files remain readable. The detailed observations begin with a complete recap read. The first complete observation each UTC day is eligible to save. The store retains each sampled month's first observation and the latest day, within a 400-day window. Web API key mode writes atomically to `steam-store-v1/playtime-recap.json`. QR mode saves no detail to disk and clears the history on sign-out.
+
+## Gaming profile memory
+
+In **Settings › Extensions › Steam**, enable **Export gaming profile to assistant memory** and select the dimensions Persona may read. The `steam-gaming-profile` memory source is read-only and makes zero outbound calls. It uses already observed games from the configured Web API key account's bounded cache or the active QR session. It can use explicit backlog statuses saved locally for that account. Genres and achievement milestones require data already collected by other Steam reads in the running extension.
+
+| Dimension | Entries |
+| --- | --- |
+| `playstyle` | Up to three most-played titles, with common genres when Store game details are already available. These short summaries are eligible for standing context. |
+| `active_games` | Games marked playing and games played in the last two weeks, with completed and dropped games left out. |
+| `backlog_progress` | Aggregate counts for games waiting or paused, playing, completed and dropped. |
+| `milestones` | Representative titles with at least 20 hours of play, at least 90% of achievements unlocked when progress is known, or a local completion mark. |
+
+All dimensions are selected by default when export is enabled. The default limit is 20 entries (1–100), with at most 2,048 UTF-8 bytes of entry text across the whole export. Turning export off or clearing the dimensions returns an empty profile, with zero Steam requests and zero extra context tokens. The profile leaves out Steam account IDs, credentials, emails, friend data, notes and tags. On QR sign-out the extension immediately clears its account cache and returns an empty profile. Persona applies its own rules for filtering and refreshing the entries it reads. [Persona memory source protocol and cache](https://github.com/nwverse/persona/blob/main/docs/extensions/extensions.md#memory-sources)
 
 ## Game research
 
@@ -122,15 +153,21 @@ The extension hands recent results to Persona through the memory-only `connector
 
 ## Token settings
 
-Under **Settings › Extensions › Steam**, these settings control game research, update excerpts and planned memory export. Each disabled feature uses zero extra LLM tokens. Its effective item budget is zero where applicable. [Issue #1282](https://github.com/nwverse/persona-extensions/issues/1282)
+Under **Settings › Extensions › Steam**, these settings control what can enter assistant context or trigger triage. Turning off a feature brings its extra token use to zero. Recaps and local snapshots make no model calls. On-demand tool results use tokens when included in a conversation. [Issue #1282](https://github.com/nwverse/persona-extensions/issues/1282)
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `patch_notes_summary_enabled` | Off | Allows `steam_game_news` to share a plain-text excerpt of up to 700 characters per update for assistant summaries. When off, the tool reports `summary_enabled: false` and returns only the AppID, game name, announcement ID, title, date, source and link per update. |
-| `memory_export_enabled` | Off | Allows `memory_sources` to share a personal gaming profile. Turning this off keeps the profile out of assistant context. |
-| `memory_max_items` | 10 (1–30) | Caps the number of gaming preference items in the exported profile. |
-| `discovery_tools_enabled` | On | Allows game research tools to add context and makes the optional skill available when its contribution is enabled. |
+| `friends_radar_enabled` | Off | Off omits friend data and the friend tool definitions from context and stops friend requests. |
+| `inbox_events_enabled` | Off | Off stops background wishlist scans, Inbox events and their token use. |
+| `inbox_max_events_per_day` | 5 (1–50) | Caps events per UTC day and account. The effective cap is zero while Inbox events are off. |
+| `patch_notes_summary_enabled` | Off | Allows `steam_game_news` to share up to 700 characters per update for summaries. Off uses zero excerpt tokens and returns `summary_enabled: false` with headline metadata. |
+| `sale_roundup_enabled` | Off | Requires Inbox events. Off uses zero roundup tokens. Individual alerts follow the Inbox settings. |
+| `memory_export_enabled` | Off | Off provides zero entries, makes zero Steam requests and adds zero tokens to context. |
+| `memory_export_dimensions` | All four | Choose `playstyle`, `active_games`, `backlog_progress` and `milestones`. An empty selection stops export. |
+| `memory_max_items` | 20 (1–100) | Caps profile items within a 2,048-byte text budget. |
+| `discovery_tools_enabled` | On | Off hides and disables the research tools and withdraws the skill, with zero research context tokens. |
 | `discovery_max_results` | 15 (1–50) | Caps tags and search candidates per call. Details batches use the lower of this setting and 10. |
+| Steam game discovery contribution | Off | The optional skill's own switch follows the research gate and Hub delivery rules. |
 
 Token settings use the documented default when a numeric limit is missing or outside its range. The Steam page shows news headlines, dates and links. The backlog tools compute counts and rankings locally on demand and bound their output. Steam collects local observations during normal reads.
 
@@ -153,7 +190,8 @@ Both modes use `PERSONA_EXTENSION_DATA_DIR/steam-store-v1/backlog.json` for expl
 | Store | Contents and limits |
 | --- | --- |
 | Price history | Fresh, checked wishlist prices are scoped to the Steam account, Store country and AppID. Up to 2,000 series retain 32 sampled UTC days each, the latest quote and the first observation of the local low with its discount. A change in Store currency starts a new series. |
-| Playtime | A complete library read records lifetime minutes, the two-week minutes supplied by the library, and counts of owned and unplayed games. The latest snapshot on each UTC day is kept for up to 400 days through the most recent observation, across up to 16 accounts. |
+| Playtime | A complete library read records lifetime minutes, the two-week minutes supplied by the library, and counts of owned and unplayed games. The aggregate store keeps the latest snapshot on each UTC day for up to 400 days through the most recent observation, across up to 16 accounts. |
+| Playtime recap | On-demand observations use per-AppID minutes and status for visible library games. The store keeps the first observation of each month and the latest observation overall. Retention is up to 400 days and up to 16 accounts, within the snapshot file budget. |
 | Backlog | Up to 2,000 local annotations, each with a status, a note of up to 240 characters and up to eight tags of 32 characters each. Annotation edits apply to local storage only. |
 | Event cursors | The store records the account, region, kind, deduplication key and sale window or version, along with the last observed sale and release states. Up to 5,000 records are retained. Cursors expire after 90 days without a matching observation. |
 

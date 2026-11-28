@@ -9,6 +9,7 @@ __pycache__/
 /extensions/*/sentry
 /extensions/*/showcase
 /extensions/*/spaces
+/extensions/*/study
 /extensions/*/v2ex
 /extensions/*/termwise
 /extensions/*/relingo

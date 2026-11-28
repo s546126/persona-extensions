@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "properties": {
+    "meetings": {
+      "default": false,
+      "description": "New meetings transcribe on the hub by default, with Volcengine. This is the same choice as the transcription service in Recording settings.",
+      "title": "Use for Meeting Transcription",
+      "type": "boolean",
+      "x-confirm": "New meetings will transcribe on the hub by default: their audio goes to Volcengine as it's recorded, and the hub deletes it once the minutes are written."
+    },
+    "read_answers": {
+      "default": true,
+      "description": "When Persona takes part in a meeting, its answers are read in the voice below. When this is off, or on an error, the phone's own voice reads them.",
+      "title": "Read Answers Aloud",
+      "type": "boolean"
+    },
+    "voice": {
+      "default": "zh_female_vv_uranus_bigtts",
+      "oneOf": [
+        {
+          "const": "zh_female_vv_uranus_bigtts",
+          "title": "Vivi (female, multilingual)"
+        },
+        {
+          "const": "zh_female_xiaohe_uranus_bigtts",
+          "title": "Xiaohe (female)"
+        },
+        {
+          "const": "zh_male_m191_uranus_bigtts",
+          "title": "Yunzhou (male)"
+        },
+        {
+          "const": "zh_male_taocheng_uranus_bigtts",
+          "title": "Xiaotian (male)"
+        },
+        {
+          "const": "zh_female_qingxinnvsheng_uranus_bigtts",
+          "title": "Qingxin (female)"
+        },
+        {
+          "const": "zh_female_shuangkuaisisi_uranus_bigtts",
+          "title": "Sisi (female)"
+        }
+      ],
+      "title": "Voice",
+      "type": "string"
+    },
+    "advanced": {
+      "type": "object",
+      "title": "Advanced",
+      "properties": {
+        "asr_model": {
+          "default": "volc.seedasr.sauc.duration",
+          "description": "The model must be turned on in the Doubao Speech console.",
+          "oneOf": [
+            {
+              "const": "volc.seedasr.sauc.duration",
+              "title": "Doubao 2.0, billed by the hour (default)"
+            },
+            {
+              "const": "volc.seedasr.sauc.concurrent",
+              "title": "Doubao 2.0, billed by concurrency"
+            },
+            {
+              "const": "volc.bigasr.sauc.duration",
+              "title": "1.0, billed by the hour"
+            },
+            {
+              "const": "volc.bigasr.sauc.concurrent",
+              "title": "1.0, billed by concurrency"
+            }
+          ],
+          "title": "Recognition Model",
+          "type": "string"
+        },
+        "voice_id": {
+          "description": "A voice ID copied from the voice library (音色库) in the Doubao Speech console; used instead of the voice above.",
+          "pattern": "^[A-Za-z0-9_.-]{0,128}$",
+          "title": "Other Voice ID",
+          "type": "string"
+        },
+        "app_id": {
+          "description": "Only with an App ID and Access Token from the old console: then the API Key field above holds the Access Token.",
+          "pattern": "^[A-Za-z0-9_-]{0,64}$",
+          "title": "App ID (Old Console)",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

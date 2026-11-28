@@ -42,6 +42,7 @@ var tools = append([]wire.ConnectorTool{
 	achievementHunterTool,
 	gameNewsTool,
 	wishlistDealsTool,
+	playtimeRecapTool,
 }, backlogTools...)
 
 type listArgs struct {
@@ -194,6 +195,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (w
 		return encodeSteamTool(a.gameNews(ctx, raw))
 	case wishlistDealsName:
 		return encodeSteamTool(a.wishlistDeals(ctx, raw))
+	case playtimeRecapName:
+		return encodeSteamTool(a.callPlaytimeRecap(ctx, raw))
 	case storeTagsTool, storeSearchTool, gameDetailsTool:
 		if !a.config.AllowsDiscoveryTools() {
 			return wire.ConnectorCallResult{}, &ext.Error{

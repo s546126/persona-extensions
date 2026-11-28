@@ -1,0 +1,81 @@
+{
+  "manifest_version": 1,
+  "id": "study",
+  "name": "学习",
+  "version": "0.3.0",
+  "icon": "assets/icon.png",
+  "description": "把笔记变成会复习的卡片，再陪你把薄弱的地方练扎实：从 Persona 知识库的主题、Notion 页面、Obsidian 库、Logseq 图谱和 NotebookLM 读材料，做成问答卡片，按 FSRS 间隔重复算法排每天该复习的，手机上翻卡打分。每张卡归到一个知识点，按记忆稳定性、遗忘次数和最近的正确率算出掌握度，列出薄弱知识点；深度辅导出概念辨析、填空、选择和场景变式题，一步步给提示，答完自动判分、诊断错因，答错的题一键做成强化卡。精读把一个知识点或一段材料拆成几节，按你的程度和兴趣讲直觉、打比方、列要点，每节一道随堂小测；知识地图按掌握度分层列出全部知识点，点进去看卡片和错因。模型、NotebookLM 和辅导做的卡片先等你确认；Obsidian 的闪卡语法、Logseq 的 #card 块和 Notion 的折叠块直接成卡。待复习的数量上小组件，每天定时提醒一次；也可以在对话里说「考考我」「深度辅导」或「精读薄弱点」。Notion 只读；Obsidian、Logseq 和 NotebookLM（社区开源的 notebooklm-py 命令行）在你选的电脑上只读。",
+  "publisher": "nwverse",
+  "homepage": "https://github.com/nwverse/persona-extensions/blob/main/docs/extensions/study.md",
+  "tags": ["学习", "间隔重复", "闪卡", "辅导", "Obsidian", "Logseq", "Notion", "NotebookLM"],
+  "engines": {"extension_protocol": 1},
+  "activation_events": ["on_startup"],
+  "runtime": {
+    "command": {
+      "linux-amd64": "bin/study-linux-amd64",
+      "linux-arm64": "bin/study-linux-arm64",
+      "darwin-arm64": "bin/study-darwin-arm64",
+      "darwin-amd64": "bin/study-darwin-amd64"
+    }
+  },
+  "node": {
+    "command": {
+      "linux-amd64": "bin/study-linux-amd64",
+      "linux-arm64": "bin/study-linux-arm64",
+      "darwin-arm64": "bin/study-darwin-arm64",
+      "darwin-amd64": "bin/study-darwin-amd64"
+    },
+    "args": ["node"],
+    "machines": "machines",
+    "keep_running": "lease",
+    "permissions": {"files": true, "network": ["notebooklm.google.com", "*.google.com", "*.googleapis.com", "*.gstatic.com"]}
+  },
+  "contributes": {
+    "connectors": [{
+      "id": "study", "name": "学习卡片", "capabilities": ["status", "tools", "actions"],
+      "agent_tools": ["study_*"]
+    }],
+    "ui": [
+      {"id": "study", "title": "学习", "placement": "nav_page", "icon": "star"},
+      {"id": "study-due", "title": "待复习", "placement": "widget", "families": ["small", "accessory_circular", "accessory_rectangular", "accessory_inline"], "refresh_minutes": 30, "opens": "study"}
+    ],
+    "skills": [{"id": "quiz", "dir": "skills/quiz"}],
+    "prompts": [
+      {"id": "quiz-me", "kind": "quick", "title": "考考我", "text": "用我今天要复习的卡片考考我，一次问一张。"},
+      {"id": "tutor", "kind": "quick", "title": "深度辅导", "text": "看看我哪些知识点最薄弱，挑最弱的一个，用不同题型一步步带我练，卡住时给我提示，答完帮我分析错在哪。"},
+      {"id": "tutor-drill", "kind": "quick", "title": "Tutor 练习", "text": "从我的卡片里出几道练习题，填空、选择、场景题换着来，一次一道，答完判分；答错的帮我做成强化卡。"},
+      {"id": "guide-weak", "kind": "quick", "title": "精读薄弱点", "text": "看看我的知识地图，挑最薄弱的知识点先带我精读一遍并随堂小测。"}
+    ]
+  },
+  "secrets": [{
+    "name": "notion_secret", "title": "Notion Integration Secret（可选）",
+    "description": "要从 Notion 做卡片时填：在 Notion 的 My connections 里建一个 integration，只把要学的页面分享给它。只用来读页面，只发往 api.notion.com。"
+  }],
+  "permissions": {"hub": ["kb.read", "models", "notify"], "network": ["api.notion.com"]},
+  "configuration": {
+    "type": "object",
+    "properties": {
+      "machines": {
+        "type": "array",
+        "title": "从哪台电脑读 Obsidian、Logseq 和 NotebookLM",
+        "description": "放 Obsidian 库或 Logseq 图谱、或装了 notebooklm 命令的电脑。只用 Persona 知识库和 Notion 时不用选。",
+        "items": {"type": "string", "format": "machine", "x-os": ["darwin", "linux"]},
+        "maxItems": 1,
+        "default": [],
+        "x-confirm": "Persona 会在这台电脑上运行学习扩展的程序：只读下面填的 Obsidian 库文件夹里的笔记和 Logseq 图谱里 pages、journals 的页面，并在你打开 NotebookLM 时运行这台电脑上已登录的 notebooklm 命令读回闪卡和测验。它不改任何文件。"
+      },
+      "obsidian_vault": {"type": "string", "title": "Obsidian 库文件夹", "description": "那台电脑上库的完整路径，比如 ~/Documents/笔记库。", "default": ""},
+      "logseq_graph": {"type": "string", "title": "Logseq 图谱文件夹（可选）", "description": "那台电脑上图谱的完整路径，比如 ~/Documents/logseq。只读其中 pages 和 journals 里的页面，标了 #card 的块直接成卡。", "default": ""},
+      "flash_tag": {"type": "string", "title": "闪卡标签", "description": "带这个标签的笔记，其中的闪卡语法会被导入（不带 #）。", "default": "flashcards"},
+      "notebooklm_command": {"type": "string", "title": "notebooklm 命令位置（可选）", "description": "找不到 notebooklm 命令时填完整路径，比如 ~/.local/bin/notebooklm。", "default": ""},
+      "new_per_day": {"type": "integer", "title": "每天新卡数", "minimum": 0, "maximum": 200, "default": 20},
+      "retention": {"type": "number", "title": "想记住的比例", "description": "越高复习越勤。0.9 表示到期时大约九成还记得。", "minimum": 0.7, "maximum": 0.97, "default": 0.9},
+      "cards_per_source": {"type": "integer", "title": "每份材料做几张卡", "minimum": 1, "maximum": 20, "default": 8},
+      "remind": {"type": "boolean", "title": "每天提醒复习", "description": "有卡片要复习时，每天提醒一次。", "default": true},
+      "remind_at": {"type": "string", "title": "提醒时间", "description": "格式 HH:MM。", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$", "default": "20:00"},
+      "learner_level": {"type": "string", "title": "学习深度（可选）", "description": "精读、出卡和练习讲到多深：beginner 入门，先讲直觉、每个术语都解释；practical 实战，多举能直接用上的例子；deep 深入，讲原理、边界和取舍。不填就按均衡来。", "enum": ["", "beginner", "practical", "deep"], "default": ""},
+      "learner_interests": {"type": "string", "title": "兴趣领域（可选）", "description": "打比方时优先用的领域，比如：分布式系统、篮球、做饭。只用来挑例子和类比，不改材料的内容。", "maxLength": 200, "default": ""},
+      "explain_style": {"type": "string", "title": "讲解风格（可选）", "description": "balanced 标准，平实讲解、需要时举例；analogy 先打比方再给准确说法；rigorous 先给严密的定义和条件，少用比喻。不填就按标准来。", "enum": ["", "balanced", "analogy", "rigorous"], "default": ""}
+    }
+  }
+}

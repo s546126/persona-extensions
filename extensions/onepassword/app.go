@@ -52,13 +52,20 @@ type app struct {
 	uses []secretUse
 
 	// meta is the metadata kept for metaTTL (cache.go), under metaMu; metaGen counts the times it was emptied.
-	metaMu  sync.Mutex
-	meta    metaCache
-	metaGen uint64
+	metaMu             sync.Mutex
+	meta               metaCache
+	metaGen            uint64
+	metaRev, metaSaved uint64
+	metaSeed           [32]byte
+	metaStore          metadataStore
+	metaSource         string
+	metaLoaded         chan struct{}
+	metaLoadErr        error
+	metaIO             sync.Mutex // serializes persistence, restoration and invalidation
 }
 
 func newApp(connect connectFunc) *app {
-	return &app{connect: connect, validate: validateSDK, now: time.Now}
+	return &app{connect: connect, validate: validateSDK, now: time.Now, metaSeed: newNameSecret()}
 }
 
 // config is the extension's configuration: the computer whose op to use, if any (at most one).
@@ -66,13 +73,12 @@ type config struct {
 	Machines []string `json:"machines"`
 }
 
-func (a *app) init(_ context.Context, in *ext.Init, hub *ext.Hub) (map[string]any, error) {
+func (a *app) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]any, error) {
 	var c config
 	if err := in.Config(&c); err != nil {
 		return nil, err
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.token = strings.TrimSpace(in.Secrets[tokenSecret])
 	a.locale = in.Hub.Locale
 	a.machine = ""
@@ -85,7 +91,13 @@ func (a *app) init(_ context.Context, in *ext.Init, hub *ext.Hub) (map[string]an
 	a.api = nil
 	a.lastErr, a.errKind, a.errAt = nil, 0, time.Time{}
 	a.rateErr, a.rateAt = nil, time.Time{}
-	a.forgetMeta() // a new start keeps nothing (locks: mu, then metaMu; never the other way)
+	source := metadataSource(a.machine, a.token)
+	a.mu.Unlock()
+	var store metadataStore
+	if hub != nil {
+		store = hubMetadataStore{hub}
+	}
+	a.startMeta(ctx, store, source)
 	return nil, nil
 }
 
@@ -268,7 +280,11 @@ func (a *app) listVaults(ctx context.Context) ([]vaultInfo, error) { return a.re
 
 // readVaults is listVaults; again asks 1Password even when what is kept is fresh (the page, a miss).
 func (a *app) readVaults(ctx context.Context, again bool) ([]vaultInfo, error) {
-	vs, err := cachedRead(a, again, func(c *metaCache) (kept[[]vaultInfo], bool) { return c.getVaults() },
+	if err := a.waitMeta(ctx); err != nil {
+		return nil, err
+	}
+	ctx = quietIfKept(a, ctx, (*metaCache).getVaults) // an earlier answer stands in when op would prompt (quiet.go)
+	vs, err := cachedRead(ctx, a, again, func(c *metaCache) (kept[[]vaultInfo], bool) { return c.getVaults() },
 		func(c *metaCache, k kept[[]vaultInfo]) { c.vaults = &k },
 		func() ([]vaultInfo, error) {
 			api, err := a.client(ctx)
@@ -314,7 +330,11 @@ func putBounded[T any](m map[string]kept[T], key string, val kept[T]) {
 }
 
 func (a *app) readItems(ctx context.Context, vaultID string, again bool) ([]itemInfo, error) {
-	its, err := cachedRead(a, again, func(c *metaCache) (kept[[]itemInfo], bool) { k, ok := c.items[vaultID]; return k, ok },
+	if err := a.waitMeta(ctx); err != nil {
+		return nil, err
+	}
+	ctx = quietIfKept(a, ctx, func(c *metaCache) (kept[[]itemInfo], bool) { k, ok := c.items[vaultID]; return k, ok })
+	its, err := cachedRead(ctx, a, again, func(c *metaCache) (kept[[]itemInfo], bool) { k, ok := c.items[vaultID]; return k, ok },
 		func(c *metaCache, k kept[[]itemInfo]) {
 			if c.items == nil {
 				c.items = map[string]kept[[]itemInfo]{}
@@ -347,8 +367,12 @@ func (a *app) getItem(ctx context.Context, vaultID, itemID string) (itemDetail, 
 }
 
 func (a *app) readItem(ctx context.Context, vaultID, itemID string, again bool) (itemDetail, error) {
+	if err := a.waitMeta(ctx); err != nil {
+		return itemDetail{}, err
+	}
 	key := vaultID + "/" + itemID
-	d, err := cachedRead(a, again, func(c *metaCache) (kept[itemDetail], bool) { k, ok := c.details[key]; return k, ok },
+	ctx = quietIfKept(a, ctx, func(c *metaCache) (kept[itemDetail], bool) { k, ok := c.details[key]; return k, ok })
+	d, err := cachedRead(ctx, a, again, func(c *metaCache) (kept[itemDetail], bool) { k, ok := c.details[key]; return k, ok },
 		func(c *metaCache, k kept[itemDetail]) {
 			if c.details == nil {
 				c.details = map[string]kept[itemDetail]{}
@@ -365,7 +389,7 @@ func (a *app) readItem(ctx context.Context, vaultID, itemID string, again bool) 
 				return itemDetail{}, a.record(err)
 			}
 			a.record(nil)
-			return itemFromSDK(raw), nil
+			return itemMetadata(raw, a.metaNameKey), nil
 		})
 	d.Tags, d.Websites, d.Fields = slices.Clone(d.Tags), slices.Clone(d.Websites), slices.Clone(d.Fields)
 	return d, err

@@ -37,6 +37,12 @@ func (o OverviewBackedProvider) Items(st *store.State) []profile.CandidateItem {
 	var out []profile.CandidateItem
 	covered := map[entry.Facet]bool{}
 	for _, p := range s.Sorted(func(p *Pattern) bool { return p.Used() }) {
+		// A work-method pattern keeps a category only while today's Payload-First rules still find it (an older
+		// label on a bookkeeping rule is not the user's finance); ops runbooks are stripped below as before.
+		pcats := p.Categories
+		if !p.IsOpsRunbook() {
+			pcats = effectiveCategories(st, p)
+		}
 		f := entry.Facet(p.Facet)
 		if p.IsProfileCore() {
 			f = entry.Persona
@@ -48,7 +54,7 @@ func (o OverviewBackedProvider) Items(st *store.State) []profile.CandidateItem {
 		}
 		// As the entries provider: something said in a space, with no category, stays out of the general profile
 		// unless it is about working with the AI or the user.
-		if len(p.Categories) == 0 && p.OriginSpace != "" && f != entry.Interaction && f != entry.Persona {
+		if len(pcats) == 0 && p.OriginSpace != "" && f != entry.Interaction && f != entry.Persona {
 			continue
 		}
 		text := strings.TrimSpace(p.Text) + suffixOf(p)
@@ -63,14 +69,14 @@ func (o OverviewBackedProvider) Items(st *store.State) []profile.CandidateItem {
 			itemCats = nil
 			itemSpace = ""
 		} else {
-			itemCats = slices.Clone(p.Categories)
+			itemCats = pcats
 		}
 		out = append(out, profile.CandidateItem{
 			ID: p.ID, Facet: f, Text: text, Last: p.LastEvidence, Priority: 0, Pattern: true,
 			Weight:     weight,
 			Categories: itemCats, OriginSpace: itemSpace, Subjects: slices.Clone(p.Subjects),
 		})
-		if len(p.Categories) == 0 && !p.IsOpsRunbook() {
+		if len(pcats) == 0 && !p.IsOpsRunbook() {
 			covered[f] = true
 		}
 	}

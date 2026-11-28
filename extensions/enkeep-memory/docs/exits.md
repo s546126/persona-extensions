@@ -90,7 +90,8 @@ Since beta.52 the extension picks the standing set itself, by leverage, to fit:
   rule merge found to say what a stronger one says are merged into it, or marked covered by it (`covered_by:`) and kept
   out of the set while it stands. A rule's subjects carry its occasion's words (派活, 汇报, 提问, 开工…) for
   decisions_query tags.
-- **The room** is the `resident_bytes` setting (1400 by default), one more line per 120 bytes beyond it.
+- **The room** is the `resident_bytes` setting (1400 by default, 800–16384 so the hub's 4, 8 and 16 KB rooms all
+  fit), one more line per 120 bytes beyond it.
 - **Fast path.** Every `fast_minutes`, today's assistant conversations with a new correction are read at once and
   the set is chosen again, without waiting for the night.
 

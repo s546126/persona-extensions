@@ -134,7 +134,26 @@ func TestAchievementHunterQRDetailsAndCountOnly(t *testing.T) {
 		`"locked":[{"api_name":"easy"`, `"api_name":"hard"`, `"hidden":true`)
 	assertHidden(t, answer, "retired", "secret_ending", "Ending Spoiler", access, saved.RefreshToken)
 
+	f.reply(userAchievementsPath, http.StatusOK, `{"response":{"schema_hash":15,"achievements":[]}}`)
+	f.reply(progressPath, http.StatusOK, fmt.Sprintf(`{"response":{"achievement_progress":[{"appid":%d,"unlocked":0,"total":5}]}}`, firstApp))
+	answer = toolAnswer(t, h, achievementHunterName, args)
+	var zero struct {
+		PersonalDetails bool `json:"personal_details"`
+		Progress        achievementProgress
+		Locked          []rankedAchievement
+		Timeline        []rankedAchievement
+	}
+	if err := json.Unmarshal([]byte(answer), &zero); err != nil {
+		t.Fatal(err)
+	}
+	if !zero.PersonalDetails || zero.Progress.Unlocked != 0 || zero.Progress.Total != 5 ||
+		len(zero.Locked) != 5 || zero.Timeline == nil || len(zero.Timeline) != 0 {
+		t.Fatalf("zero unlocks should show the full locked roster and an empty timeline: %s", answer)
+	}
+	assertHidden(t, answer, "retired", "secret_ending", "Ending Spoiler", access, saved.RefreshToken)
+
 	f.reply(userAchievementsPath, http.StatusForbidden, "private")
+	f.reply(progressPath, http.StatusOK, fmt.Sprintf(`{"response":{"achievement_progress":[{"appid":%d,"unlocked":2,"total":5}]}}`, firstApp))
 	answer = toolAnswer(t, h, achievementHunterName, args)
 	contains(t, answer, `"personal_details":false`, `"total":5`, `"unlocked":2`, string(problemAchievementDetails),
 		`"global_easiest":[{"api_name":"old"`, `"global_rarest":[{"api_name":"hard"`)
@@ -372,4 +391,23 @@ func TestRecentOfficialUpdatesPageLoadsOnDemandAndReusesNews(t *testing.T) {
 	nav.Locale = "en"
 	raw, _ = json.Marshal(viewAnswer(t, h, nav))
 	contains(t, string(raw), "Recent official updates")
+}
+
+func TestOfficialUpdatesPageDeduplicatesWarningsInOrder(t *testing.T) {
+	f := newFakeSteam(t, time.Second)
+	f.reply(recentPath, http.StatusOK, `{"response":{"total_count":0}}`)
+	f.handle(newsForAppPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("appid") == appIDText(secondApp) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	h := startTestHost(t, f, fixtureID, "GB", "")
+	nav := wire.UIParams{Contribution: extensionID, Size: wire.SizeFull, Placement: wire.PlacementNavPage, UIVersion: 12, Locale: "en"}
+	view := act(t, h, nav, viewAnswer(t, h, nav), gameNewsAction, nil)
+	want := english.message(problemNetwork, false) + " " + english.message(problemRateLimited, false)
+	if got := view.Sections[0].Footer; got != want || f.hit(newsForAppPath) != 3 {
+		t.Fatalf("warning footer = %q, want %q from three requests", got, want)
+	}
 }

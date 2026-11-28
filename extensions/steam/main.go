@@ -16,7 +16,7 @@ import (
 
 const (
 	extensionID = "steam"
-	version     = "0.2.0"
+	version     = "0.3.0"
 	summaryID   = "steam-summary"
 )
 
@@ -83,7 +83,7 @@ func (a *app) program(client *http.Client, now func() time.Time) ext.Program {
 			}
 			return nil, nil
 		},
-		Namespaces: map[string]ext.Handler{"connector": a.connector, "auth": ext.AuthHandler(a)},
+		Namespaces: map[string]ext.Handler{"connector": a.connector, "auth": ext.AuthHandler(a), "memory": a.memoryEntries},
 		UI: map[string]ext.Page{
 			extensionID: {Render: a.render, Action: a.action},
 			summaryID:   {Render: a.card},

@@ -41,6 +41,14 @@ func TestTokenConfigDefaultsAndDisabledLimits(t *testing.T) {
 	if !patchOnly.AllowsPatchNotesSummary() || patchOnly.AllowsInboxEvents() || patchOnly.AllowsSaleRoundup() {
 		t.Fatal("enabling patch summaries also changed the inbox permissions")
 	}
+	for _, fields := range []string{
+		`,"memory_export_enabled":true,"memory_export_dimensions":[]`,
+		`,"memory_export_enabled":true,"memory_export_dimensions":["unknown"]`,
+	} {
+		if cfg := fixtureTokenConfig(t, fields); cfg.AllowsMemoryExport() || cfg.MemoryItemLimit() != 0 {
+			t.Fatal("memory export should be off without a known selected dimension")
+		}
+	}
 }
 
 func TestTokenConfigEnabledBudgetBounds(t *testing.T) {
@@ -49,10 +57,10 @@ func TestTokenConfigEnabledBudgetBounds(t *testing.T) {
 		fields  string
 		budgets [3]int
 	}{
-		{"missing", "", [3]int{5, 10, 15}},
-		{"below or above range", `,"inbox_max_events_per_day":0,"memory_max_items":31,"discovery_max_results":-1`, [3]int{5, 10, 15}},
+		{"missing", "", [3]int{5, 20, 15}},
+		{"below or above range", `,"inbox_max_events_per_day":0,"memory_max_items":101,"discovery_max_results":-1`, [3]int{5, 20, 15}},
 		{"minimum", `,"inbox_max_events_per_day":1,"memory_max_items":1,"discovery_max_results":1`, [3]int{1, 1, 1}},
-		{"maximum", `,"inbox_max_events_per_day":50,"memory_max_items":30,"discovery_max_results":50`, [3]int{50, 30, 50}},
+		{"maximum", `,"inbox_max_events_per_day":50,"memory_max_items":100,"discovery_max_results":50`, [3]int{50, 100, 50}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := fixtureTokenConfig(t, `,"inbox_events_enabled":true,"sale_roundup_enabled":true,"patch_notes_summary_enabled":true,"memory_export_enabled":true,"discovery_tools_enabled":true`+tc.fields)
@@ -79,6 +87,10 @@ func TestTokenSettingsManifestAndTranslations(t *testing.T) {
 			Type, Title, Description string
 			Default                  json.RawMessage
 			Minimum, Maximum         int
+			Items                    struct {
+				Type string
+				Enum []memoryDimension
+			}
 		}
 	}
 	if err := json.Unmarshal(m.Configuration, &form); err != nil {
@@ -94,7 +106,7 @@ func TestTokenSettingsManifestAndTranslations(t *testing.T) {
 		"patch_notes_summary_enabled": {"false", 0},
 		"sale_roundup_enabled":        {"false", 0},
 		"memory_export_enabled":       {"false", 0},
-		"memory_max_items":            {strconv.Itoa(defaults.MemoryItemLimit()), 30},
+		"memory_max_items":            {strconv.Itoa(defaults.MemoryItemLimit()), 100},
 		"discovery_tools_enabled":     {"true", 0},
 		"discovery_max_results":       {strconv.Itoa(defaults.DiscoveryResultLimit()), 50},
 	}
@@ -108,13 +120,24 @@ func TestTokenSettingsManifestAndTranslations(t *testing.T) {
 			t.Errorf("invalid form type or limits for %s: %+v", name, field)
 		}
 	}
+	const dimensionsKey = "memory_export_dimensions"
+	dimensions := form.Properties[dimensionsKey]
+	var selected []memoryDimension
+	if err := json.Unmarshal(dimensions.Default, &selected); err != nil || !slices.Equal(selected, memoryDimensions[:]) ||
+		dimensions.Type != "array" || dimensions.Items.Type != "string" || !slices.Equal(dimensions.Items.Enum, selected) ||
+		dimensions.Title == "" || dimensions.Description == "" || slices.Contains(form.Required, dimensionsKey) {
+		t.Fatalf("invalid memory dimensions setting: %+v", dimensions)
+	}
 	for _, lang := range []string{"en", "zh-Hans"} {
 		raw, err := os.ReadFile(filepath.Join("l10n", lang+".json"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		var translation struct {
-			Configuration map[string]struct{ Title, Description string }
+			Configuration map[string]struct {
+				Title, Description string
+				Choices            map[memoryDimension]string
+			}
 		}
 		if err := json.Unmarshal(raw, &translation); err != nil {
 			t.Fatal(err)
@@ -122,6 +145,15 @@ func TestTokenSettingsManifestAndTranslations(t *testing.T) {
 		for name := range fields {
 			if field := translation.Configuration[name]; field.Title == "" || field.Description == "" {
 				t.Errorf("missing %s translation for %s", lang, name)
+			}
+		}
+		localized := translation.Configuration[dimensionsKey]
+		if localized.Title == "" || localized.Description == "" {
+			t.Errorf("missing %s translation for %s", lang, dimensionsKey)
+		}
+		for _, dimension := range memoryDimensions {
+			if localized.Choices[dimension] == "" {
+				t.Errorf("missing %s translation for %s option %s", lang, dimensionsKey, dimension)
 			}
 		}
 	}

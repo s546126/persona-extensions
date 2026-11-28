@@ -43,8 +43,11 @@ type node struct {
 	matcher    string // the Claude entries' matcher (matcherFor)
 	agyMatcher string // the Antigravity entries' matcher (agyMatcherFor)
 
-	mu   sync.Mutex
-	dirs []dirState
+	mu            sync.Mutex
+	dirs          []dirState
+	configured    []string
+	agyConfigured []string
+	profiles      string // Persona's assistant channel profiles, beside node-plugins
 
 	// beatWG is the heartbeat ticker goroutine. cleanup joins it before it removes the heartbeat, so a beat
 	// already due cannot land during cleanup and recreate the file (a fresh heartbeat with the entry still in
@@ -59,6 +62,7 @@ type dirState struct {
 	Installed    bool   `json:"installed"`
 	Error        string `json:"error,omitempty"`
 	settingsPath string
+	auto         bool // discovered, not an explicit config_dir: revalidate its final component before cleanup
 	agy          bool
 }
 
@@ -103,6 +107,14 @@ func (n *node) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]a
 	if n.data == "" {
 		return nil, errors.New("no data directory")
 	}
+	n.configured = c.dirs()
+	n.agyConfigured = append([]string(nil), c.AgyDirs...)
+	// <persona home>/node-plugins/<storage>/data identifies the same Persona
+	// home whose profiles/<launcher> directories the assistant selects. Do not
+	// infer it from HOME: PERSONA_HOME may point somewhere else.
+	if plugins := filepath.Dir(filepath.Dir(n.data)); filepath.Base(n.data) == "data" && filepath.Base(plugins) == "node-plugins" {
+		n.profiles = filepath.Join(filepath.Dir(plugins), "profiles")
+	}
 	if err := os.MkdirAll(n.data, 0o700); err != nil {
 		return nil, sanitizeInitError("data directory unavailable", err)
 	}
@@ -131,7 +143,7 @@ func (n *node) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]a
 	n.beat()
 	n.mu.Lock()
 	n.install(c.dirs())
-	n.installAgy(c.AgyDirs)
+	n.installAgy(n.agyConfigured)
 	n.mu.Unlock()
 	n.beatWG.Add(1)
 	go func() {
@@ -143,7 +155,7 @@ func (n *node) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]a
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				n.beat()
+				n.refresh()
 			}
 		}
 	}()
@@ -159,19 +171,74 @@ func (n *node) beat() {
 	}
 }
 
-// install puts the entry into each directory that has Claude Code's config.
+// refresh is the heartbeat tick: renew freshness, then install newly created
+// profiles and replace stale entries with this executable's current command.
+func (n *node) refresh() {
+	n.beat()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.install(nil)
+	n.installAgy(n.agyConfigured)
+}
+
+// install puts the entry into each explicitly configured directory and each
+// existing assistant channel profile. A nil dirs reconciles the initial
+// configuration again. Discovery never creates a profile and does not follow a
+// final-component symlink out of Persona's profiles directory.
 func (n *node) install(dirs []string) {
+	if dirs == nil {
+		dirs = n.configured
+	}
+	configured := append([]string(nil), dirs...)
+	discovered, discoveryErr := n.assistantProfiles()
+	var retained []dirState
+	if discoveryErr != nil {
+		for _, s := range n.dirs {
+			if s.auto {
+				retained = append(retained, s)
+			}
+		}
+	}
+	explicit := map[string]bool{}
+	for _, d := range configured {
+		if abs, err := expand(d); err == nil {
+			explicit[abs] = true
+		}
+	}
+	automatic := map[string]bool{}
+	for _, d := range discovered {
+		if abs, err := expand(d); err == nil {
+			automatic[abs] = true
+		}
+	}
+	dirs = append(configured, discovered...)
 	n.dirs = n.dirs[:0]
+	seen := map[string]bool{}
 	for _, d := range dirs {
 		s := dirState{Dir: d}
 		abs, err := expand(d)
+		if err == nil {
+			if seen[abs] {
+				continue
+			}
+			seen[abs] = true
+			s.auto = automatic[abs] && !explicit[abs]
+		}
 		switch {
 		case err != nil:
 			s.Error = sanitizeDirError(err)
 		case !isDir(abs):
 			s.Error = "no such directory"
 		default:
-			s.settingsPath = settingsPath(abs)
+			if s.auto {
+				s.settingsPath, err = n.automaticSettingsPath(abs)
+				if err != nil {
+					s.Error = sanitizeDirError(err)
+					break
+				}
+			} else {
+				s.settingsPath = settingsPath(abs)
+			}
 			s.Settings = foldDisplayPath(abs, s.settingsPath)
 			if _, err := installHookWith(s.settingsPath, cmp.Or(n.matcher, hookMatcher), hookCommand(n.bin, abs, n.data)); err != nil {
 				s.Error = sanitizeDirError(err)
@@ -184,6 +251,64 @@ func (n *node) install(dirs []string) {
 		}
 		n.dirs = append(n.dirs, s)
 	}
+	// A transient discovery failure must not erase the cleanup paths for
+	// automatic profiles that were already installed.
+	n.dirs = append(n.dirs, retained...)
+}
+
+// assistantProfiles lists the current channel directories. ReadDir sorts them,
+// so status and upgrade order stay stable. A profiles directory that does not
+// exist yet is normal for a node whose assistant has not started.
+func (n *node) assistantProfiles() ([]string, error) {
+	if n.profiles == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(n.profiles)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, filepath.Join(n.profiles, entry.Name()))
+		}
+	}
+	return dirs, nil
+}
+
+// realAssistantProfile revalidates an automatically discovered path at cleanup:
+// it is still the same immediate child kind, not a symlink substituted after the
+// last refresh. Lstat never follows that final component.
+func (n *node) realAssistantProfile(dir string) bool {
+	if n.profiles == "" || filepath.Dir(dir) != n.profiles {
+		return false
+	}
+	st, err := os.Lstat(dir)
+	return err == nil && st.IsDir() && st.Mode()&os.ModeSymlink == 0
+}
+
+// automaticSettingsPath keeps automatically discovered profiles from editing a
+// settings.json symlink outside their real profile directory. Explicit
+// config_dirs retain settingsPath's symlink-following behavior.
+func (n *node) automaticSettingsPath(dir string) (string, error) {
+	if !n.realAssistantProfile(dir) {
+		return "", fmt.Errorf("not a real assistant profile")
+	}
+	path := filepath.Join(dir, "settings.json")
+	st, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("automatic assistant profile settings.json is a symlink")
+	}
+	return path, nil
 }
 
 // installAgy puts the PreToolUse entry into each configured Gemini/Antigravity config directory. When agy_dirs is
@@ -238,16 +363,107 @@ func (n *node) check() []dirState {
 }
 
 // cleanup takes the entries out and stops the heartbeat; the program is about to exit. ext.Main has returned by
-// then, so the run context is cancelled: join the ticker goroutine (under the node lock, which a beat never
-// takes) before removing the heartbeat, and no beat can afterwards resurrect it.
+// then, so the run context is cancelled: join the ticker goroutine before taking the node lock (a due refresh may be
+// waiting for that lock), then remove the heartbeat and entries. No beat or refresh can afterwards resurrect them.
 func (n *node) cleanup() {
+	n.beatWG.Wait()
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.beatWG.Wait()
 	if n.data != "" {
 		_ = os.Remove(filepath.Join(n.data, heartbeatFile))
 	}
+	// A refresh while a configured directory is temporarily absent leaves an
+	// error state without its internal cleanup path (and can drop the default
+	// AGY state entirely). Rebuild only configured paths that are accessible
+	// again; automatic profiles keep their stricter revalidation below.
+	type cleanupKey struct {
+		dir string
+		agy bool
+	}
+	configuredStates := map[cleanupKey]int{}
+	for i, s := range n.dirs {
+		if abs, err := expand(s.Dir); err == nil {
+			configuredStates[cleanupKey{dir: abs, agy: s.agy}] = i
+		}
+	}
+	backfill := func(d string, agy bool) {
+		abs, err := expand(d)
+		if err != nil || !isDir(abs) {
+			return
+		}
+		settings := settingsPath(abs)
+		if agy {
+			settings = agyHooksPath(abs)
+		}
+		key := cleanupKey{dir: abs, agy: agy}
+		if i, ok := configuredStates[key]; ok {
+			if n.dirs[i].settingsPath == "" {
+				n.dirs[i].settingsPath = settings
+				n.dirs[i].Settings = foldDisplayPath(abs, settings)
+			}
+			return
+		}
+		s := dirState{Dir: d, settingsPath: settings, agy: agy}
+		s.Settings = foldDisplayPath(abs, settings)
+		n.dirs = append(n.dirs, s)
+		configuredStates[key] = len(n.dirs) - 1
+	}
+	for _, d := range n.configured {
+		backfill(d, false)
+	}
+	agyDirs := n.agyConfigured
+	if len(agyDirs) == 0 {
+		agyDirs = []string{"~/.gemini"}
+	}
+	for _, d := range agyDirs {
+		backfill(d, true)
+	}
+	// A new profile may have been seeded by Persona after the last heartbeat.
+	// Merge current profiles with old states: a previously missing explicit
+	// directory has no settings path yet and must not suppress the cleanup.
+	seen := map[string]int{}
+	for i, s := range n.dirs {
+		// AGY and Claude can share a directory but have independent hooks.
+		if s.agy {
+			continue
+		}
+		if abs, err := expand(s.Dir); err == nil {
+			seen[abs] = i
+		}
+	}
+	// Discovery is best-effort during cleanup; retained automatic states are
+	// revalidated by automaticSettingsPath before anything is uninstalled.
+	discovered, _ := n.assistantProfiles()
+	for _, d := range discovered {
+		abs, err := expand(d)
+		if err != nil {
+			continue
+		}
+		if i, ok := seen[abs]; ok {
+			if n.dirs[i].settingsPath == "" {
+				if n.dirs[i].auto {
+					n.dirs[i].settingsPath = filepath.Join(abs, "settings.json")
+				} else {
+					n.dirs[i].settingsPath = settingsPath(abs)
+				}
+				n.dirs[i].Settings = foldDisplayPath(abs, n.dirs[i].settingsPath)
+			}
+			continue
+		}
+		s := dirState{Dir: d, settingsPath: filepath.Join(abs, "settings.json"), auto: true}
+		s.Settings = foldDisplayPath(abs, s.settingsPath)
+		n.dirs = append(n.dirs, s)
+	}
 	for _, s := range n.dirs {
+		// Only automatic discovery has the no-symlink-escape rule. An explicit
+		// config_dir keeps the extension's existing settings-symlink semantics.
+		if s.auto {
+			settings, err := n.automaticSettingsPath(s.Dir)
+			if err != nil {
+				continue
+			}
+			s.settingsPath = settings
+		}
 		if s.settingsPath == "" {
 			continue
 		}

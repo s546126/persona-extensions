@@ -89,6 +89,32 @@ func CanonicalName(raw, typ string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// nonPersonSuffixRe matches a name that ends in a word saying it is software or a service, not a person
+// ("enkeep-memory 插件", "persona-cli", "AsterGate 网关"). An ASCII suffix needs a separator so a name merely ending in
+// those letters is left alone.
+var nonPersonSuffixRe = regexp.MustCompile(`(?i)^(.*?\S)(?:\s*(插件|扩展|系统|平台|网关|服务|仓库|代码库)|[\s_-]+(plugin|extension|system|platform|gateway|service|server|cli|repo|sdk))$`)
+
+// MisfiledPersonType says what a name typed as a person really is when its suffix says software or a service:
+// "system" for a system, platform, gateway or service, "repo" for a repository, "project" for a plugin, extension,
+// CLI or SDK; base is the name without that suffix. ("", "") when the name may well be a person's.
+func MisfiledPersonType(name string) (typ, base string) {
+	m := nonPersonSuffixRe.FindStringSubmatch(strings.TrimSpace(CanonicalName(name, "person")))
+	if m == nil {
+		return "", ""
+	}
+	base = strings.TrimSpace(m[1])
+	if len([]rune(norm.Q(base))) < 2 {
+		return "", ""
+	}
+	switch strings.ToLower(m[2] + m[3]) {
+	case "系统", "平台", "网关", "服务", "system", "platform", "gateway", "service", "server":
+		return "system", base
+	case "仓库", "代码库", "repo":
+		return "repo", base
+	}
+	return "project", base
+}
+
 // NormKey returns the normalized comparison key for an entity name after CanonicalName prefix stripping.
 func NormKey(raw, typ string) string {
 	return norm.Q(CanonicalName(raw, typ))
@@ -337,6 +363,18 @@ func (b *Builder) Resolve(surface, typ, knownID string, ev *store.Evidence) (str
 	}
 	if IsDisallowedNodeType(typ) || LooksLikeLocalPath(clean) || LooksLikeIssueOrPR(clean) {
 		return "", false
+	}
+	if typ == "person" {
+		// "enkeep-memory 插件" is the project, not a person: resolve it to the project/system/repo of its base name,
+		// or make it with the type its suffix says.
+		if t, base := MisfiledPersonType(clean); t != "" {
+			if id := b.find(base, ""); id != "" {
+				if n := b.G.Nodes[id]; n != nil && (n.Type == "project" || n.Type == "system" || n.Type == "repo") {
+					return id, true
+				}
+			}
+			typ = t
+		}
 	}
 	if id := b.find(clean, typ); id != "" {
 		return id, true

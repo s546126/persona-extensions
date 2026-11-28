@@ -870,9 +870,12 @@ type QuotaItem struct {
 }
 
 type UsageItem struct {
-	ID    string   `json:"id"`
-	Name  string   `json:"name"`
-	Hosts []string `json:"hosts,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Hosts         []string `json:"hosts,omitempty"`
+	Direct        bool     `json:"direct,omitempty"`
+	RemoteAddress string   `json:"remote_address,omitempty"`
+	RemoteKey     string   `json:"remote_key,omitempty"`
 }
 
 type ProviderItem struct {
@@ -1702,6 +1705,9 @@ type SecretsResolveParams struct {
 	Contribution string        `json:"contribution"`
 	Reference    string        `json:"reference"`
 	Purpose      SecretPurpose `json:"purpose"`
+	// The manager still holds an earlier value of the reference and uses it if this fails: the provider must not ask the
+	// user (no authorization prompt), and answers not_signed_in at once when it cannot answer without them.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // SecretsResolveResult: what secrets.resolve answers: the value, at most 16 KB. Errors: not_found, not_signed_in,
@@ -4105,6 +4111,10 @@ type ConnectorCallParams struct {
 	// general. Absent means not known (an older hub, a turn not tagged yet): take it for sensitive. Whether the phone
 	// confirms a write stays the hub's decision.
 	Categories []string `json:"categories,omitempty"`
+	// The hub-authenticated paired device ID (for example dev_...) that originated the current user turn; absent when
+	// the turn did not come from a paired user device (scheduled task, channel, extension, or older hub). Set
+	// exclusively by the hub from verified credentials.
+	OriginDeviceID ConnectorOriginDeviceID `json:"origin_device_id,omitempty"`
 }
 
 // ConnectorCallResult: tools.call and actions.do.
@@ -4174,6 +4184,10 @@ type ConnectorDoParams struct {
 	// general. Absent means not known (an older hub, a turn not tagged yet): take it for sensitive. Whether the phone
 	// confirms a write stays the hub's decision.
 	Categories []string `json:"categories,omitempty"`
+	// The hub-authenticated paired device ID (for example dev_...) that originated the current user turn; absent when
+	// the turn did not come from a paired user device (scheduled task, channel, extension, or older hub). Set
+	// exclusively by the hub from verified credentials.
+	OriginDeviceID ConnectorOriginDeviceID `json:"origin_device_id,omitempty"`
 }
 
 // ConnectorRecallParams: recall: take back a message the connector's program sent in the user's name, which the
@@ -4434,9 +4448,45 @@ type ConnectorInboxThing struct {
 	Group *ConnectorThingGroup `json:"group,omitempty"`
 	ID    string               `json:"id,omitempty"`
 	// An event's own state, kept and handed back by the hub as it is.
-	Meta   json.RawMessage       `json:"meta,omitempty"`
-	Parent *ConnectorThingParent `json:"parent,omitempty"`
+	Meta         json.RawMessage        `json:"meta,omitempty"`
+	Parent       *ConnectorThingParent  `json:"parent,omitempty"`
+	OwnerPromise *ConnectorOwnerPromise `json:"owner_promise,omitempty"`
 }
+
+// ConnectorOwnerPromise: A follow-up the owner promised in a reply in a selected Lark group's topic, on a thing of
+// kind owner_promise (docs/assistant/inbox.md "Owner promise reminders in selected Lark groups"). Only the built-in
+// lark-cli source sends it: the hub ignores it from an extension, and reminds the owner privately when no to-do
+// covers the promise.
+type ConnectorOwnerPromise struct {
+	// The group chat the reply is in.
+	ChatID ConnectorLarkChatID `json:"chat_id"`
+	// The topic the reply is in.
+	TopicID ConnectorLarkTopicID `json:"topic_id"`
+	// The request the reply answers, when the connector could verify it: a to-do made from that request covers the
+	// promise.
+	RequestID ConnectorLarkMessageID `json:"request_id,omitempty"`
+	// The reply is not an explicit promise: the Inbox triage model decides, from the request (needs request_id and the
+	// thing's context), whether it is one.
+	Model bool `json:"model,omitempty"`
+}
+
+// ConnectorLarkChatID: A Lark group chat's ID.
+type ConnectorLarkChatID string
+
+// String returns the ID as it is on the wire.
+func (v ConnectorLarkChatID) String() string { return string(v) }
+
+// ConnectorLarkTopicID: A topic's ID within a Lark group chat.
+type ConnectorLarkTopicID string
+
+// String returns the ID as it is on the wire.
+func (v ConnectorLarkTopicID) String() string { return string(v) }
+
+// ConnectorLarkMessageID: A Lark message's ID.
+type ConnectorLarkMessageID string
+
+// String returns the ID as it is on the wire.
+func (v ConnectorLarkMessageID) String() string { return string(v) }
 
 type ConnectorTag struct {
 	// ConnectorTagKey, or the connector's own.
@@ -4483,9 +4533,30 @@ type ConnectorInboxReply struct {
 	ItemID       string                  `json:"item_id,omitempty"`
 	Last         string                  `json:"last,omitempty"`
 	Text         string                  `json:"text,omitempty"`
+	Mentions     []ConnectorInboxMention `json:"mentions,omitempty"`
 	ClientID     string                  `json:"client_id,omitempty"`
 	Changes      []ConnectorStatusChange `json:"changes,omitempty"`
 }
+
+// ConnectorInboxMention: binds an exact @name in the reply's text to a verified external user id, for connectors that
+// support real @ mentions.
+type ConnectorInboxMention struct {
+	ID   ConnectorMentionUserID `json:"id"`
+	Name string                 `json:"name"`
+}
+
+// ConnectorMentionUserID: A person's user ID on the connector's own service, as verified for a real @ mention.
+type ConnectorMentionUserID string
+
+// String returns the ID as it is on the wire.
+func (v ConnectorMentionUserID) String() string { return string(v) }
+
+// ConnectorOriginDeviceID: hub-authenticated paired device ID (for example dev_...) that originated the current user
+// turn.
+type ConnectorOriginDeviceID string
+
+// String returns the ID as it is on the wire.
+func (v ConnectorOriginDeviceID) String() string { return string(v) }
 
 type ConnectorStatusChange struct {
 	Ref   string `json:"ref"`
@@ -5442,6 +5513,9 @@ type KBDetail struct {
 	Minutes json.RawMessage `json:"minutes,omitempty"`
 	// An all-day recording's day recap, once written (docs/assistant/day-recap.md); kept as the hub sends them.
 	Recap json.RawMessage `json:"recap,omitempty"`
+	// A hub-transcribed meeting's speaker list and timeline (docs/assistant/meeting-minutes.md "Speakers (#17674)");
+	// absent when the meeting has no speaker timeline.
+	Speakers *KBDetailSpeakers `json:"speakers,omitempty"`
 	// A topic's knowledge points (docs/assistant/knowledge.md "Topics").
 	Points []KBTopicPoint `json:"points,omitempty"`
 	// A person's profiles by writer ("user", "ext:<id>"), as written; summary shows them too
@@ -5454,6 +5528,76 @@ type KBDetail struct {
 	ProjectMode string              `json:"project_mode,omitempty"`
 	Freshness   *KBProjectFreshness `json:"freshness,omitempty"`
 	Sources     []KBProjectSource   `json:"sources,omitempty"`
+}
+
+// KBSpeakerState: speaker separation state of a hub-transcribed meeting.
+// A value this side does not know keeps its raw string and is not Valid.
+type KBSpeakerState string
+
+const (
+	KBSpeakerStateWaiting KBSpeakerState = "waiting"
+	KBSpeakerStateReady   KBSpeakerState = "ready"
+	KBSpeakerStateFailed  KBSpeakerState = "failed"
+	KBSpeakerStateCleared KBSpeakerState = "cleared"
+)
+
+// KBSpeakerStates are the values of KBSpeakerState, in order.
+var KBSpeakerStates = []KBSpeakerState{KBSpeakerStateWaiting, KBSpeakerStateReady, KBSpeakerStateFailed, KBSpeakerStateCleared}
+
+// Valid reports whether v is one of KBSpeakerStates.
+func (v KBSpeakerState) Valid() bool {
+	switch v {
+	case KBSpeakerStateWaiting, KBSpeakerStateReady, KBSpeakerStateFailed, KBSpeakerStateCleared:
+		return true
+	}
+	return false
+}
+
+// KBSpeakerID: hub-assigned speaker identifier within a meeting (s1, s2, ...).
+type KBSpeakerID string
+
+// String returns the ID as it is on the wire.
+func (v KBSpeakerID) String() string { return string(v) }
+
+// KBSpeakerTurn: one speaking interval encoded as a 3-element JSON tuple [start, end, speaker_id].
+// It stays opaque: Heterogeneous JSON tuple [start, end, speaker_id].
+type KBSpeakerTurn json.RawMessage
+
+// MarshalJSON writes the JSON as it is (null when empty).
+func (v KBSpeakerTurn) MarshalJSON() ([]byte, error) { return json.RawMessage(v).MarshalJSON() }
+
+// UnmarshalJSON keeps a copy of the JSON as it is.
+func (v *KBSpeakerTurn) UnmarshalJSON(data []byte) error {
+	return (*json.RawMessage)(v).UnmarshalJSON(data)
+}
+
+// KBDetailSpeakers: A hub-transcribed meeting's speaker list and timeline on detail.speakers
+// (docs/assistant/meeting-minutes.md "Speakers (#17674)").
+type KBDetailSpeakers struct {
+	Rev        int64                   `json:"rev"`
+	State      KBSpeakerState          `json:"state"`
+	Reason     string                  `json:"reason"`
+	Quality    string                  `json:"quality"`
+	Source     string                  `json:"source"`
+	Done       *float64                `json:"done,omitempty"`
+	End        *float64                `json:"end,omitempty"`
+	People     []KBDetailSpeakerPerson `json:"people"`
+	Candidates []string                `json:"candidates"`
+	Spans      []KBSpeakerTurn         `json:"spans"`
+	Covered    [][]float64             `json:"covered"`
+	Trimmed    bool                    `json:"trimmed"`
+}
+
+// KBDetailSpeakerPerson: one speaker entry in detail.speakers.people.
+type KBDetailSpeakerPerson struct {
+	ID         KBSpeakerID `json:"id"`
+	Name       string      `json:"name,omitempty"`
+	Me         bool        `json:"me,omitempty"`
+	MergedInto KBSpeakerID `json:"merged_into,omitempty"`
+	Minor      bool        `json:"minor,omitempty"`
+	Seconds    float64     `json:"seconds,omitempty"`
+	Lines      int         `json:"lines,omitempty"`
+	Samples    []float64   `json:"samples,omitempty"`
 }
 
 type KBProjectSource struct {
@@ -5594,6 +5738,12 @@ type KBRecordingSegment struct {
 	// "Persona's echo"): kept in the transcript but not what the meeting said, so leave it out of anything read as the
 	// meeting's words; absent (false) on every other line.
 	Echo bool `json:"echo,omitempty"`
+	// Canonical speaker id ("s1", "s2", ...) assigned by the hub on read when a speaker timeline exists
+	// (docs/assistant/meeting-minutes.md "Speakers (#17674)"); absent otherwise.
+	Speaker string `json:"speaker,omitempty"`
+	// True when the speaker label is uncertain or the meeting's separation quality is low
+	// (docs/assistant/meeting-minutes.md "Speakers (#17674)"); absent (false) otherwise.
+	SpeakerUnsure bool `json:"speaker_unsure,omitempty"`
 }
 
 // KBDayParams: kb.day: a chat's messages of one day in the knowledge base's time zone.
@@ -5768,8 +5918,8 @@ type KBPutRecordingParams struct {
 	// An i18n code (zh-Hans, en, ja).
 	Language string              `json:"language,omitempty"`
 	Minutes  *KBRecordingMinutes `json:"minutes,omitempty"`
-	// Optional; n, source and echo are the hub's and are dropped. Without minutes, the hub makes minutes of it when the
-	// recording module is on.
+	// Optional; n, source, echo, speaker and speaker_unsure are the hub's and are dropped. Without minutes, the hub
+	// makes minutes of it when the recording module is on.
 	Transcript []KBRecordingSegment `json:"transcript,omitempty"`
 	// Slugs of existing projects to link it to; a later write never removes a link.
 	Projects []string            `json:"projects,omitempty"`
@@ -7430,8 +7580,10 @@ type MemoryEntriesResult struct {
 	// Opaque: what to send as after for the next page; required in practice whenever has_more is true.
 	After string `json:"after,omitempty"`
 	// The bytes of standing entries' text the program wants a standing channel to carry (its own setting, say). The hub
-	// keeps this budget apart from its own memory ledger's, caps it at 8192 and takes the largest any page states; left
-	// out or 0: 4096. Entries past it are left out, the most important kept.
+	// keeps this budget apart from its own memory ledger's and takes the largest any page states; it caps it at 8192, or
+	// at the owner's choice of 8192 or 16384 bytes when larger (assistant.memory_extension_standing_bytes: 4096 by
+	// default, 8192 or 16384); left out or 0: that choice, 4096 by default. Entries past it are left out, the most
+	// important kept.
 	StandingBytes int `json:"standing_bytes,omitempty"`
 }
 
@@ -9141,11 +9293,13 @@ var newDef = map[string]func() any{
 	"ConnectorMedia":                func() any { return new(ConnectorMedia) },
 	"ConnectorCollectResult":        func() any { return new(ConnectorCollectResult) },
 	"ConnectorInboxThing":           func() any { return new(ConnectorInboxThing) },
+	"ConnectorOwnerPromise":         func() any { return new(ConnectorOwnerPromise) },
 	"ConnectorTag":                  func() any { return new(ConnectorTag) },
 	"ConnectorThingExtra":           func() any { return new(ConnectorThingExtra) },
 	"ConnectorThingGroup":           func() any { return new(ConnectorThingGroup) },
 	"ConnectorThingParent":          func() any { return new(ConnectorThingParent) },
 	"ConnectorInboxReply":           func() any { return new(ConnectorInboxReply) },
+	"ConnectorInboxMention":         func() any { return new(ConnectorInboxMention) },
 	"ConnectorStatusChange":         func() any { return new(ConnectorStatusChange) },
 	"ConnectorSettleParams":         func() any { return new(ConnectorSettleParams) },
 	"ConnectorSettled":              func() any { return new(ConnectorSettled) },
@@ -9234,6 +9388,8 @@ var newDef = map[string]func() any{
 	"KBGetParams":                   func() any { return new(KBGetParams) },
 	"KBGetResult":                   func() any { return new(KBGetResult) },
 	"KBDetail":                      func() any { return new(KBDetail) },
+	"KBDetailSpeakers":              func() any { return new(KBDetailSpeakers) },
+	"KBDetailSpeakerPerson":         func() any { return new(KBDetailSpeakerPerson) },
 	"KBProjectSource":               func() any { return new(KBProjectSource) },
 	"KBProjectFreshness":            func() any { return new(KBProjectFreshness) },
 	"KBProjectFieldFreshness":       func() any { return new(KBProjectFieldFreshness) },

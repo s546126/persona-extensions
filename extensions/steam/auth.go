@@ -415,16 +415,19 @@ func (a *qrAuth) installLocked(t steamTokens) {
 func (a *qrAuth) sessionLocked() *qrSession {
 	s := a.session
 	if s != nil && s.refresh == nil {
-		expires := s.tokens.refreshExpiry
-		if s.rotation != nil {
-			expires = s.rotation.refreshExpiry
-		}
-		if !expires.After(a.now()) {
+		if !s.refreshExpiryLocked().After(a.now()) {
 			a.clearLocked(problemAuthExpired)
 			return nil
 		}
 	}
 	return s
+}
+
+func (s *qrSession) refreshExpiryLocked() time.Time {
+	if s.rotation != nil {
+		return s.rotation.refreshExpiry
+	}
+	return s.tokens.refreshExpiry
 }
 
 func (s *qrSession) currentLocked() bool {

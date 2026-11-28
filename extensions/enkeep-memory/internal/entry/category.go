@@ -151,6 +151,39 @@ var (
 		`marriage|divorce|breakup|dating|romance|parents|mother|father|daughter|son|kids|children|family conflict|in-laws)\b`)
 )
 
+// crossWordLicaiRe matches "理财" when its "理" ends a preceding verb ("整理财务", "处理财务", "管理财务"…): bookkeeping
+// and accounting chores, not the user's personal wealth management. RE2 has no look-behind, so the joint is broken
+// before the finance detectors run.
+var crossWordLicaiRe = regexp.MustCompile(`(整|处|管|清|梳|料|护|办|代|经|助|协|修|治|审|受|调|合|道|心|物|地|原|伦|推|真|条|事)理财`)
+
+// legalIDFalsePositiveRe are the known legal_id false positives older models labelled on non-work entries: the card
+// brand "visa" in a payment context (a domestic Visa card, paying through Google Play) and "告状" (complaining to
+// someone's boss), which is not a lawsuit.
+var legalIDFalsePositiveRe = regexp.MustCompile(`(?i)` +
+	`(国内|国外|境外|外币|双币|信用卡|借记卡|储蓄卡|银行卡|万事达|mastercard|master card|google\s*play|apple\s*pay|app\s*store|付款|支付|刷卡|绑卡|绑定)[^。；;\n]{0,12}\bvisa\b|` +
+	`\bvisa\b[^。；;\n]{0,12}(卡|付款|支付|扣款|账户|账号|\bcard\b|\bpay(ment)?\b|\bdebit\b|\bcredit\b)|` +
+	`被?告状|打小报告`)
+
+// LegalIDFalsePositive says whether texts carry one of the known legal_id false positives (legalIDFalsePositiveRe)
+// and nothing the strict legal_id detector accepts (a real visa, passport, H1B, lawsuit…): such a model-made legal_id
+// label is safe to clear.
+func LegalIDFalsePositive(texts ...string) bool {
+	hit := false
+	for _, raw := range texts {
+		t := strings.TrimSpace(raw)
+		if t == "" {
+			continue
+		}
+		if payloadLegalIDRe.MatchString(t) {
+			return false
+		}
+		if legalIDFalsePositiveRe.MatchString(t) {
+			hit = true
+		}
+	}
+	return hit
+}
+
 // PayloadCategories classifies sensitive categories strictly from the entry's own payload texts (0.4.0 §1.6
 // Payload-First), never from conversation topic or user correction tone. Results are deduplicated in CategoryNames
 // order.
@@ -161,11 +194,12 @@ func PayloadCategories(facet Facet, texts ...string) []string {
 		if t == "" {
 			continue
 		}
+		ft := crossWordLicaiRe.ReplaceAllString(t, "${1}理 财")
 		if payloadHealthRe.MatchString(t) {
 			matched[CatHealth] = true
 		}
-		if payloadFinanceStrictRe.MatchString(t) ||
-			(payloadFinanceSoftRe.MatchString(t) && !(IsWorkMethodFacet(facet) && payloadEngCostCtxRe.MatchString(t))) {
+		if payloadFinanceStrictRe.MatchString(ft) ||
+			(payloadFinanceSoftRe.MatchString(ft) && !(IsWorkMethodFacet(facet) && payloadEngCostCtxRe.MatchString(ft))) {
 			matched[CatFinance] = true
 		}
 		if payloadRelationshipsRe.MatchString(t) {

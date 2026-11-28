@@ -187,6 +187,22 @@ func TestStorageHidesOpErrorsAndRefusesLossyPasskeyEdits(t *testing.T) {
 	}
 }
 
+// Model the CLI's native OTP identity contract rather than echoing requested types.
+func storeCLIOTPResponse(item map[string]any) ([]byte, error) {
+	for _, raw := range item["fields"].([]any) {
+		f := raw.(map[string]any)
+		if f["type"] == "OTP" {
+			if strings.HasPrefix(f["id"].(string), "TOTP_") {
+				f["totp"] = "123456"
+			} else {
+				f["type"] = "CONCEALED"
+				delete(f, "totp")
+			}
+		}
+	}
+	return json.Marshal(item)
+}
+
 func TestStorageOTPBase32AndOtpauth(t *testing.T) {
 	const (
 		rawBase32 = "jbsw y3dp-ehpk 3pxp==\n"
@@ -202,7 +218,7 @@ func TestStorageOTPBase32AndOtpauth(t *testing.T) {
 		templates = append(templates, tpl)
 		tpl["id"] = fixItem
 		tpl["vault"] = map[string]string{"id": fixVault}
-		return json.Marshal(tpl)
+		return storeCLIOTPResponse(tpl)
 	}
 
 	target := wire.SecretStoreTarget{
@@ -276,7 +292,7 @@ func TestStorageLoginCreateUsesBuiltinFieldsWithoutFalseError(t *testing.T) {
 			"vault":    map[string]string{"id": fixVault},
 			"fields":   returned,
 		}
-		return json.Marshal(resp)
+		return storeCLIOTPResponse(resp)
 	}
 
 	target := wire.SecretStoreTarget{
@@ -350,7 +366,7 @@ func TestStorageEditRetypeToOTPAndDeleteDuplicateFields(t *testing.T) {
 			if err := json.Unmarshal(input, &written); err != nil {
 				t.Fatal(err)
 			}
-			return input, nil
+			return storeCLIOTPResponse(written)
 		},
 	}
 
@@ -388,15 +404,15 @@ func TestStorageEditRetypeToOTPAndDeleteDuplicateFields(t *testing.T) {
 		if f["id"] == "dupuser1234567890123456789" || f["id"] == "duppass1234567890123456789" {
 			t.Fatalf("deleted duplicate field still present: %+v", f)
 		}
-		if f["id"] == "totpid12345678901234567890" {
+		if f["label"] == "totp_secret" {
 			gotTotp = f
 		}
 	}
-	if gotTotp == nil || gotTotp["type"] != "OTP" || gotTotp["value"] != "otpauth://totp/Synthetic%20Login?secret=JBSWY3DPEHPK3PXP" {
+	if gotTotp == nil || !strings.HasPrefix(gotTotp["id"].(string), "TOTP_") || gotTotp["type"] != "OTP" || gotTotp["value"] != "otpauth://totp/Synthetic%20Login?secret=JBSWY3DPEHPK3PXP" {
 		t.Fatalf("totp_secret was not converted to native OTP: %+v", gotTotp)
 	}
 	if out.References["username"] != "op://"+fixVault+"/"+fixItem+"/username" ||
-		out.References["totp_secret"] != "op://"+fixVault+"/"+fixItem+"/totpid12345678901234567890" {
+		out.References["totp_secret"] != "op://"+fixVault+"/"+fixItem+"/"+gotTotp["id"].(string) {
 		t.Fatalf("unexpected edit references: %+v", out.References)
 	}
 	if _, hasDeleted := out.References["dupuser1234567890123456789"]; hasDeleted {
@@ -421,4 +437,191 @@ func TestKeepaliveStopsAtHardLimitAndAfterFailure(t *testing.T) {
 	if !n.keepaliveDue(now.Add(13*time.Hour + 6*time.Minute)) {
 		t.Fatal("foreground reauthorization did not restart keepalive")
 	}
+}
+
+func TestStorageOTPConversionAndReplacement(t *testing.T) {
+	const seed = "JBSWY3DPEHPK3PXP"
+	const uri = "otpauth://totp/Synthetic?secret=" + seed + "&issuer=Example"
+	for _, value := range []string{seed, uri} {
+		for _, mode := range []string{"keep", "replace", "delete_and_create", "existing_otp"} {
+			t.Run(mode+"/"+strings.Split(value, ":")[0], func(t *testing.T) {
+				oldID := "ordinary1234567890123456789"
+				oldType := "CONCEALED"
+				if mode == "existing_otp" {
+					oldID = "TOTP_" + oldID
+					oldType = "OTP"
+				}
+				existing := map[string]any{
+					"id": fixItem, "title": "Synthetic", "category": "LOGIN",
+					"vault": map[string]string{"id": fixVault},
+					"fields": []any{map[string]any{
+						"id":        oldID,
+						"label":     "otp",
+						"type":      oldType,
+						"value":     value,
+						"reference": "op://" + fixVault + "/" + fixItem + "/" + oldID,
+					}},
+				}
+				before, _ := json.Marshal(existing)
+				target := wire.SecretStoreTarget{Operation: "edit", Vault: fixVault, Item: fixItem, Title: "Synthetic"}
+				target.Fields = []wire.SecretStoreField{{Name: "otp", Type: "OTP", KeepValue: mode == "keep"}}
+				if mode == "delete_and_create" {
+					target.Fields = append([]wire.SecretStoreField{{Name: oldID, Delete: true}}, target.Fields...)
+				}
+				var vals []storeValue
+				if mode != "keep" {
+					vals = []storeValue{{Name: "otp", Value: []byte(value)}}
+				}
+				var newID string
+				n := &nodeApp{run: func(context.Context, ...string) ([]byte, error) { return append([]byte{}, before...), nil }}
+				n.write = func(_ context.Context, input []byte, args ...string) ([]byte, error) {
+					if strings.Contains(strings.Join(args, " "), seed) || strings.Contains(strings.Join(args, " "), "otpauth://") {
+						t.Fatal("OTP value leaked to argv")
+					}
+					var saved map[string]any
+					if err := json.Unmarshal(input, &saved); err != nil {
+						t.Fatal(err)
+					}
+					fs := saved["fields"].([]any)
+					if len(fs) != 1 {
+						t.Fatal("conversion left a duplicate field")
+					}
+					f := fs[0].(map[string]any)
+					newID = f["id"].(string)
+					if !strings.HasPrefix(newID, "TOTP_") || f["label"] != "otp" || f["type"] != "OTP" || !strings.HasPrefix(f["value"].(string), "otpauth://totp/") {
+						t.Fatal("invalid native OTP template")
+					}
+					if mode == "existing_otp" && newID != oldID {
+						t.Fatal("existing native OTP reference changed")
+					}
+					if mode != "existing_otp" {
+						if _, hasRef := f["reference"]; hasRef {
+							t.Fatal("stale reference was not stripped when replacing field ID")
+						}
+					}
+					return storeCLIOTPResponse(saved)
+				}
+				out, err := n.writeStore(context.Background(), target, vals)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if out.(wire.SecretStoreResult).References["otp"] != "op://"+fixVault+"/"+fixItem+"/"+newID {
+					t.Fatal("reference does not point at saved native OTP field")
+				}
+			})
+		}
+	}
+}
+
+func TestStorageOTPRejectsDowngradeAndMissingLiveCode(t *testing.T) {
+	for _, fault := range []string{"concealed", "concealed_with_code", "no_code", "empty_code", "whitespace_code", "wrong_id"} {
+		t.Run(fault, func(t *testing.T) {
+			n := &nodeApp{write: func(_ context.Context, input []byte, _ ...string) ([]byte, error) {
+				var saved map[string]any
+				if err := json.Unmarshal(input, &saved); err != nil {
+					t.Fatal(err)
+				}
+				saved["id"] = fixItem
+				saved["vault"] = map[string]string{"id": fixVault}
+				f := saved["fields"].([]any)[0].(map[string]any)
+				switch fault {
+				case "concealed", "concealed_with_code":
+					f["type"] = "CONCEALED"
+					if fault == "concealed_with_code" {
+						f["totp"] = "123456"
+					}
+				case "empty_code":
+					f["totp"] = ""
+				case "whitespace_code":
+					f["totp"] = " \t"
+				case "wrong_id":
+					f["id"] = "different"
+					f["totp"] = "123456"
+				}
+				return json.Marshal(saved)
+			}}
+			target := storeTarget()
+			target.Fields = []wire.SecretStoreField{{Name: "otp", Type: "OTP"}}
+			out, err := n.writeStore(context.Background(), target, []storeValue{{Name: "otp", Value: []byte("JBSWY3DPEHPK3PXP")}})
+			if err == nil || out != nil || !strings.Contains(err.Error(), "OTP write verification failed") || strings.Contains(err.Error(), "JBSWY3DPEHPK3PXP") {
+				t.Fatal("OTP downgrade or missing code was not safely rejected")
+			}
+		})
+	}
+}
+
+func TestStorageOTPRetypeToConcealedAndCLIGeneratedID(t *testing.T) {
+	t.Run("retype_otp_to_concealed_drops_totp_prefix", func(t *testing.T) {
+		oldID := "TOTP_existing12345678901234567"
+		existing := map[string]any{
+			"id": fixItem, "title": "Synthetic", "category": "LOGIN",
+			"vault": map[string]string{"id": fixVault},
+			"fields": []any{map[string]any{
+				"id":        oldID,
+				"label":     "token",
+				"type":      "OTP",
+				"value":     "otpauth://totp/Synthetic?secret=JBSWY3DPEHPK3PXP",
+				"totp":      "123456",
+				"reference": "op://" + fixVault + "/" + fixItem + "/" + oldID,
+			}},
+		}
+		before, _ := json.Marshal(existing)
+		var written map[string]any
+		n := &nodeApp{
+			run: func(context.Context, ...string) ([]byte, error) { return append([]byte{}, before...), nil },
+			write: func(_ context.Context, input []byte, _ ...string) ([]byte, error) {
+				if err := json.Unmarshal(input, &written); err != nil {
+					t.Fatal(err)
+				}
+				return json.Marshal(written)
+			},
+		}
+		target := wire.SecretStoreTarget{
+			Operation: "edit", Vault: fixVault, Item: fixItem, Title: "Synthetic",
+			Fields: []wire.SecretStoreField{{Name: "token", Type: "CONCEALED"}},
+		}
+		out, err := n.writeStore(context.Background(), target, []storeValue{{Name: "token", Value: []byte("plain-secret")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := written["fields"].([]any)[0].(map[string]any)
+		newID := f["id"].(string)
+		if strings.HasPrefix(newID, "TOTP_") || f["type"] != "CONCEALED" {
+			t.Fatalf("expected non-TOTP concealed field, got %+v", f)
+		}
+		if _, hasTOTP := f["totp"]; hasTOTP {
+			t.Fatalf("stale totp remained after retyping away from OTP: %+v", f)
+		}
+		if _, hasRef := f["reference"]; hasRef {
+			t.Fatalf("stale reference remained after replacing ID: %+v", f)
+		}
+		if out.(wire.SecretStoreResult).References["token"] != "op://"+fixVault+"/"+fixItem+"/"+newID {
+			t.Fatalf("unexpected reference: %+v", out)
+		}
+	})
+
+	t.Run("accepts_cli_reassigned_totp_id", func(t *testing.T) {
+		const cliAssigned = "TOTP_bccmifkq2zidosptuz3hijnjei"
+		n := &nodeApp{write: func(_ context.Context, input []byte, _ ...string) ([]byte, error) {
+			var saved map[string]any
+			if err := json.Unmarshal(input, &saved); err != nil {
+				t.Fatal(err)
+			}
+			saved["id"] = fixItem
+			saved["vault"] = map[string]string{"id": fixVault}
+			f := saved["fields"].([]any)[0].(map[string]any)
+			f["id"] = cliAssigned
+			f["totp"] = "654321"
+			return json.Marshal(saved)
+		}}
+		target := storeTarget()
+		target.Fields = []wire.SecretStoreField{{Name: "otp", Type: "OTP"}}
+		out, err := n.writeStore(context.Background(), target, []storeValue{{Name: "otp", Value: []byte("JBSWY3DPEHPK3PXP")}})
+		if err != nil {
+			t.Fatalf("expected CLI-assigned TOTP_ ID to succeed, got %v", err)
+		}
+		if out.(wire.SecretStoreResult).References["otp"] != "op://"+fixVault+"/"+fixItem+"/"+cliAssigned {
+			t.Fatalf("unexpected reference: %+v", out)
+		}
+	})
 }
