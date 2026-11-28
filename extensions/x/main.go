@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/nwverse/persona-extensions/extensions/x/internal/connector"
@@ -73,7 +74,9 @@ type app struct {
 	// grok runs grok and findGrok finds it (nil: the real ones); tests set fakes.
 	grok     x.GrokRunner
 	findGrok func(string) string
-	page     *page.Page
+
+	mu   sync.RWMutex
+	page *page.Page
 }
 
 // program is the extension: the connector namespace (internal/serve) and the page, both on the one connector.
@@ -83,18 +86,26 @@ func program(a *app) ext.Program {
 	return prog
 }
 
+func (a *app) currentPage() *page.Page {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.page
+}
+
 func (a *app) render(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {
-	if a.page == nil {
+	pg := a.currentPage()
+	if pg == nil {
 		return nil, &ext.Error{Code: wire.ErrorCodeNotInitialized, Message: "not initialized"}
 	}
-	return a.page.Render(ctx, r)
+	return pg.Render(ctx, r)
 }
 
 func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult, error) {
-	if a.page == nil {
+	pg := a.currentPage()
+	if pg == nil {
 		return nil, &ext.Error{Code: wire.ErrorCodeNotInitialized, Message: "not initialized"}
 	}
-	return a.page.Action(ctx, r)
+	return pg.Action(ctx, r)
 }
 
 // build is the connector for what the hub started the program with.
@@ -117,6 +128,9 @@ func (a *app) build(init serve.Init, secrets connector.Secrets) (connector.Conne
 			_ = hub.Notify(serve.InPlugin(serve.EChanged), serve.ChangedEvent{Contribution: x.ID, Scope: string(connector.ScopeInbox)})
 		})
 	}
-	a.page = page.New(c)
+	pg := page.New(c)
+	a.mu.Lock()
+	a.page = pg
+	a.mu.Unlock()
 	return c, nil
 }

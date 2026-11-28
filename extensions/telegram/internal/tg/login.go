@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nwverse/persona-extensions/extensions/telegram/internal/connector"
@@ -154,11 +155,18 @@ func (c *Conn) stepCredentials(ctx context.Context, v map[string]string) (connec
 		return credentialsPrompt("连不上 Telegram，稍后再试（" + explain(err) + "）"), nil
 	}
 	c.mu.Lock()
+	c.gen++
+	stop := c.stop
+	c.cl, c.stop = nil, nil
 	c.st = stored{APIID: id, APIHash: hash}
 	c.pending.phone, c.pending.hash = "", ""
 	c.lastSync = time.Time{} // a sign-in from the start, as after signing out
 	err = c.saveLocked(ctx)
 	c.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	c.clearBox()
 	if err != nil {
 		return connector.Prompt{}, err
 	}
@@ -176,7 +184,13 @@ func (c *Conn) waitClient(ctx context.Context) client {
 		if cl != nil || time.Now().After(deadline) || ctx.Err() != nil {
 			return cl
 		}
-		time.Sleep(100 * time.Millisecond)
+		t := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-t.C:
+		}
 	}
 }
 
@@ -214,26 +228,40 @@ func (c *Conn) Logout(ctx context.Context) error {
 		}
 	}
 	c.mu.Lock()
+	c.gen++
+	stop := c.stop
+	c.cl, c.stop = nil, nil
 	c.st, c.pending.phone, c.pending.hash = stored{}, "", ""
 	c.lastSync = time.Time{} // the account's archive: the next one starts with none
 	err := c.saveLocked(ctx)
 	c.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	c.clearBox()
 	c.setStatus(connector.Status{State: connector.StateNotSignedIn, Error: "还没填 Telegram 的 API 凭据"})
 	c.kick()
 	return err
 }
 
 // memSession keeps a session in memory: the credentials' probe connection.
-type memSession struct{ data []byte }
+type memSession struct {
+	mu   sync.Mutex
+	data []byte
+}
 
 func (m *memSession) LoadSession(context.Context) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.data == nil {
 		return nil, errNoSession
 	}
-	return m.data, nil
+	return append([]byte(nil), m.data...), nil
 }
 
 func (m *memSession) StoreSession(_ context.Context, d []byte) error {
-	m.data = d
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data = append([]byte(nil), d...)
 	return nil
 }

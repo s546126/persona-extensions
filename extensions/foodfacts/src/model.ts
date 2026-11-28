@@ -60,7 +60,7 @@ function productURL(value: unknown, code: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new ReadError("bad_answer"); }
   if (url.protocol !== "https:" || url.hostname !== "world.openfoodfacts.org" || url.username || url.password || url.port || (url.pathname !== `/product/${code}` && !url.pathname.startsWith(`/product/${code}/`))) throw new ReadError("bad_answer");
-  return url.href;
+  return Array.from(url.href).length <= 2000 ? url.href : canonical;
 }
 export interface Product {
   code: string; name: string; brands: string; quantity: string; ingredients: string; allergens: string;

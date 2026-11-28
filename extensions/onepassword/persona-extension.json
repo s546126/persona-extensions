@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "onepassword",
   "name": "1Password",
-  "version": "0.4.1",
+  "version": "0.4.5",
   "icon": "assets/icon.png",
   "description": "用 1Password 服务账号，或你某台电脑上已登录的 1Password CLI（op），连接你的保险库：助手能列出保险库，按标题、标签或网站查找条目，看条目有哪些字段和每个字段的 op:// 引用，查询工具只读；支持手机批卡后从本地文件封装写入，密码等字段的值从不交给助手。设置里的扩展密钥或模型服务商 Key 可以填 op:// 引用，用到时由它从 1Password 取值，Persona 不在磁盘上留副本。服务账号令牌加密保存在 hub；用电脑上的 op 时不需要令牌。",
   "publisher": "nwverse",

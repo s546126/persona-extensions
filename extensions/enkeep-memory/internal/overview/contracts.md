@@ -19,8 +19,8 @@ Task:
    - `communicate`: how to speak, report, format, or choose language (e.g. plain language, concise conclusions with evidence, no internal jargon);
    - `route`: general division of labor or delegation boundaries (without binding to a specific host/tool name).
 4. Grounded, concise, actionable wording:
-   - `text`: ONE clear, actionable, de-shelled sentence (<= 80 Chinese characters or <= 35 English words) stating the occasion, default action, and explicit ban when present ("在…时，助手…，不…"), grounded directly in `user_lines` and member rules. Keep `reason` under 20 words to stay compact. When writing in Chinese, always refer to the person as「用户」, never「他」or「她」.
-   - `exception`: preserve every stated exception condition from member rules or `user_lines`, de-shelled. Leave empty when none is stated.
+   - `text`: ONE concise, actionable, de-shelled sentence (<= 60 Chinese characters or <= 28 English words) stating the occasion, default action, and explicit ban when present ("在…时，助手…，不…"), grounded directly in `user_lines` and member rules. Keep `reason` under 20 words to stay compact. When writing in Chinese, always refer to the person as「用户」, never「他」or「她」.
+   - `exception`: concise (<= 35 Chinese characters or <= 18 English words), de-shelled exception condition from member rules or `user_lines` that adds genuinely new boundary info — NEVER repeat or paraphrase what `text` already states. Leave empty when none is stated or already covered in `text`.
    - `situation` and `choice`: concise occasion and default action (for counter-example search).
 
 Every rule `id` may appear in at most one contract's `rules` list overall. JSON only, matching the schema.

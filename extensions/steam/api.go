@@ -23,9 +23,11 @@ const (
 
 	vanityPath       = "/ISteamUser/ResolveVanityURL/v1/"
 	playerPath       = "/ISteamUser/GetPlayerSummaries/v2/"
+	playerLinkPath   = "/IPlayerService/GetPlayerLinkDetails/v1/"
 	ownedPath        = "/IPlayerService/GetOwnedGames/v1/"
 	recentPath       = "/IPlayerService/GetRecentlyPlayedGames/v1/"
 	achievementsPath = "/ISteamUserStats/GetPlayerAchievements/v1/"
+	progressPath     = "/IPlayerService/GetAchievementsProgress/v1/"
 	wishlistPath     = "/IWishlistService/GetWishlist/v1/"
 	storeNamesPath   = "/IStoreBrowseService/GetItems/v1/"
 	storePricesPath  = "/api/appdetails"
@@ -36,8 +38,10 @@ const (
 )
 
 type steamClient struct {
-	http *http.Client
-	key  string
+	http    *http.Client
+	key     string
+	access  string
+	refresh string // redaction only; never sent to a read endpoint
 }
 
 func steamHTTP(transport http.RoundTripper, timeout time.Duration) *http.Client {
@@ -50,9 +54,23 @@ func steamHTTP(transport http.RoundTripper, timeout time.Duration) *http.Client 
 }
 
 func (c steamClient) get(ctx context.Context, target string, params url.Values, authenticated bool, out any) problem {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	return c.readJSON(ctx, target, params, nil, authenticated, out)
+}
+
+func (c steamClient) readJSON(ctx context.Context, target string, params, form url.Values, authenticated bool, out any) problem {
+	return c.readBoundedJSON(ctx, target, params, form, authenticated, maxAPIBytes, out)
+}
+
+func (c steamClient) readBoundedJSON(ctx context.Context, target string, params, form url.Values, authenticated bool, maxBytes int64, out any) problem {
+	method := http.MethodGet
+	var body io.Reader
+	if form != nil {
+		method, body = http.MethodPost, strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil || req.URL.Scheme != "https" || req.URL.User != nil ||
-		(req.URL.Host != apiHost && req.URL.Host != storeHost) {
+		(req.URL.Host != apiHost && req.URL.Host != storeHost) ||
+		params.Has("key") || params.Has("access_token") || form.Has("key") || form.Has("access_token") {
 		return problemResponse
 	}
 	req.URL.RawQuery = params.Encode()
@@ -61,15 +79,62 @@ func (c steamClient) get(ctx context.Context, target string, params url.Values, 
 		if req.URL.Host != apiHost {
 			return problemResponse
 		}
-		req.Header.Set("X-WebAPI-Key", c.key)
+		switch {
+		case c.access != "":
+			q := req.URL.Query()
+			q.Set("access_token", c.access)
+			req.URL.RawQuery = q.Encode()
+		case c.key != "":
+			req.Header.Set("X-WebAPI-Key", c.key)
+		default:
+			return problemAuthRequired
+		}
+	}
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return requestProblem(err)
+		return sanitizeError(err)
 	}
 	defer resp.Body.Close()
-	switch resp.StatusCode {
+	if p := httpProblem(resp.StatusCode); p != "" {
+		return p
+	}
+	if c.access != "" && authenticated {
+		if header := resp.Header.Get("X-EResult"); header != "" {
+			result, err := strconv.Atoi(header)
+			if err != nil {
+				return problemResponse
+			}
+			switch issue := authResult(result); issue {
+			case "":
+			case problemAuthExpired:
+				return problemDenied
+			case problemAuthPending, problemAuthRefused:
+				return problemResponse
+			default:
+				return issue
+			}
+		}
+	}
+	if resp.ContentLength > maxBytes {
+		return problemResponse
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return sanitizeError(err)
+	}
+	if int64(len(raw)) > maxBytes || json.Unmarshal(raw, out) != nil {
+		return problemResponse
+	}
+	return ""
+}
+
+func httpProblem(status int) problem {
+	switch status {
 	case http.StatusOK:
+		return ""
 	case http.StatusTooManyRequests:
 		return problemRateLimited
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
@@ -81,23 +146,16 @@ func (c steamClient) get(ctx context.Context, target string, params url.Values, 
 	case http.StatusBadRequest:
 		return problemBadCall
 	default:
-		if resp.StatusCode >= 500 {
+		if status >= 500 {
 			return problemNetwork
 		}
 		return problemResponse
 	}
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIBytes+1))
-	if err != nil {
-		return requestProblem(err)
-	}
-	if len(raw) > maxAPIBytes || json.Unmarshal(raw, out) != nil {
-		return problemResponse
-	}
-	return ""
 }
 
-func requestProblem(err error) problem {
+// Never format a transport error. In particular, *url.Error can contain the
+// entire credential-bearing URL, and its wrapped error may contain it again.
+func sanitizeError(err error) problem {
 	var network net.Error
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -128,10 +186,22 @@ func cleanText(s string, maxRunes int) string {
 }
 
 func (c steamClient) text(s string) string {
-	if c.key != "" {
-		s = strings.ReplaceAll(s, c.key, "[redacted]")
+	return cleanText(redactCredentials(s, c.key, c.access, c.refresh), nameRunes)
+}
+
+func redactCredentials(s string, secrets ...string) string {
+	lower := strings.ToLower(s)
+	for _, marker := range []string{"https://s.team/q/", "access_token=", "refresh_token=", "request_id="} {
+		if strings.Contains(lower, marker) {
+			return "[redacted]"
+		}
 	}
-	return cleanText(s, nameRunes)
+	for _, secret := range secrets {
+		if secret != "" {
+			s = strings.ReplaceAll(s, secret, "[redacted]")
+		}
+	}
+	return s
 }
 
 func (c steamClient) resolve(ctx context.Context, name string) (*string, problem) {
@@ -160,6 +230,9 @@ func (c steamClient) resolve(ctx context.Context, name string) (*string, problem
 }
 
 func (c steamClient) profile(ctx context.Context, id string) (*player, problem) {
+	if c.access != "" {
+		return c.playerLink(ctx, id)
+	}
 	var reply struct {
 		Response *struct {
 			Players []struct {
@@ -190,18 +263,62 @@ func (c steamClient) profile(ctx context.Context, id string) (*player, problem) 
 		}
 		p := &player{SteamID: id, Name: c.text(item.Name), Public: item.Visibility == 3, State: "unknown"}
 		if p.Public {
-			states := [...]string{"offline", "online", "busy", "away", "snooze", "looking_to_trade", "looking_to_play", "invisible"}
-			if item.State >= 0 && item.State < len(states) {
-				p.State = states[item.State]
-			}
-			if appID, err := strconv.ParseUint(item.GameID, 10, 32); err == nil {
-				p.PlayApp = uint32(appID)
-			}
-			p.Playing = c.text(item.Game)
+			c.setPresence(p, &item.State, item.GameID, item.Game)
 		}
 		return p, ""
 	}
 	return nil, problemInvalidID
+}
+
+func (c steamClient) playerLink(ctx context.Context, id string) (*player, problem) {
+	var reply struct {
+		Response *struct {
+			Accounts []struct {
+				Public *struct {
+					SteamID    json.Number `json:"steamid"`
+					Name       string      `json:"persona_name"`
+					Visibility int         `json:"visibility_state"`
+				} `json:"public_data"`
+				Private *struct {
+					State  *int        `json:"persona_state"`
+					GameID json.Number `json:"game_id"`
+					Game   string      `json:"game_extra_info"`
+				} `json:"private_data"`
+			} `json:"accounts"`
+		} `json:"response"`
+	}
+	switch issue := c.get(ctx, apiBase+playerLinkPath, url.Values{"steamids[0]": {id}}, true, &reply); issue {
+	case "":
+	case problemDenied, problemMissing, problemBadCall:
+		return nil, problemProfileUnavailable
+	default:
+		return nil, issue
+	}
+	if reply.Response == nil {
+		return nil, problemResponse
+	}
+	for _, account := range reply.Response.Accounts {
+		if account.Public == nil || account.Public.SteamID.String() != id {
+			continue
+		}
+		p := &player{SteamID: id, Name: c.text(account.Public.Name), Public: account.Public.Visibility == 3, State: "unknown"}
+		if private := account.Private; private != nil {
+			c.setPresence(p, private.State, private.GameID.String(), private.Game)
+		}
+		return p, ""
+	}
+	return nil, problemProfileUnavailable
+}
+
+func (c steamClient) setPresence(p *player, state *int, gameID, name string) {
+	states := [...]string{"offline", "online", "busy", "away", "snooze", "looking_to_trade", "looking_to_play", "invisible"}
+	if state != nil && *state >= 0 && *state < len(states) {
+		p.State = states[*state]
+	}
+	if appID, err := strconv.ParseUint(gameID, 10, 32); err == nil {
+		p.PlayApp = uint32(appID)
+	}
+	p.Playing = c.text(name)
 }
 
 func (c steamClient) games(ctx context.Context, id string, recent bool) (*gameList, problem) {
@@ -267,38 +384,47 @@ func (c steamClient) games(ctx context.Context, id string, recent bool) (*gameLi
 	return list, ""
 }
 
-func (c steamClient) achievements(ctx context.Context, id string, appID uint32) (*achievementProgress, problem) {
-	var reply struct {
-		PlayerStats *struct {
-			Game         string `json:"gameName"`
-			Success      bool   `json:"success"`
-			Achievements []struct {
-				Achieved int `json:"achieved"`
-			} `json:"achievements"`
-		} `json:"playerstats"`
+func (c steamClient) achievements(ctx context.Context, id string, appID uint32, language string) (*achievementProgress, problem) {
+	if c.access != "" {
+		return c.achievementTotals(ctx, id, appID, language)
 	}
-	params := url.Values{"steamid": {id}, "appid": {appIDText(appID)}}
-	switch p := c.get(ctx, apiBase+achievementsPath, params, true, &reply); p {
+	ps, issue := c.legacyPlayerAchievements(ctx, id, appID)
+	if issue != "" {
+		return nil, issue
+	}
+	return ps.progress(appID), ""
+}
+
+func (c steamClient) achievementTotals(ctx context.Context, id string, appID uint32, language string) (*achievementProgress, problem) {
+	input, _ := json.Marshal(struct {
+		SteamID  string   `json:"steamid"`
+		Language string   `json:"language"`
+		AppIDs   []uint32 `json:"appids"`
+	}{id, language, []uint32{appID}})
+	var reply struct {
+		Response *struct {
+			Progress []struct {
+				AppID    uint32 `json:"appid"`
+				Unlocked int    `json:"unlocked"`
+				Total    *int   `json:"total"`
+			} `json:"achievement_progress"`
+		} `json:"response"`
+	}
+	switch issue := c.readJSON(ctx, apiBase+progressPath, nil, url.Values{"input_json": {string(input)}}, true, &reply); issue {
 	case "":
 	case problemDenied, problemMissing, problemBadCall:
 		return nil, problemAchievements
 	default:
-		return nil, p
+		return nil, issue
 	}
-	if reply.PlayerStats == nil {
-		return nil, problemResponse
-	}
-	ps := reply.PlayerStats
-	if !ps.Success {
-		return nil, problemAchievements
-	}
-	progress := &achievementProgress{AppID: appID, Game: c.text(ps.Game), Total: len(ps.Achievements)}
-	for _, a := range ps.Achievements {
-		if a.Achieved == 1 {
-			progress.Unlocked++
+	if reply.Response != nil {
+		for _, p := range reply.Response.Progress {
+			if p.AppID == appID && p.Total != nil && p.Unlocked >= 0 && p.Unlocked <= *p.Total {
+				return &achievementProgress{AppID: appID, Unlocked: p.Unlocked, Total: *p.Total}, ""
+			}
 		}
 	}
-	return progress, ""
+	return nil, problemAchievements
 }
 
 func appIDText(id uint32) string { return strconv.FormatUint(uint64(id), 10) }

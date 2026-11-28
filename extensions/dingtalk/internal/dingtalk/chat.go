@@ -8,6 +8,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -32,6 +33,7 @@ const (
 	// envelope. A message over it loses its blobs, last first, rather than the connection.
 	frameMost   = 63 << 20
 	maxSeen     = 300
+	maxReplied  = 1024
 	strangerGap = 10 * time.Minute
 	// titleMost is how long the title DingTalk shows in the chat list and notifications may be.
 	titleMost = 30
@@ -44,11 +46,15 @@ var sendRetryWait = time.Second
 // never handled; in a one-to-one chat the owner's message goes to the hub, a pairing code pairs, and anyone else hears
 // whose robot it is. The owner's message counts as seen only once the hub took it: when the hub fails, it is neither
 // marked seen nor settled, so DingTalk delivers it again.
-func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) bool {
+func (b *Bot) handle(ctx context.Context, c *api.Client, gen uint64, m api.Message) bool {
 	if m.ConversationType != api.ConversationSingle {
 		return true
 	}
 	b.mu.Lock()
+	if gen != b.sessionGen || b.st.ClientID == "" {
+		b.mu.Unlock()
+		return true
+	}
 	if slices.Contains(b.st.Seen, m.ID) {
 		b.mu.Unlock()
 		return true
@@ -56,10 +62,14 @@ func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) bool {
 	o := b.st.Owner
 	if o != nil && m.SenderStaffID != "" && m.SenderStaffID == o.StaffID {
 		b.mu.Unlock()
-		if !b.forward(ctx, c, m) {
+		if !b.forward(ctx, c, gen, m) {
 			return false
 		}
 		b.mu.Lock()
+		if gen != b.sessionGen || b.st.ClientID == "" {
+			b.mu.Unlock()
+			return true
+		}
 		b.markSeenLocked(m.ID)
 		b.last = b.opt.Now()
 		if o := b.st.Owner; o != nil && m.SenderNick != "" && m.SenderNick != o.Name {
@@ -95,7 +105,7 @@ func (b *Bot) markSeenLocked(id string) {
 
 // forward hands the owner's message to the hub and says whether the hub took it. When it did not, the owner hears so
 // once per message (DingTalk delivers it again, and it is tried again then).
-func (b *Bot) forward(ctx context.Context, c *api.Client, m api.Message) bool {
+func (b *Bot) forward(ctx context.Context, c *api.Client, gen uint64, m api.Message) bool {
 	msg := b.compose(ctx, c, m)
 	if empty(msg) || b.opt.Hub == nil {
 		return true
@@ -103,6 +113,10 @@ func (b *Bot) forward(ctx context.Context, c *api.Client, m api.Message) bool {
 	if err := b.opt.Hub.Receive(ctx, msg); err != nil {
 		log.Printf("dingtalk: handing a message to the hub: %v", err)
 		b.mu.Lock()
+		if gen != b.sessionGen || b.st.ClientID == "" {
+			b.mu.Unlock()
+			return false
+		}
 		told := b.hubErrorTold[m.ID]
 		if !told {
 			if len(b.hubErrorTold) >= maxSeen {
@@ -133,12 +147,15 @@ func (b *Bot) stranger(ctx context.Context, c *api.Client, m api.Message, unpair
 		b.mu.Unlock()
 		return
 	}
-	b.replied[who] = now
 	for w, at := range b.replied {
 		if now.Sub(at) >= strangerGap {
 			delete(b.replied, w)
 		}
 	}
+	if len(b.replied) >= maxReplied {
+		clear(b.replied)
+	}
+	b.replied[who] = now
 	b.mu.Unlock()
 	key := "chat.stranger"
 	if unpaired {
@@ -272,7 +289,7 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 				out.Unsupported = append(out.Unsupported, "一段没有转写的语音") // i18n-ignore: what the assistant reads
 			}
 		case api.KindFile:
-			name := p.FileName
+			name := sanitizeFileName(p.FileName)
 			most := min(int64(fileMost), left)
 			if most <= 0 {
 				out.Unsupported = append(out.Unsupported, fileLabel(name)+"（"+tooMuch+"）") // i18n-ignore: what the assistant reads
@@ -350,6 +367,22 @@ func fileMime(name string, data []byte) string {
 	return "application/octet-stream"
 }
 
+func sanitizeFileName(raw string) string {
+	s := path.Base(strings.ReplaceAll(raw, "\\", "/"))
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s = strings.TrimSpace(b.String())
+	if s == "" || s == "." || s == ".." {
+		return ""
+	}
+	return s
+}
+
 func fileLabel(name string) string {
 	if name == "" {
 		return "一个文件" // i18n-ignore: what the assistant reads
@@ -362,6 +395,9 @@ func fileLabel(name string) string {
 func Chunk(text string, most int) []string {
 	if text == "" {
 		return nil
+	}
+	if most <= 0 {
+		return []string{text}
 	}
 	var out []string
 	for utf8.RuneCountInString(text) > most {

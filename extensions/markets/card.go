@@ -22,7 +22,10 @@ const (
 var benchmarks = []string{"okx:BTC-USDT", "cn:000001.SH", "hk:HSI", "us:.IXIC"}
 
 // cardOn says whether the card is drawn: the setting, on unless set false.
-func (p *plugin) cardOn() bool { return p.cfg.OverviewCard == nil || *p.cfg.OverviewCard }
+func (p *plugin) cardOn() bool {
+	cfg, _, _ := p.configSnap()
+	return cfg.OverviewCard == nil || *cfg.OverviewCard
+}
 
 // quotesEach reads refs' quotes, asking each source once; a source that fails is left out (the first error is
 // returned with what the others gave).

@@ -130,46 +130,52 @@ func recallCmd(args []string) error {
 
 // ReviewBundleSummary captures machine-checkable acceptance metrics for the 6 v0.4.0 review artifacts (§4.3).
 type ReviewBundleSummary struct {
-	StateDir                string         `json:"state_dir"`
-	OutDir                  string         `json:"out_dir"`
-	Today                   string         `json:"today"`
-	ResidentBytesLimit      int            `json:"resident_bytes_limit"`
-	ResidentBytesActual     int            `json:"resident_bytes_actual"`
-	ResidentLines           int            `json:"resident_lines"`
-	ResidentHotLines        int            `json:"resident_hot_lines"`
-	ResidentProfileLines    int            `json:"resident_profile_lines"`
-	ResidentPrincipleLines  int            `json:"resident_principle_lines"`
-	ResidentContractLines   int            `json:"resident_contract_lines"`
-	ResidentOpsHits         int            `json:"resident_ops_hits"`
-	ResidentS6Hits          int            `json:"resident_s6_hits"`
-	ResidentOWCHits         int            `json:"resident_owc_hits"`
-	ResidentSensitiveHits   int            `json:"resident_sensitive_hits"`
-	ResidentDuplicates      int            `json:"resident_duplicates"`
-	ProfileCoreUsed         int            `json:"profile_core_used"`
-	PrinciplesUsed          int            `json:"principles_used"`
-	PrinciplesTotal         int            `json:"principles_total"`
-	PrinciplesWithPoles     int            `json:"principles_with_poles"`
-	ContractsUsed           int            `json:"contracts_used"`
-	OpsRunbooksUsed         int            `json:"ops_runbooks_used"`
-	ProfileSupervisorHits   int            `json:"profile_supervisor_hits"`
-	ProfileEmoWorkHits      int            `json:"profile_emotion_work_hits"`
-	ProfileHealthWorkHits   int            `json:"profile_health_work_hits"`
-	GraphNodesTotal         int            `json:"graph_nodes_total"`
-	GraphNodesActive        int            `json:"graph_nodes_active"`
-	GraphTasksArchived      int            `json:"graph_tasks_archived"`
-	GraphTasksActive        int            `json:"graph_tasks_active"`
-	GraphAboutArchived      int            `json:"graph_about_archived"`
-	GraphAboutActive        int            `json:"graph_about_active"`
-	GraphMerges             int            `json:"graph_merges"`
-	GraphCollabMirrors      int            `json:"graph_collab_mirrors"`
-	ContactsShown           int            `json:"contacts_shown"`
-	SensitiveByCat          map[string]int `json:"sensitive_by_cat"`
-	ColdstartLines          int            `json:"coldstart_lines"`
-	ColdstartBytes          int            `json:"coldstart_bytes"`
-	ColdstartProfileLines   int            `json:"coldstart_profile_lines"`
-	ColdstartPrincipleLines int            `json:"coldstart_principle_lines"`
-	ColdstartContractLines  int            `json:"coldstart_contract_lines"`
-	Files                   []string       `json:"files"`
+	StateDir                   string         `json:"state_dir"`
+	OutDir                     string         `json:"out_dir"`
+	Today                      string         `json:"today"`
+	ResidentBytesLimit         int            `json:"resident_bytes_limit"`
+	ResidentBytesActual        int            `json:"resident_bytes_actual"`
+	ResidentLines              int            `json:"resident_lines"`
+	ResidentHotLines           int            `json:"resident_hot_lines"`
+	ResidentProfileLines       int            `json:"resident_profile_lines"`
+	ResidentPrincipleLines     int            `json:"resident_principle_lines"`
+	ResidentContractLines      int            `json:"resident_contract_lines"`
+	ResidentOpsHits            int            `json:"resident_ops_hits"`
+	ResidentS6Hits             int            `json:"resident_s6_hits"`
+	ResidentOWCHits            int            `json:"resident_owc_hits"`
+	ResidentSensitiveHits      int            `json:"resident_sensitive_hits"`
+	ResidentDuplicates         int            `json:"resident_duplicates"`
+	ResidentTruncatedLines     int            `json:"resident_truncated_lines"`
+	ProfileCoreUsed            int            `json:"profile_core_used"`
+	PrinciplesUsed             int            `json:"principles_used"`
+	PrinciplesTotal            int            `json:"principles_total"`
+	PrinciplesWithPoles        int            `json:"principles_with_poles"`
+	ContractsUsed              int            `json:"contracts_used"`
+	OpsRunbooksUsed            int            `json:"ops_runbooks_used"`
+	ProfileSupervisorHits      int            `json:"profile_supervisor_hits"`
+	ProfileEmoWorkHits         int            `json:"profile_emotion_work_hits"`
+	ProfileHealthWorkHits      int            `json:"profile_health_work_hits"`
+	ProfileSensitivePeopleHits int            `json:"profile_sensitive_people_hits"`
+	ProfileWorldPeopleLines    int            `json:"profile_world_people_lines"`
+	ProfileWorldMaxPerPerson   int            `json:"profile_world_max_per_person"`
+	ProfileLowConfidenceHits   int            `json:"profile_low_confidence_hits"`
+	ProfileSensitiveWorkHits   int            `json:"profile_sensitive_work_hits"`
+	GraphNodesTotal            int            `json:"graph_nodes_total"`
+	GraphNodesActive           int            `json:"graph_nodes_active"`
+	GraphTasksArchived         int            `json:"graph_tasks_archived"`
+	GraphTasksActive           int            `json:"graph_tasks_active"`
+	GraphAboutArchived         int            `json:"graph_about_archived"`
+	GraphAboutActive           int            `json:"graph_about_active"`
+	GraphMerges                int            `json:"graph_merges"`
+	GraphCollabMirrors         int            `json:"graph_collab_mirrors"`
+	ContactsShown              int            `json:"contacts_shown"`
+	SensitiveByCat             map[string]int `json:"sensitive_by_cat"`
+	ColdstartLines             int            `json:"coldstart_lines"`
+	ColdstartBytes             int            `json:"coldstart_bytes"`
+	ColdstartProfileLines      int            `json:"coldstart_profile_lines"`
+	ColdstartPrincipleLines    int            `json:"coldstart_principle_lines"`
+	ColdstartContractLines     int            `json:"coldstart_contract_lines"`
+	Files                      []string       `json:"files"`
 }
 
 // reviewBundleCmd: enkeep-memory review-bundle -state <dir> -out <dir> [-lang zh-Hans] [-resident-bytes 4096] [-today YYYY-MM-DD]
@@ -178,7 +184,7 @@ func reviewBundleCmd(args []string) error {
 	stateDir := fs.String("state", "", "state directory containing state.json, overview-state.json, profile-summary.json")
 	outDir := fs.String("out", "", "output directory for the 6 v0.4.0 review artifacts")
 	lang := fs.String("lang", "zh-Hans", "language for rendering")
-	residentBytes := fs.Int("resident-bytes", 4096, "resident budget in bytes")
+	residentBytes := fs.Int("resident-bytes", 4096, "resident budget in bytes (800-16384: the hub's 4, 8 or 16 KB)")
 	today := fs.String("today", "", "reference date YYYY-MM-DD (default: latest active day)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -213,6 +219,7 @@ func GenerateReviewBundle(stateDir, outDir, lang string, residentBytes int, toda
 	if residentBytes <= 0 {
 		residentBytes = 4096
 	}
+	residentBytes = memsrc.ClampResidentBytes(residentBytes)
 	if lang == "" {
 		lang = "zh-Hans"
 	}
@@ -272,13 +279,13 @@ func GenerateReviewBundle(stateDir, outDir, lang string, residentBytes int, toda
 	// 2. principles-v04.md
 	principlesMD := renderPrinciplesV04(ov, sum)
 	// 3. profile-v04.md
-	profileMD := renderProfileV04(prof, sum)
+	profileMD := renderProfileV04(st, ov, prof, sum)
 	// 4. entities-v04.md
 	entitiesMD := renderEntitiesV04(st, today, sum)
 	// 5. sensitive-v04.md
 	sensitiveMD := renderSensitiveV04(st, sum)
 	// 6. coldstart-v04.md
-	coldstartMD, err := renderColdstartV04(st, ov, residentBytes, lang, today, sum)
+	coldstartMD, err := renderColdstartV04(st, residentBytes, lang, today, sum)
 	if err != nil {
 		return nil, fmt.Errorf("render coldstart-v04.md: %w", err)
 	}
@@ -331,8 +338,15 @@ func classifyStandingSection(e memsrc.Entry, ov *overview.State) string {
 	if e.Rank >= 994 {
 		return memsrc.BucketHot
 	}
-	if pid, ok := strings.CutPrefix(e.ID, "ov:pattern:"); ok && ov != nil {
-		if p := ov.Patterns[pid]; p != nil {
+	if strings.HasPrefix(e.ID, "ov:profile:") {
+		return memsrc.BucketProfile
+	}
+	if hexID, ok := strings.CutPrefix(e.ID, "ov:pattern:"); ok && ov != nil {
+		p := ov.Patterns["ov:"+hexID]
+		if p == nil {
+			p = ov.Patterns[hexID]
+		}
+		if p != nil {
 			switch p.KindOf() {
 			case overview.KindProfileCore:
 				return memsrc.BucketProfile
@@ -359,7 +373,8 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 		return "", err
 	}
 	var b strings.Builder
-	b.WriteString("# 新版 4 KB 常驻全文（resident-v04）\n\n")
+	fmt.Fprintf(&b, "# 新版 %s 常驻全文（resident-v04）\n\n", residentRoomLabel(residentBytes))
+	b.WriteString("> 以下编号、条目 ID 与字节标注仅用于审阅，不占用实际注入的常驻字节；每条实际注入的就是正文本身（hub 另加行首「- 」与换行）。\n\n")
 
 	totalBytes := 0
 	seenText := map[string]bool{}
@@ -384,6 +399,9 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 		if raw := st.Entries[e.ID]; raw != nil && entry.IsAssistantNote(raw.Origin) {
 			sum.ResidentS6Hits++
 		}
+		if strings.Contains(e.Text, "…") {
+			sum.ResidentTruncatedLines++
+		}
 		key := strings.TrimSpace(strings.ToLower(e.Text))
 		if seenText[key] {
 			sum.ResidentDuplicates++
@@ -402,17 +420,17 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 	fmt.Fprintf(&b, "- 总字节数：%d / %d B（超限：%t；热槽 %dB | 画像 %dB | 原则 %dB | 契约 %dB）\n",
 		totalBytes, residentBytes, totalBytes > residentBytes,
 		secBytes[memsrc.BucketHot], secBytes[memsrc.BucketProfile], secBytes[memsrc.BucketPrinciple], secBytes[memsrc.BucketContract])
-	fmt.Fprintf(&b, "- 红线审计：ops_runbook=%d | S6直通=%d | OWC外壳=%d | 敏感条目=%d | 重复=%d\n\n",
-		sum.ResidentOpsHits, sum.ResidentS6Hits, sum.ResidentOWCHits, sum.ResidentSensitiveHits, sum.ResidentDuplicates)
+	fmt.Fprintf(&b, "- 红线审计：ops_runbook=%d | S6直通=%d | OWC外壳=%d | 敏感条目=%d | 重复=%d | 截断=%d\n\n",
+		sum.ResidentOpsHits, sum.ResidentS6Hits, sum.ResidentOWCHits, sum.ResidentSensitiveHits, sum.ResidentDuplicates, sum.ResidentTruncatedLines)
 
 	sections := []struct {
 		key   string
 		title string
 	}{
-		{memsrc.BucketHot, "热槽（Hot Slot，0–10%）"},
-		{memsrc.BucketProfile, "第 1 段 · 关于你与防误读边界（~20%）"},
-		{memsrc.BucketPrinciple, "第 2 段 · 核心认知与决策原则（~28%）"},
-		{memsrc.BucketContract, "第 3 段 · 通用协作契约（~52%）"},
+		{memsrc.BucketHot, "热槽（0–10%）"},
+		{memsrc.BucketProfile, fmt.Sprintf("第 1 段 · 关于你与防误读边界（约 %.0f%%）", memsrc.ProfileShare*100)},
+		{memsrc.BucketPrinciple, fmt.Sprintf("第 2 段 · 核心认知与决策原则（约 %.0f%%）", memsrc.PrincipleShare*100)},
+		{memsrc.BucketContract, fmt.Sprintf("第 3 段 · 通用协作契约（约 %.0f%%）", memsrc.ContractShare*100)},
 	}
 	for _, s := range sections {
 		items := grouped[s.key]
@@ -422,12 +440,40 @@ func renderResidentV04(st *store.State, ov *overview.State, prof *profile.Summar
 			continue
 		}
 		for i, e := range items {
-			fmt.Fprintf(&b, "%d. `[%s]` (facet=%s, rank=%d, %dB) %s\n",
-				i+1, e.ID, e.Facet, e.Rank, len(e.Text), e.Text)
+			fmt.Fprintf(&b, "%d. %s　〔%s · %s · %d 字节〕\n", i+1, e.Text, facetNameZH(e.Facet), e.ID, len(e.Text))
 		}
 		b.WriteString("\n")
 	}
 	return b.String(), nil
+}
+
+// residentRoomLabel names a resident room for a report title: "4 KB" for 4096, "1400 B" otherwise.
+func residentRoomLabel(n int) string {
+	if n%1024 == 0 {
+		return fmt.Sprintf("%d KB", n/1024)
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+// facetNameZH is a facet's short Chinese name for review reports.
+func facetNameZH(f string) string {
+	switch entry.Facet(f) {
+	case entry.Interaction:
+		return "协作"
+	case entry.Tools:
+		return "工具"
+	case entry.Judgement:
+		return "判断"
+	case entry.Workflow:
+		return "做事"
+	case entry.World:
+		return "人和事"
+	case entry.People:
+		return "人物"
+	case entry.Persona:
+		return "画像"
+	}
+	return f
 }
 
 func renderPrinciplesV04(ov *overview.State, sum *ReviewBundleSummary) string {
@@ -505,7 +551,55 @@ func renderPrinciplesV04(ov *overview.State, sum *ReviewBundleSummary) string {
 	return b.String()
 }
 
-func renderProfileV04(prof *profile.Summary, sum *ReviewBundleSummary) string {
+// isSensitiveProfileWorkLeak reports whether a point placed inside profile.Sensitive is actually an ops_runbook or a
+// non-privacy work-methodology principle/contract that should never appear in profile:cat:*.
+func isSensitiveProfileWorkLeak(st *store.State, ov *overview.State, pt profile.Point) bool {
+	if strings.HasPrefix(pt.ID, "ov:runbook:") {
+		return true
+	}
+	if ov != nil {
+		pid := pt.ID
+		if hexID, ok := strings.CutPrefix(pid, "ov:pattern:"); ok {
+			pid = "ov:" + hexID
+		} else if hexID, ok := strings.CutPrefix(pid, "ov:profile:"); ok {
+			pid = "ov:" + hexID
+		}
+		if p := ov.Patterns[pid]; p != nil {
+			if p.IsOpsRunbook() {
+				return true
+			}
+			f := entry.Facet(p.Facet)
+			if entry.IsWorkMethodFacet(f) && len(entry.PayloadCategories(f, p.Text, p.Situation, p.Choice, p.Exception)) == 0 {
+				return true
+			}
+			return false
+		}
+	}
+	if st != nil {
+		if e := st.Entries[pt.ID]; e != nil {
+			if entry.IsOpsRunbookEntry(e) {
+				return true
+			}
+			if entry.IsWorkMethodFacet(e.Facet) {
+				for _, c := range e.Categories {
+					if c.By == entry.ByUser {
+						return false
+					}
+				}
+				return len(entry.PayloadCategories(e.Facet, e.PayloadTexts()...)) == 0
+			}
+			return false
+		}
+	}
+	for _, pfx := range []string{"i-", "t-", "j-", "w-"} {
+		if strings.HasPrefix(pt.ID, pfx) && len(entry.PayloadCategories(entry.Interaction, pt.Text)) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func renderProfileV04(st *store.State, ov *overview.State, prof *profile.Summary, sum *ReviewBundleSummary) string {
 	var b strings.Builder
 	b.WriteString("# 新版用户侧写（profile-v04）\n\n")
 	if prof == nil {
@@ -530,19 +624,78 @@ func renderProfileV04(prof *profile.Summary, sum *ReviewBundleSummary) string {
 	}
 	for _, ssec := range prof.Sensitive {
 		for _, pt := range ssec.Points {
-			if ssec.Category == entry.CatEmotion && strings.HasPrefix(pt.ID, "i-") {
-				sum.ProfileEmoWorkHits++
+			if isSensitiveProfileWorkLeak(st, ov, pt) {
+				sum.ProfileSensitiveWorkHits++
+				if ssec.Category == entry.CatEmotion {
+					sum.ProfileEmoWorkHits++
+				}
+				if ssec.Category == entry.CatHealth {
+					sum.ProfileHealthWorkHits++
+				}
 			}
-			if ssec.Category == entry.CatHealth && strings.HasPrefix(pt.ID, "i-") {
-				sum.ProfileHealthWorkHits++
+		}
+	}
+
+	// Someone else's records in the sensitive sections, people lines in the world section (and the most of any one
+	// person), and LOW_CONFIDENCE / one-off misreads anywhere in the profile.
+	raw := func(id string) *entry.Entry {
+		if st == nil {
+			return nil
+		}
+		return st.Entries[id]
+	}
+	for _, ssec := range prof.Sensitive {
+		for _, pt := range ssec.Points {
+			if e := raw(pt.ID); e != nil && e.Facet == entry.People {
+				sum.ProfileSensitivePeopleHits++
+			}
+		}
+	}
+	perPerson := map[string]int{}
+	for _, sec := range prof.Sections {
+		for _, pt := range sec.Points {
+			e := raw(pt.ID)
+			if e == nil {
+				continue
+			}
+			if entry.IsUnreliableOneOff(e) {
+				sum.ProfileLowConfidenceHits++
+			}
+			if sec.Facet != entry.World {
+				continue
+			}
+			var names []string
+			if e.Facet == entry.People {
+				names = []string{e.Person}
+			} else if strings.HasPrefix(e.Subject, "person:") {
+				names = []string{e.Subject}
+				if strings.HasPrefix(e.Target, "person:") {
+					names = append(names, e.Target)
+				}
+			}
+			if len(names) > 0 {
+				sum.ProfileWorldPeopleLines++
+			}
+			for _, n := range names {
+				perPerson[n]++
+				sum.ProfileWorldMaxPerPerson = max(sum.ProfileWorldMaxPerPerson, perPerson[n])
+			}
+		}
+	}
+	for _, ssec := range prof.Sensitive {
+		for _, pt := range ssec.Points {
+			if e := raw(pt.ID); e != nil && entry.IsUnreliableOneOff(e) {
+				sum.ProfileLowConfidenceHits++
 			}
 		}
 	}
 
 	fmt.Fprintf(&b, "- 模式：%s | 语言：%s | 日期：%s | 覆盖源条目：%d/%d\n",
 		prof.Mode, prof.Lang, prof.Day, prof.CoveredCount, prof.SourceCount)
-	fmt.Fprintf(&b, "- 红线审计：AI主管幻觉=%d | emotion混入interaction=%d | health混入interaction=%d\n\n",
-		sum.ProfileSupervisorHits, sum.ProfileEmoWorkHits, sum.ProfileHealthWorkHits)
+	fmt.Fprintf(&b, "- 红线审计：AI主管幻觉=%d | 敏感区混入工作规矩/手册=%d（emotion=%d, health=%d）| 敏感区混入他人记录=%d | 低置信/孤立误抽=%d\n",
+		sum.ProfileSupervisorHits, sum.ProfileSensitiveWorkHits, sum.ProfileEmoWorkHits, sum.ProfileHealthWorkHits,
+		sum.ProfileSensitivePeopleHits, sum.ProfileLowConfidenceHits)
+	fmt.Fprintf(&b, "- 人和事分区：他人人物卡片与他人关系 %d 条（单人最多 %d 条）\n\n", sum.ProfileWorldPeopleLines, sum.ProfileWorldMaxPerPerson)
 
 	if prof.Overview != "" {
 		b.WriteString("## 总览\n\n")
@@ -754,13 +907,13 @@ func renderSensitiveV04(st *store.State, sum *ReviewBundleSummary) string {
 	return b.String()
 }
 
-func renderColdstartV04(st *store.State, ov *overview.State, residentBytes int, lang, today string, sum *ReviewBundleSummary) (string, error) {
+func renderColdstartV04(st *store.State, residentBytes int, lang, today string, sum *ReviewBundleSummary) (string, error) {
 	refTime := time.Now()
 	if t, err := time.Parse("2006-01-02", today); err == nil {
 		refTime = t
 	}
-	// Deep-clone state and strip all S6 assistant notes (handwritten / assistant_note) to simulate a blank new user
-	// with zero handwritten memory/*.md files and zero prior profile-summary.json.
+	// Deep-clone state and strip all S6 assistant notes (handwritten / assistant_note), passing ov=nil and prof=nil
+	// to genuinely simulate a blank new user with 0 S6 notes + 0 L1 patterns relying purely on T0/T1 L0 behavior data.
 	clone, err := st.Clone(refTime)
 	if err != nil {
 		return "", err
@@ -776,33 +929,7 @@ func renderColdstartV04(st *store.State, ov *overview.State, residentBytes int, 
 		}
 	}
 
-	// Filter overview patterns so any pattern resting solely on removed S6 entries is excluded.
-	ovClone := ov.Clone()
-	for id, p := range ovClone.Patterns {
-		if p == nil {
-			continue
-		}
-		var keptEv []string
-		for _, eid := range p.EvidenceIDs {
-			if _, ok := clone.Entries[eid]; ok {
-				keptEv = append(keptEv, eid)
-			}
-		}
-		if len(p.EvidenceIDs) > 0 && len(keptEv) == 0 {
-			delete(ovClone.Patterns, id)
-		} else {
-			p.EvidenceIDs = keptEv
-		}
-		var keptCov []string
-		for _, cid := range p.CoveredIDs {
-			if _, ok := clone.Entries[cid]; ok {
-				keptCov = append(keptCov, cid)
-			}
-		}
-		p.CoveredIDs = keptCov
-	}
-
-	standing, err := collectStandingEntries(clone, ovClone, nil, residentBytes)
+	standing, err := collectStandingEntries(clone, nil, nil, residentBytes)
 	if err != nil {
 		return "", err
 	}
@@ -811,7 +938,7 @@ func renderColdstartV04(st *store.State, ov *overview.State, residentBytes int, 
 	coldGrouped := map[string][]memsrc.Entry{}
 	for _, e := range standing {
 		totalBytes += len(e.Text) + 3
-		sec := classifyStandingSection(e, ovClone)
+		sec := classifyStandingSection(e, nil)
 		coldGrouped[sec] = append(coldGrouped[sec], e)
 	}
 	sum.ColdstartLines = len(standing)
@@ -821,8 +948,8 @@ func renderColdstartV04(st *store.State, ov *overview.State, residentBytes int, 
 	sum.ColdstartContractLines = len(coldGrouped[memsrc.BucketContract])
 
 	var b strings.Builder
-	b.WriteString("# 空白新用户冷启动仿真产物（coldstart-v04）\n\n")
-	fmt.Fprintf(&b, "- 仿真条件：剔除全部 S6 笔记（共移除 %d 条），清空 `profile-summary`，仅凭 T0/T1 行为数据编译常驻\n", strippedS6)
+	b.WriteString("# 空白新用户冷启动仿真产物（0 S6 + 0 L1 纯行为冷启动仿真 · coldstart-v04）\n\n")
+	fmt.Fprintf(&b, "- 仿真条件：0 S6 + 0 L1 纯行为冷启动仿真——剔除全部 S6 笔记（共移除 %d 条），置空全部 L1 Overview（`ov=nil`）与 `profile-summary`，仅凭 T0/T1 L0 行为数据通过三段回退编译常驻\n", strippedS6)
 	fmt.Fprintf(&b, "- 产出条数：%d 条（画像 %d | 原则 %d | 契约 %d | 热槽 %d）| 总字节数：%d / %d B | 语言：%s\n\n",
 		len(standing), sum.ColdstartProfileLines, sum.ColdstartPrincipleLines, sum.ColdstartContractLines,
 		len(coldGrouped[memsrc.BucketHot]), totalBytes, residentBytes, lang)
@@ -832,7 +959,7 @@ func renderColdstartV04(st *store.State, ov *overview.State, residentBytes int, 
 		b.WriteString("_（空）_\n")
 	}
 	for i, e := range standing {
-		sec := classifyStandingSection(e, ovClone)
+		sec := classifyStandingSection(e, nil)
 		fmt.Fprintf(&b, "%d. `[%s]` (section=%s, facet=%s, rank=%d) %s\n", i+1, e.ID, sec, e.Facet, e.Rank, e.Text)
 	}
 	return b.String(), nil

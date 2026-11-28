@@ -32,16 +32,21 @@ const (
 	// envelope. A message over it loses its blobs, last first, rather than the connection.
 	frameMost   = 63 << 20
 	maxSeen     = 300
+	maxReplied  = 1024
 	strangerGap = 10 * time.Minute
 )
 
 // handle takes one message to the robot. Groups are never handled; in a one-to-one chat the owner's message goes to
 // the hub, a pairing code pairs, and anyone else hears whose robot it is.
-func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) {
+func (b *Bot) handle(ctx context.Context, c *api.Client, gen uint64, m api.Message) {
 	if m.ChatType != api.ChatSingle || m.From.UserID == "" {
 		return
 	}
 	b.mu.Lock()
+	if gen != b.sessionGen || b.st.BotID == "" {
+		b.mu.Unlock()
+		return
+	}
 	if slices.Contains(b.st.Seen, m.ID) {
 		b.mu.Unlock()
 		return
@@ -54,6 +59,10 @@ func (b *Bot) handle(ctx context.Context, c *api.Client, m api.Message) {
 			return
 		}
 		b.mu.Lock()
+		if gen != b.sessionGen || b.st.BotID == "" || b.st.Owner == nil || b.st.Owner.UserID != m.From.UserID {
+			b.mu.Unlock()
+			return
+		}
 		b.markSeenLocked(m.ID)
 		b.last = b.opt.Now()
 		b.saveLocked(ctx)
@@ -115,12 +124,15 @@ func (b *Bot) stranger(ctx context.Context, who string, unpaired bool) {
 		b.mu.Unlock()
 		return
 	}
-	b.replied[who] = now
 	for w, at := range b.replied {
 		if now.Sub(at) >= strangerGap {
 			delete(b.replied, w)
 		}
 	}
+	if len(b.replied) >= maxReplied {
+		clear(b.replied)
+	}
+	b.replied[who] = now
 	b.mu.Unlock()
 	key := "chat.stranger"
 	if unpaired {
@@ -242,14 +254,15 @@ func (b *Bot) compose(ctx context.Context, c *api.Client, m api.Message) wire.Ch
 			}
 		case api.KindFile:
 			most := min(int64(fileMost), left)
+			rawName := api.SanitizeFileName(p.FileName)
 			if most <= 0 {
-				out.Unsupported = append(out.Unsupported, fileLabel(p.FileName)+"（"+tooMuch+"）") // i18n-ignore: what the assistant reads
+				out.Unsupported = append(out.Unsupported, fileLabel(rawName)+"（"+tooMuch+"）") // i18n-ignore: what the assistant reads
 				continue
 			}
 			data, given, err := c.Download(ctx, p.URL, p.AESKey, most)
-			name := p.FileName
+			name := rawName
 			if name == "" {
-				name = given
+				name = api.SanitizeFileName(given)
 			}
 			switch {
 			case errors.Is(err, api.ErrTooLarge) && most < fileMost:
@@ -326,6 +339,9 @@ func fileLabel(name string) string {
 func Chunk(text string, most int) []string {
 	if text == "" {
 		return nil
+	}
+	if most <= 0 {
+		return []string{text}
 	}
 	var out []string
 	for utf8.RuneCountInString(text) > most {

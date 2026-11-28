@@ -118,11 +118,16 @@ func topicID(raw json.RawMessage) (int64, error) {
 		s = n.String()
 	}
 	s = strings.TrimSpace(s)
+	digits := ""
 	if m := topicLinkRE.FindStringSubmatch(s); m != nil {
-		return strconv.ParseInt(m[1], 10, 64)
+		digits = m[1]
+	} else if m := topicIDRE.FindStringSubmatch(s); m != nil && m[1] == s {
+		digits = m[1]
 	}
-	if m := topicIDRE.FindStringSubmatch(s); m != nil && m[1] == s {
-		return strconv.ParseInt(m[1], 10, 64)
+	if digits != "" {
+		if id, err := strconv.ParseInt(digits, 10, 64); err == nil && id > 0 {
+			return id, nil
+		}
 	}
 	return 0, fmt.Errorf("「%s」不是 LINUX DO 的帖子", clip(s, 80))
 }
@@ -138,6 +143,7 @@ type hot struct {
 }
 
 func (p *plugin) hotAnswer(ctx context.Context, list string, filtered bool, keywords []string, limit int) (hot, error) {
+	cfg, _ := p.snapshot()
 	topics, err := p.hot(ctx, list, false)
 	if err != nil {
 		return hot{}, err
@@ -146,7 +152,7 @@ func (p *plugin) hotAnswer(ctx context.Context, list string, filtered bool, keyw
 	f, narrow := filter{Keywords: keywords}, filter{}
 	if filtered {
 		// The call's keywords narrow what the settings keep; merged into the settings' OR list they would widen it.
-		f, narrow = p.cfg.filter(), filter{Keywords: keywords}
+		f, narrow = cfg.filter(), filter{Keywords: keywords}
 	}
 	topics = narrow.apply(f.apply(topics))
 	d := f.describe()
@@ -182,19 +188,20 @@ func (a hot) text() string {
 }
 
 func (p *plugin) toolTopic(ctx context.Context, id int64, replies int) (string, error) {
+	_, loc := p.snapshot()
 	t, err := p.topic(ctx, id)
 	if err != nil {
 		return "", err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "「%s」 %s\n%s\n", oneLine(t.Title), topicURL(t.ID), topicMeta(t, p.loc))
+	fmt.Fprintf(&b, "「%s」 %s\n%s\n", oneLine(t.Title), topicURL(t.ID), topicMeta(t, loc))
 	if op, ok := t.opening(); ok {
 		b.WriteString("\n" + clip(plainText(op.Cooked), 8000) + "\n")
 	}
 	if rs := t.bestReplies(replies); len(rs) > 0 {
 		fmt.Fprintf(&b, "\n前 %d 楼里最热的回复：\n", len(t.PostStream.Posts))
 		for _, r := range rs {
-			fmt.Fprintf(&b, "#%d %s（%s，%d 赞）：%s\n", r.PostNumber, r.Username, r.CreatedAt.In(p.loc).Format("01-02 15:04"), r.likes(),
+			fmt.Fprintf(&b, "#%d %s（%s，%d 赞）：%s\n", r.PostNumber, r.Username, r.CreatedAt.In(loc).Format("01-02 15:04"), r.likes(),
 				clip(oneLine(plainText(r.Cooked)), 800))
 		}
 	}

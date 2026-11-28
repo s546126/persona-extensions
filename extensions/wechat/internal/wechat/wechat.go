@@ -64,16 +64,17 @@ type Bot struct {
 	opt     Options
 	secrets Secrets
 
-	mu      sync.Mutex
-	st      state
-	loaded  bool
-	status  wire.ConnectorStatus
-	client  *ilink.Client // for the bound token; nil while not bound
-	qr      *pendingQR
-	wake    chan struct{}
-	typing  *typing // the owner's chat shows the bot writing (the hub says while a turn goes on)
-	replied map[string]time.Time
-	quotes  *quoteStore
+	mu         sync.Mutex
+	st         state
+	loaded     bool
+	status     wire.ConnectorStatus
+	client     *ilink.Client // for the bound token; nil while not bound
+	pollCancel context.CancelFunc
+	qr         *pendingQR
+	wake       chan struct{}
+	typing     *typing // the owner's chat shows the bot writing (the hub says while a turn goes on)
+	replied    map[string]time.Time
+	quotes     *quoteStore
 	// progress is how far each ref's channel.send got, oldest ref first in progressOrder (chat.go sendProgress).
 	progress      map[string]sendProgress
 	progressOrder []string
@@ -214,6 +215,19 @@ func (b *Bot) Run(ctx context.Context) {
 
 var backoff = []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
 
+func (b *Bot) cancelPollLocked() {
+	if b.pollCancel != nil {
+		b.pollCancel()
+		b.pollCancel = nil
+	}
+}
+
+func (b *Bot) isBound(token string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.st.Creds != nil && b.st.Creds.Token == token
+}
+
 // serve long-polls with creds until they change, are refused or ctx ends.
 func (b *Bot) serve(ctx context.Context, creds ilink.Credentials) {
 	c, err := b.opt.NewClient(creds.BaseURL, creds.Token)
@@ -222,21 +236,35 @@ func (b *Bot) serve(ctx context.Context, creds ilink.Credentials) {
 		b.unbind(ctx, "")
 		return
 	}
+	sctx, cancel := context.WithCancel(ctx)
 	b.mu.Lock()
+	if b.st.Creds == nil || b.st.Creds.Token != creds.Token {
+		b.mu.Unlock()
+		cancel()
+		return
+	}
 	b.client = c
+	b.pollCancel = cancel
 	b.mu.Unlock()
 	defer func() {
+		cancel()
 		b.mu.Lock()
-		b.client = nil
+		if b.client == c {
+			b.client = nil
+			b.pollCancel = nil
+		}
 		b.mu.Unlock()
 	}()
 	ok := wire.ConnectorStatus{State: wire.ConnectorStateOk, Account: account(b.lang(), &creds), Via: t(b.lang(), "wechat.via")}
-	if err := c.NotifyStart(ctx); err != nil {
+	if err := c.NotifyStart(sctx); err != nil && sctx.Err() == nil {
 		log.Printf("wechat: notify start: %v", err) // not needed to receive messages
+	}
+	if !b.isBound(creds.Token) || sctx.Err() != nil {
+		return
 	}
 	b.setStatus(ok)
 	failures := 0
-	for ctx.Err() == nil {
+	for sctx.Err() == nil {
 		b.mu.Lock()
 		still := b.st.Creds != nil && b.st.Creds.Token == creds.Token
 		cursor := b.st.Cursor
@@ -244,9 +272,12 @@ func (b *Bot) serve(ctx context.Context, creds ilink.Credentials) {
 		if !still {
 			return
 		}
-		p, err := c.GetUpdates(ctx, cursor)
+		p, err := c.GetUpdates(sctx, cursor)
 		if err != nil {
-			if ctx.Err() != nil {
+			if sctx.Err() != nil {
+				break
+			}
+			if !b.isBound(creds.Token) {
 				return
 			}
 			switch {
@@ -261,17 +292,23 @@ func (b *Bot) serve(ctx context.Context, creds ilink.Credentials) {
 			}
 			wait := backoff[min(failures, len(backoff)-1)]
 			failures++
-			if !sleep(ctx, wait) {
-				return
+			if !sleep(sctx, wait) {
+				break
 			}
 			continue
+		}
+		if !b.isBound(creds.Token) || sctx.Err() != nil {
+			break
 		}
 		if failures > 0 {
 			b.setStatus(ok)
 			failures = 0
 		}
 		for _, m := range p.Messages {
-			b.handle(ctx, c, creds, m)
+			if !b.isBound(creds.Token) || sctx.Err() != nil {
+				break
+			}
+			b.handle(sctx, c, creds, m)
 		}
 		b.mu.Lock()
 		if b.st.Creds != nil && b.st.Creds.Token == creds.Token && b.st.Cursor != p.Cursor {
@@ -280,9 +317,11 @@ func (b *Bot) serve(ctx context.Context, creds ilink.Credentials) {
 		}
 		b.mu.Unlock()
 	}
-	stop, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	_ = c.NotifyStop(stop)
+	if ctx.Err() != nil {
+		stop, stopCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stopCancel()
+		_ = c.NotifyStop(stop)
+	}
 }
 
 // unbind forgets the bound token (only if it is still token, when given), keeping it among the old ones.
@@ -292,9 +331,12 @@ func (b *Bot) unbind(ctx context.Context, token string) {
 	if b.st.Creds == nil || token != "" && b.st.Creds.Token != token {
 		return
 	}
+	b.cancelPollLocked()
 	b.st.Old = rememberToken(b.st.Old, b.st.Creds.Token)
 	b.st.Creds, b.st.Cursor, b.st.Context = nil, "", ""
 	b.typing = nil
+	b.replied = map[string]time.Time{}
+	b.status.LastEvent = time.Time{}
 	b.forgetSendsLocked()
 	b.saveLocked(ctx)
 	if b.quotes != nil {

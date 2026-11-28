@@ -41,7 +41,7 @@ func (a *app) toolDistrict(ctx context.Context, in args) (string, error) {
 	if in.Keywords != "" {
 		q.Set("keywords", in.Keywords)
 	}
-	body, err := a.client.get(ctx, groupLBS, "/v3/config/district", q, geoFor)
+	body, err := a.currentClient().get(ctx, groupLBS, "/v3/config/district", q, geoFor)
 	if err != nil {
 		return "", err
 	}

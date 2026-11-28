@@ -69,12 +69,17 @@ func (a *app) update(now time.Time, fn func(*state)) error {
 
 func program() ext.Program {
 	var m struct {
+		Version     string         `json:"version"`
 		Contributes map[string]any `json:"contributes"`
 	}
 	if err := json.Unmarshal(manifest, &m); err != nil {
 		panic(err)
 	}
-	var current atomic.Pointer[app]
+	var (
+		current  atomic.Pointer[app]
+		initMu   sync.Mutex
+		stopPrev context.CancelFunc
+	)
 	get := func() (*app, error) {
 		a := current.Load()
 		if a == nil {
@@ -82,7 +87,7 @@ func program() ext.Program {
 		}
 		return a, nil
 	}
-	return ext.Program{ID: "water", Version: "0.4.0", Manifest: manifest,
+	return ext.Program{ID: "water", Version: m.Version, Manifest: manifest,
 		Init: func(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]any, error) {
 			c := defaults()
 			if err := in.Config(&c); err != nil {
@@ -95,10 +100,19 @@ func program() ext.Program {
 			if err != nil {
 				return nil, err
 			}
-			a.invalidate = hub.Invalidate
-			go a.sendWidgets(ctx)
+			if hub != nil {
+				a.invalidate = hub.Invalidate
+			}
+			runCtx, runCancel := context.WithCancel(ctx)
+			initMu.Lock()
+			if stopPrev != nil {
+				stopPrev()
+			}
+			stopPrev = runCancel
 			current.Store(a)
-			go a.run(ctx)
+			initMu.Unlock()
+			go a.sendWidgets(runCtx)
+			go a.run(runCtx)
 			return m.Contributes, nil
 		}, Shortcuts: map[string]ext.Shortcut{"log_water": func(ctx context.Context, r *ext.ShortcutRequest) (*wire.ShortcutResult, error) {
 			a, err := get()

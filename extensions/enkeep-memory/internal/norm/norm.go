@@ -147,3 +147,22 @@ func Shared(a, b string) int {
 	}
 	return n
 }
+
+// Overlap is the Szymkiewicz–Simpson overlap coefficient of two texts' character bigrams (canonical form),
+// |A ∩ B| / min(|A|, |B|), 0–1. Unlike Jaccard, it detects when a short clause is largely contained in a longer line.
+func Overlap(a, b string) float64 {
+	ba, bb := bigrams(Q(a)), bigrams(Q(b))
+	if len(ba) == 0 || len(bb) == 0 {
+		if Q(a) == Q(b) {
+			return 1
+		}
+		return 0
+	}
+	inter := 0
+	for k := range ba {
+		if bb[k] {
+			inter++
+		}
+	}
+	return float64(inter) / float64(min(len(ba), len(bb)))
+}

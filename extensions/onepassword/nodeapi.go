@@ -36,6 +36,9 @@ func (n nodeAPI) ask(ctx context.Context, method string, params map[string]any, 
 	if d, ok := ctx.Deadline(); ok {
 		params["within_ms"] = max(time.Until(d).Milliseconds(), 1)
 	}
+	if isQuiet(ctx) {
+		params["quiet"] = true // op there must not prompt: an earlier answer stands in (quiet.go)
+	}
 	return n.call(ctx, n.machine, method, params, out)
 }
 

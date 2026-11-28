@@ -216,10 +216,7 @@ func (p *plugin) toolCandles(ctx context.Context, symbol, bar string, limit int)
 	if len(cs) == 0 {
 		return fmt.Sprintf("%s 没给 %s 的 %s K 线", src.Name(), r, bar), nil
 	}
-	loc := time.Local
-	if p.loc != nil {
-		loc = p.loc
-	}
+	loc := p.zone()
 	zone := loc.String()
 	if loc == time.Local { // "Local" says nothing: the offset does
 		zone = "UTC" + time.Now().In(loc).Format("-07:00")

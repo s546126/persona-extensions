@@ -79,6 +79,7 @@ func fixture() *store.State {
 	cd := class("cd", entry.Judgement, "tabs everywhere in gamma")
 	cd.First, cd.Last, cd.Evidence = "2026-11-18", "2026-11-18", []entry.Evidence{{Source: entry.SrcAssistant, Ref: "unit/b1", Day: "2026-11-18", Quote: "q"}}
 	ch := class("ch", entry.Persona, "rest", h1, h2, h3)
+	ch.Categories = []entry.Category{{Name: entry.CatHealth, By: entry.ByUser}}
 	return state(a1, a2, a3, a4, b1, b2, h1, h2, h3, x1, x2, ca, cb, cc, cd, ch)
 }
 

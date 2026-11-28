@@ -187,13 +187,19 @@ func firstLine(s string) string {
 
 // do answers actions.do: the change the user just approved, once per request id.
 func (a *App) do(ctx context.Context, p wire.ConnectorDoParams) (wire.ConnectorCallResult, error) {
-	return a.ledger.once(p.RequestID, func() (wire.ConnectorCallResult, error) {
+	return a.getLedger().once(p.RequestID, func() (wire.ConnectorCallResult, error) {
 		args, err := decodeArgs(p.Args)
 		if err != nil {
 			return wire.ConnectorCallResult{}, err
 		}
 		switch p.Name {
 		case "chatgpt_write":
+			if args.Name == "" {
+				return wire.ConnectorCallResult{}, errors.New("name is empty: which app tool? (chatgpt_apps lists them)")
+			}
+			if len(args.Arguments) > 0 && string(args.Arguments) != "null" && !jsonObject(args.Arguments) {
+				return wire.ConnectorCallResult{}, errors.New("arguments must be an object")
+			}
 			t, err := a.findTool(ctx, args.Name)
 			if err != nil {
 				return wire.ConnectorCallResult{}, err

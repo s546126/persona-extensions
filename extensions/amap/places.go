@@ -44,7 +44,7 @@ func (a *app) geocode(ctx context.Context, address, city string) ([]geocode, err
 	if city != "" {
 		q.Set("city", city)
 	}
-	body, err := a.client.get(ctx, groupLBS, "/v3/geocode/geo", q, geoFor)
+	body, err := a.currentClient().get(ctx, groupLBS, "/v3/geocode/geo", q, geoFor)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (a *app) search(ctx context.Context, keywords, city string, cityOnly bool, 
 			q.Set("city_limit", "true")
 		}
 	}
-	body, err := a.client.get(ctx, groupSearch, "/v5/place/text", q, searchFor)
+	body, err := a.currentClient().get(ctx, groupSearch, "/v5/place/text", q, searchFor)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +214,7 @@ func (a *app) locateBySearch(ctx context.Context, text, city string) (place, err
 	if city != "" {
 		q.Set("region", city)
 	}
-	body, err := a.client.get(ctx, groupSearch, "/v5/place/text", q, geoFor)
+	body, err := a.currentClient().get(ctx, groupSearch, "/v5/place/text", q, geoFor)
 	if err != nil {
 		return place{}, err
 	}
@@ -253,7 +253,7 @@ func (a *app) reverse(ctx context.Context, p point, all bool) (regeocode, error)
 		q.Set("extensions", "all")
 		q.Set("radius", "500")
 	}
-	body, err := a.client.get(ctx, groupLBS, "/v3/geocode/regeo", q, geoFor)
+	body, err := a.currentClient().get(ctx, groupLBS, "/v3/geocode/regeo", q, geoFor)
 	if err != nil {
 		return regeocode{}, err
 	}
@@ -335,7 +335,7 @@ func (a *app) toolNearby(ctx context.Context, in args) (wire.ConnectorCallResult
 	} else {
 		q.Set("sortrule", "distance")
 	}
-	body, err := a.client.get(ctx, groupSearch, "/v5/place/around", q, searchFor)
+	body, err := a.currentClient().get(ctx, groupSearch, "/v5/place/around", q, searchFor)
 	if err != nil {
 		return wire.ConnectorCallResult{}, err
 	}
@@ -705,7 +705,7 @@ func (a *app) toolInputTips(ctx context.Context, in args) (string, error) {
 	if hasPoint {
 		q.Set("location", amapLocation(center))
 	}
-	body, err := a.client.get(ctx, groupSearch, "/v3/assistant/inputtips", q, searchFor)
+	body, err := a.currentClient().get(ctx, groupSearch, "/v3/assistant/inputtips", q, searchFor)
 	if err != nil {
 		return "", err
 	}

@@ -76,16 +76,31 @@ func (a *app) init(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any,
 	if err := in.Config(&cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
+	loc := time.Local
 	if cfg.TZ != "" {
-		loc, err := time.LoadLocation(cfg.TZ)
+		l, err := time.LoadLocation(cfg.TZ)
 		if err != nil {
 			return nil, fmt.Errorf("时区 %q 不认识", cfg.TZ)
 		}
-		a.loc = loc
+		loc = l
 	}
+	nodes, badNodes := cleanNodes(cfg.Nodes)
+	a.mu.Lock()
+	a.loc = loc
 	a.cfg = cfg
-	a.nodes, a.badNodes = cleanNodes(cfg.Nodes)
+	a.nodes, a.badNodes = nodes, badNodes
+	a.mu.Unlock()
 	return nil, nil
+}
+
+func (a *app) snapshot() (Config, []string, []string, *time.Location) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	loc := a.loc
+	if loc == nil {
+		loc = time.Local
+	}
+	return a.cfg, a.nodes, a.badNodes, loc
 }
 
 // read reads the site and keeps how it went for the status. An older copy standing in is a failed read, whatever

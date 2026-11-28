@@ -41,19 +41,23 @@ type MergePair struct {
 
 // MergeReport summarizes everything ResolveAndMerge cleaned, archived, deduplicated, and merged.
 type MergeReport struct {
-	PrefixedCleaned    int         `json:"prefixed_cleaned"`
-	ArchivedTasks      int         `json:"archived_tasks"`
-	ArchivedAbout      int         `json:"archived_about"`
-	ArchivedSameCircle int         `json:"archived_same_circle"`
-	DedupedCollabEdges int         `json:"deduped_collab_edges"`
-	Tier1PrefixMerged  int         `json:"tier1_prefix_merged"`
-	Tier1ContactMerged int         `json:"tier1_contact_merged"`
-	Tier1CNShortMerged int         `json:"tier1_cn_short_merged"`
-	Tier2PairsChecked  int         `json:"tier2_pairs_checked"`
-	Tier2Batches       int         `json:"tier2_batches"`
-	Tier2Merged        int         `json:"tier2_merged"`
-	TotalMerged        int         `json:"total_merged"`
-	Merges             []MergePair `json:"merges,omitempty"`
+	PrefixedCleaned    int `json:"prefixed_cleaned"`
+	ArchivedTasks      int `json:"archived_tasks"`
+	ArchivedAbout      int `json:"archived_about"`
+	ArchivedSameCircle int `json:"archived_same_circle"`
+	DedupedCollabEdges int `json:"deduped_collab_edges"`
+	Tier1PrefixMerged  int `json:"tier1_prefix_merged"`
+	// MisfiledPersonRetyped / MisfiledPersonMerged count person nodes whose names say software or a service
+	// ("enkeep-memory 插件"): retyped to project/system/repo, or merged into the existing node of that name.
+	MisfiledPersonRetyped int         `json:"misfiled_person_retyped"`
+	MisfiledPersonMerged  int         `json:"misfiled_person_merged"`
+	Tier1ContactMerged    int         `json:"tier1_contact_merged"`
+	Tier1CNShortMerged    int         `json:"tier1_cn_short_merged"`
+	Tier2PairsChecked     int         `json:"tier2_pairs_checked"`
+	Tier2Batches          int         `json:"tier2_batches"`
+	Tier2Merged           int         `json:"tier2_merged"`
+	TotalMerged           int         `json:"total_merged"`
+	Merges                []MergePair `json:"merges,omitempty"`
 }
 
 // ResolveAndMerge runs the v0.4.0 entity governance and three-tier disambiguation pipeline on st.Graph.
@@ -173,6 +177,9 @@ func ResolveAndMergeAt(ctx context.Context, st *store.State, m model.Model, toda
 		})
 		return true
 	}
+
+	// Tier 1 Rule 0: person nodes named like software or a service go to their project/system/repo.
+	rep.MisfiledPersonRetyped, rep.MisfiledPersonMerged = fixMisfiledPersons(g, origName, doMerge)
 
 	// Tier 1 Rule 1: Canonical key homograph merge (same type, chat->person, and project/system/repo with shared edge).
 	rep.Tier1PrefixMerged += mergeTier1Prefix(g, hadPrefix, prefixType, doMerge)
@@ -524,6 +531,106 @@ func mergeTier1Prefix(g *store.Graph, hadPrefix map[string]bool, prefixType map[
 		}
 	}
 	return merged
+}
+
+// misfiledPerson says what a live person node really is when its name or an alias says software or a service (a
+// non-person suffix, or an extracted "project:"/"system:"/"repo:" prefix) and every name it goes by reduces to the
+// same base: ("", "") otherwise. A node backed by a people card (a "people/" ref) is a person. own says the signal is
+// in the node's own name (not only in an alias a merge brought in).
+func misfiledPerson(n *store.Node, raw string) (typ, base string, own bool) {
+	for _, ref := range n.Refs {
+		if strings.HasPrefix(ref, "people/") {
+			return "", "", false
+		}
+	}
+	names := append([]string{n.Name, raw}, aliasNames(n)...)
+	key := ""
+	for i, name := range names {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		t, b := MisfiledPersonType(name)
+		if t == "" {
+			switch pt := extractedPrefixType(name); pt {
+			case "project", "system", "repo":
+				t = pt
+			case "person":
+				return "", "", false
+			}
+			b = CanonicalName(name, "person")
+		}
+		k := NormKey(b, "person")
+		if k == "" {
+			continue
+		}
+		if key == "" {
+			key = k
+		} else if k != key {
+			return "", "", false // the names disagree: leave it to a person
+		}
+		if t != "" && i < 2 {
+			own = true
+		}
+		if typ == "" && t != "" {
+			typ, base = t, b
+		}
+	}
+	return typ, base, own
+}
+
+// fixMisfiledPersons moves person nodes that are really software or a service (misfiledPerson) to what they are:
+// merged into the live project/system/repo node of the same base name when there is one, retyped otherwise (only when
+// the node's own name says so).
+func fixMisfiledPersons(g *store.Graph, origName map[string]string, doMerge func(from, into, proposal, tier, reason string) bool) (retyped, merged int) {
+	tech := map[string][]string{}
+	for _, id := range sortedNodeIDs(g) {
+		n := g.Nodes[id]
+		if !isLiveNode(n) || id == Me {
+			continue
+		}
+		switch n.Type {
+		case "project", "system", "repo":
+			k := NormKey(n.Name, n.Type)
+			tech[k] = append(tech[k], id)
+		}
+	}
+	for _, id := range sortedNodeIDs(g) {
+		n := g.Nodes[id]
+		if id == Me || !isLiveNode(n) || n.Type != "person" {
+			continue
+		}
+		typ, base, own := misfiledPerson(n, origName[id])
+		if typ == "" {
+			continue
+		}
+		k := NormKey(base, typ)
+		if ids := tech[k]; len(ids) > 0 {
+			target := ids[0]
+			for _, t := range ids[1:] {
+				if typePriority(g.Nodes[t].Type) > typePriority(g.Nodes[target].Type) {
+					target = t
+				}
+			}
+			if doMerge(id, target, ProposalTier1Prefix, "tier1_misfiled_person", "person named like software or a service") {
+				merged++
+				continue
+			}
+		}
+		if !own {
+			continue // only an alias says so: merge into a matching node, never retype a node that may be a person
+		}
+		raw := n.Name
+		n.Type = typ
+		if clean := CanonicalName(base, typ); clean != "" {
+			n.Name = clean
+		}
+		if !slices.ContainsFunc(n.Aliases, func(a store.Alias) bool { return a.Name == raw }) {
+			n.Aliases = append(n.Aliases, store.Alias{Name: raw, From: "v04_misfiled_person"})
+		}
+		tech[k] = append(tech[k], id)
+		retyped++
+	}
+	return retyped, merged
 }
 
 func mergeTier1Contacts(st *store.State, hadPrefix map[string]bool, doMerge func(from, into, proposal, tier, reason string) bool) int {
@@ -981,8 +1088,12 @@ var tier2Schema = json.RawMessage(`{
 const tier2SystemPrompt = `You disambiguate candidate entity pairs in a personal knowledge graph.
 For each pair (a, b), decide whether they refer to the exact same real-world entity ("same_entity"), different entities ("distinct"), or cannot be determined ("uncertain").
 Only mark verdict="same_entity" with confidence="high" when clearly aliases, abbreviations, bilingual equivalents, or repo/project variants of the same entity (e.g. "astergate" and "aster", "enkeep-memory" and "enkeep 记忆插件").
-Never merge distinct modules, distinct people with different full names, or a parent org with a child project.
-Never merge two people based solely on shared neighbors or shared team/project membership; specifically, never guess that an English name and a Chinese name (or any two people without direct name, pinyin, or alias correspondence) are the same person.
+Hard negative rules (ALWAYS mark "distinct"):
+- Never merge generic/common words (e.g. "Launch", "Platform", "API", "Gateway", "Service", "System") into a specific project or system.
+- Never merge standalone distribution repos, sub-packages, SDK/CLI packages, or edition branches (e.g. "*-dist", "*-sdk", "*-cli", "*-字节版") into the main project.
+- Never merge differently named independent pipelines, tables, jobs, or services solely because they share the same owner or team (e.g. "Data-arch-push" and "data_tiktok_push").
+- Never merge distinct modules, distinct people with different full names, or a parent org with a child project.
+- Never merge two people based solely on shared neighbors or shared team/project membership; specifically, never guess that an English name and a Chinese name (or any two people without direct name, pinyin, or alias correspondence) are the same person.
 Set "canonical" to "a" or "b" indicating the cleaner, more complete name. Return JSON matching the schema.`
 
 type tier2Response struct {

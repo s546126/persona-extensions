@@ -28,7 +28,7 @@ func (a *App) Card(r *ext.UIRequest) (*wire.View, error) {
 		text, tone := formatChange(today.Total.Total(), average)
 		top := "还没有用量"
 		if len(today.Models) > 0 && today.Models[0].Total() > 0 {
-			top = modelName(today.Models[0].Name) + " " + formatTokens(today.Models[0].Total())
+			top = clipRunes(modelName(today.Models[0].Name), 200) + " " + formatTokens(today.Models[0].Total())
 		}
 		view = &wire.View{
 			Title: CardTitle,

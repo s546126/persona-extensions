@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,8 +70,13 @@ type app struct {
 }
 
 func newApp(logf func(string, ...any)) *app {
-	return &app{logf: logf, client: &http.Client{Timeout: 20 * time.Second}, now: time.Now, rand: rand.Float64,
-		queue: make(chan wire.ErrorReport, queueMost)}
+	return &app{
+		logf:   logf,
+		client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirects},
+		now:    time.Now,
+		rand:   rand.Float64,
+		queue:  make(chan wire.ErrorReport, queueMost),
+	}
 }
 
 func (a *app) program() ext.Program {
@@ -82,8 +89,11 @@ func (a *app) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]an
 	if err := in.Config(&cfg); err != nil {
 		return nil, err
 	}
-	raw := in.Secrets["dsn"]
+	raw := strings.TrimSpace(in.Secrets["dsn"])
 	if raw == "" { // the hub starts it only with its DSN; without one (a test of the protocol) it sends nothing
+		a.mu.Lock()
+		a.dsn = DSN{}
+		a.mu.Unlock()
 		a.logf("sentry: no DSN, nothing is sent")
 		return nil, nil
 	}
@@ -110,12 +120,12 @@ func (a *app) configure(dsn DSN, cfg Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.dsn = dsn
-	a.opts = Options{Environment: cfg.Environment, Client: "persona-sentry/" + version}
+	a.opts = Options{Environment: strings.TrimSpace(cfg.Environment), Client: "persona-sentry/" + version}
 	if a.opts.Environment == "" {
 		a.opts.Environment = "production"
 	}
 	a.sample = 1
-	if cfg.SampleRate != nil {
+	if cfg.SampleRate != nil && !math.IsNaN(*cfg.SampleRate) {
 		a.sample = min(max(*cfg.SampleRate, 0), 1)
 	}
 	a.logs = cfg.IncludeLogLines == nil || *cfg.IncludeLogLines
@@ -180,6 +190,10 @@ func (a *app) send(ctx context.Context, r wire.ErrorReport) {
 	}
 	if a.inMin >= rateMost || now.Before(a.paused) {
 		a.dropped++
+		a.mu.Unlock()
+		return
+	}
+	if a.dsn.Host == "" {
 		a.mu.Unlock()
 		return
 	}

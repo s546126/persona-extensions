@@ -125,21 +125,65 @@ var facetLabel = map[string]string{
 	string(entry.Persona):     "关于用户",
 }
 
-// suffixOf returns the boundary suffix ("（两端：…）" or "（例外：…）") for p, or "" if none applies.
+// suffixOf returns the boundary suffix ("（两端：…）" or "（例外：…）") for p, or "" if none applies or if the exception
+// merely repeats p.Text.
 func suffixOf(p *Pattern) string {
 	if ends := poleText(p.Poles); ends != "" {
 		return "（两端：" + ends + "）"
 	}
-	if x := strings.TrimSpace(p.Exception); x != "" && !strings.Contains(p.Text, x) {
-		return "（例外：" + x + "）"
+	x := strings.TrimSpace(p.Exception)
+	if x == "" {
+		return ""
 	}
-	return ""
+	body := strings.TrimSpace(p.Text)
+	if strings.Contains(body, x) || norm.Jaccard(body, x) >= 0.45 || norm.Overlap(body, x) >= 0.55 {
+		return ""
+	}
+	if qb, qx := norm.Q(body), norm.Q(x); qx != "" && strings.Contains(qb, qx) {
+		return ""
+	}
+	return "（例外：" + x + "）"
 }
 
 // Text is a pattern as one line the assistant can act on (for recall and UI). A pattern whose evidence goes both ways
 // says both ends, each with when it holds (Poles), not "X unless W".
 func Text(p *Pattern) string {
 	return "跨事模式（" + facetLabel[p.Facet] + "）：" + strings.TrimSpace(p.Text) + suffixOf(p)
+}
+
+// polesRestate is how much of a pattern's statement its two ends already say (bigram overlap) for the standing line
+// to carry the ends alone.
+const polesRestate = 0.5
+
+// StandingParts are a pattern's standing line in its compact form, body and suffix: both ends as "A时→X；B时→Y" with no
+// "（两端：…）" wrapper; when the statement only sums up its two ends (polesRestate), the ends alone are the line, so
+// the room goes to the content and not to saying it twice. A pattern without ends keeps its statement and exception.
+func StandingParts(p *Pattern) (body, suffix string) {
+	body = strings.TrimSpace(p.Text)
+	ends := compactPoles(p.Poles)
+	if ends == "" {
+		return body, suffixOf(p)
+	}
+	if norm.Overlap(body, ends) >= polesRestate || norm.Contains(ends, body) {
+		return ends + "。", ""
+	}
+	return strings.TrimRight(body, "。.") + "：" + ends + "。", ""
+}
+
+// compactPoles is both ends of a pattern as "A时→X；B时→Y"; "" unless there are two.
+func compactPoles(ps []Pole) string {
+	var parts []string
+	for _, p := range ps {
+		w, c := strings.TrimSpace(p.When), strings.TrimRight(strings.TrimSpace(p.Choice), "。.")
+		if w == "" || c == "" {
+			continue
+		}
+		parts = append(parts, strings.TrimSuffix(w, "时")+"时→"+c)
+	}
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.Join(parts[:2], "；")
 }
 
 // poleText is both ends of a pattern, "在 A 时 X；在 B 时 Y"; "" unless there are two.
@@ -307,6 +351,7 @@ func Exits(s *State) []memsrc.Extra {
 				l1Kind = memsrc.BucketPrinciple
 			}
 		}
+		body, suffix := StandingParts(p)
 		out = append(out, memsrc.Extra{
 			Entry:      x,
 			Last:       p.LastEvidence,
@@ -319,8 +364,8 @@ func Exits(s *State) []memsrc.Extra {
 			Dimension:  p.Dimension,
 			Group:      contractGroup(p),
 			Quotes:     independentQuotes(p),
-			Body:       strings.TrimSpace(p.Text),
-			Suffix:     suffixOf(p),
+			Body:       body,
+			Suffix:     suffix,
 			CoveredIDs: slices.Clone(p.CoveredIDs),
 		})
 	}

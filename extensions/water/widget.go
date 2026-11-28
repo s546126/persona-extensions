@@ -56,9 +56,11 @@ func (a *app) sendWidgets(ctx context.Context) {
 			continue
 		}
 		// The SDK writer can block on the hub's stdout reader. Never hold the state lock here.
-		if err := a.invalidate(widgetID); err != nil {
-			log.Printf("喝水进度刷新失败：%v", err)
-			continue // Keep the pending key dirty; a later tick wakes us again.
+		if a.invalidate != nil {
+			if err := a.invalidate(widgetID); err != nil {
+				log.Printf("喝水进度刷新失败：%v", err)
+				continue // Keep the pending key dirty; a later tick wakes us again.
+			}
 		}
 		a.mu.Lock()
 		// A newer change may have arrived during the write; acknowledge only what we read.

@@ -374,16 +374,20 @@ func IsTrueUserOwned(e *Entry) bool {
 	return e.User != nil && strings.TrimSpace(e.User.Text) != ""
 }
 
-// PayloadTexts returns the entry's own structured text fields (never raw Evidence quotes) for Payload-First
-// sensitivity checks and deterministic ops-runbook classification.
+// PayloadTexts returns the entry's own structured text fields (never raw Evidence quotes and never assistant-authored
+// Impact hints) for Payload-First sensitivity checks and deterministic ops-runbook classification.
+// For work-methodology facets, Rejected and Object are excluded so negative examples or task object names do not
+// trigger false-positive sensitivity labels on general work rules.
 func (e *Entry) PayloadTexts() []string {
 	if e == nil {
 		return nil
 	}
+	if IsWorkMethodFacet(e.Facet) {
+		return []string{e.Shown(), e.Text, e.Situation, e.Choice, e.Exception}
+	}
 	return []string{
 		e.Shown(), e.Text, e.Situation, e.Choice, e.Rejected,
 		e.Why, e.Exception, e.Object, e.Pitfall, e.Fix,
-		e.Impact.Action, e.Impact.Object,
 	}
 }
 
@@ -411,9 +415,10 @@ var (
 		`ask_user|todo_create|enkeep[-_]memory|persona-extensions|testflight|deriveddata|app\s*store\s*connect)\b`)
 
 	// opsRunbookZHRe detects Chinese environment/deployment/CI/quota/platform-mechanism workflow rules.
-	opsRunbookZHRe = regexp.MustCompile(
+	opsRunbookZHRe = regexp.MustCompile(`(?i)` +
 		`部署到|放\s*VPS|跑门禁|CI\s*门禁|门禁脚本|定时脚本|定时任务|端口转发|跳板机|容器镜像|镜像升级|` +
-			`轮换密钥|API\s*限流|额度.{0,8}分流|改配置前.{0,6}备份|工作树|合入\s*main|合并\s*PR|推分支|拉取仓库|环境变量`)
+		`轮换密钥|API\s*限流|额度.{0,8}分流|改配置前.{0,6}备份|工作树|合入\s*main|合并\s*PR|推分支|拉取仓库|环境变量|` +
+		`草稿\s*PR|draft\s*pr|合并脚本|squash\s*merge`)
 )
 
 // ClassifyOpsRunbook deterministically reports whether e is a Class C environment/tool ops runbook (0.4.0 §1.3):

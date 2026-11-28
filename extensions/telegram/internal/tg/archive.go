@@ -48,6 +48,9 @@ var errNotConnected = errors.New("not connected to Telegram")
 // request (gate.go). A Telegram error part way ends the round: what was read (and the cursor up to it) goes to the
 // hub, the rest waits for the next round; during a flood wait it asks nothing.
 func (c *Conn) Changes(ctx context.Context, cursor string, limit int) ([]connector.ChatBatch, string, bool, error) {
+	if limit <= 0 {
+		limit = 1
+	}
 	cl := c.client()
 	if cl == nil {
 		return nil, cursor, false, errNotConnected
@@ -151,6 +154,9 @@ func sourceMessages(msgs []message) []kb.SourceMessage {
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
@@ -178,10 +184,12 @@ func (c *Conn) Watch(ctx context.Context, changed func(connector.Scope)) error {
 			return nil
 		case <-c.news:
 		}
+		wait := time.NewTimer(max(newsSettle, time.Until(last.Add(gap))))
 		select {
 		case <-ctx.Done():
+			wait.Stop()
 			return nil
-		case <-time.After(max(newsSettle, time.Until(last.Add(gap)))):
+		case <-wait.C:
 		}
 		c.drainNews() // what came meanwhile is in this round
 		last = time.Now()

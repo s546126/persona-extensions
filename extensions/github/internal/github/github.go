@@ -95,6 +95,9 @@ type Connector struct {
 	token  string
 	status connector.Status
 	poke   chan struct{}
+	// authGen increments on logout and auth-source switches so in-flight polls/fetches from a previous account
+	// cannot resurrect tokens or repopulate caches.
+	authGen uint64
 	// rateLow: under a tenth of the hour's requests are left (X-RateLimit-Remaining); only notifications are polled
 	// until rateReset.
 	rateLow   bool
@@ -223,6 +226,42 @@ var (
 	checkRetry = time.Minute
 )
 
+func (c *Connector) authGeneration() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.authGen
+}
+
+// resetAuthState bumps authGen and clears account-scoped caches (lists, etags/logs/avatars, inbox) and rate state
+// so logging out or switching auth sources cannot leak a previous account's private data.
+func (c *Connector) resetAuthState() {
+	c.mu.Lock()
+	c.authGen++
+	c.rateLow = false
+	c.rateReset = time.Time{}
+	c.status.Account = ""
+	c.mu.Unlock()
+
+	c.etags.mu.Lock()
+	c.etags.m = nil
+	c.etags.logs = nil
+	c.etags.avatars = nil
+	c.etags.mu.Unlock()
+
+	c.lists.mu.Lock()
+	c.lists.tabs = nil
+	c.lists.mu.Unlock()
+
+	c.inbox.mu.Lock()
+	c.inbox.things = nil
+	c.inbox.seen = nil
+	c.inbox.lastModified = ""
+	c.inbox.fullAt = time.Time{}
+	c.inbox.ci = nil
+	c.inbox.repos = nil
+	c.inbox.mu.Unlock()
+}
+
 // Run checks the sign-in now and then until ctx ends: again soon while it fails, and when the machine connects.
 func (c *Connector) Run(ctx context.Context) {
 	for {
@@ -231,27 +270,37 @@ func (c *Connector) Run(ctx context.Context) {
 		if !c.signedIn() {
 			wait = checkRetry
 		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-c.poke:
-		case <-time.After(wait):
+			timer.Stop()
+		case <-timer.C:
 		}
 	}
 }
 
 // check asks GitHub who the token is (fetching one first if there is none) and records the answer.
 func (c *Connector) check(ctx context.Context) {
+	gen := c.authGeneration()
 	var user struct {
 		Login string `json:"login"`
 	}
 	h, err := c.Get(ctx, "/user", &user)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.authGen != gen {
+		return
+	}
 	if err == nil {
 		c.scopes, c.scopesKnown = scopesOf(h)
 		c.status = connector.Status{State: connector.StateOK, Account: user.Login, LastSync: time.Now().UTC(), LastEvent: c.status.LastEvent}
 		return
+	}
+	if errors.Is(err, errNoDeviceLogin) || errors.Is(err, errUnauthorized) || errors.Is(err, ErrNotSignedIn) || errors.Is(err, ErrNoMachine) {
+		c.status.Account = ""
 	}
 	c.status.State, c.status.Error = c.explain(err)
 }
@@ -370,7 +419,10 @@ func (c *Connector) request(ctx context.Context, method, path string, hdr http.H
 		if _, text := out.(*[]byte); text {
 			limit = 32 << 20 // a job's log, of which the end is kept
 		}
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+		if err != nil {
+			return 0, resp.Header, errors.New(Scrub(err.Error()))
+		}
 		code := resp.StatusCode
 		switch {
 		case code == http.StatusUnauthorized:

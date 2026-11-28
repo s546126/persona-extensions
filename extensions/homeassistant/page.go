@@ -75,12 +75,18 @@ var rowServices = map[string][]string{
 	"script": {"turn_on", "turn_off"}, "scene": {"turn_on"}, "button": {"press"},
 }
 
+const areaIDMost = 512
+
 func (st *pageState) clean() {
 	if !slices.ContainsFunc(kinds, func(c wire.Choice) bool { return c.Value == st.Kind }) {
 		st.Kind = "devices"
 	}
 	if st.Tab != "log" && st.Tab != "auto" {
 		st.Tab = ""
+	}
+	st.Area = strings.TrimSpace(st.Area)
+	if len(st.Area) > areaIDMost {
+		st.Area = ""
 	}
 	st.Q = clip(strings.TrimSpace(st.Q), 40)
 	if !entityRE.MatchString(st.Entity) {
@@ -232,6 +238,7 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		fresh = 0
 	}
+	st.clean()
 	return &wire.ActionResult{View: a.page(ctx, r, st, fresh), Toast: toast}, nil
 }
 
@@ -376,7 +383,7 @@ func (a *app) tap(ctx context.Context, eid, kind, arg string, values map[string]
 		}
 	case "num":
 		v, err := strconv.ParseFloat(strings.TrimSpace(values["value"]), 64)
-		if err != nil {
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 			return "", fmt.Errorf("填一个数")
 		}
 		service, data["value"] = "set_value", v
@@ -407,11 +414,12 @@ func (a *app) page(ctx context.Context, r *ext.UIRequest, st pageState, fresh ti
 
 // pageWith is page with a shortcut's form showing draft (a save that was refused) instead of the shortcut's own.
 func (a *app) pageWith(ctx context.Context, r *ext.UIRequest, st pageState, fresh time.Duration, draft *shortcutDraft) *wire.View {
+	st.clean()
 	v := &wire.View{Title: "家", RefreshAfter: refreshList}
 	hm, err := a.home(ctx, fresh)
 	if err != nil {
 		v.Sections = []wire.Section{{Items: []wire.Component{
-			{Type: "text", Text: err.Error(), Style: "secondary"},
+			{Type: "text", Text: clip(err.Error(), 1900), Style: "secondary"},
 			{Type: "button", Title: "重试", Action: &wire.Action{ID: "refresh"}}}}}
 		v.State = ext.EncodeState(st)
 		return v
@@ -463,7 +471,66 @@ func (a *app) pageWith(ctx context.Context, r *ext.UIRequest, st pageState, fres
 		a.roomPage(r, hm, reg, st, v, tabbed)
 	}
 	v.State = ext.EncodeState(st)
+	fitViewItems(v)
 	return v
+}
+
+// fitViewItems trims excess trailing tiles/items from the largest sections only when a very large home
+// would otherwise exceed wire.ItemsMost (300). Normal views under the limit are untouched.
+func fitViewItems(v *wire.View) {
+	if v == nil {
+		return
+	}
+	count := func() int {
+		n := 0
+		for _, s := range v.Sections {
+			for _, it := range s.Items {
+				n += max(1, len(it.Tiles))
+			}
+		}
+		return n
+	}
+	total := count()
+	for total > wire.ItemsMost {
+		// First trim trailing tiles from the largest grid/carousel (leaving at least 1 tile per component).
+		bestSec, bestItem, bestTiles := -1, -1, 1
+		for i, s := range v.Sections {
+			for j, it := range s.Items {
+				if len(it.Tiles) > bestTiles {
+					bestSec, bestItem, bestTiles = i, j, len(it.Tiles)
+				}
+			}
+		}
+		if bestSec >= 0 {
+			over := total - wire.ItemsMost
+			drop := min(over, bestTiles-1)
+			v.Sections[bestSec].Items[bestItem].Tiles = v.Sections[bestSec].Items[bestItem].Tiles[:bestTiles-drop]
+			total -= drop
+			continue
+		}
+		// Next drop trailing items from the largest non-footer section.
+		bestSec, bestItems := -1, 1
+		for i := 0; i < len(v.Sections)-1; i++ {
+			if n := len(v.Sections[i].Items); n > bestItems {
+				bestSec, bestItems = i, n
+			}
+		}
+		if bestSec < 0 {
+			// If many 1-item sections (such as room grids) still exceed the limit, drop trailing room sections before footer.
+			if len(v.Sections) > 2 {
+				idx := len(v.Sections) - 2
+				for _, it := range v.Sections[idx].Items {
+					total -= max(1, len(it.Tiles))
+				}
+				v.Sections = slices.Delete(v.Sections, idx, idx+1)
+				continue
+			}
+			break
+		}
+		last := v.Sections[bestSec].Items[bestItems-1]
+		v.Sections[bestSec].Items = v.Sections[bestSec].Items[:bestItems-1]
+		total -= max(1, len(last.Tiles))
+	}
 }
 
 // crumbs is the way back: a breadcrumb (UI version 4), a 返回 button on top before.
@@ -774,19 +841,27 @@ func (a *app) controlSection(r *ext.UIRequest, s State) wire.Section {
 		}
 		act := &wire.Action{ID: id}
 		if secure || c.Role == "destructive" || d == "automation" || d == "script" || d == "scene" {
-			act.Confirm = c.Title + "「" + s.Name() + "」？"
+			act.Confirm = clip(c.Title+"「"+s.Name()+"」？", 200)
 		}
 		sec.Items = append(sec.Items, wire.Component{Type: "button", Title: c.Title, Role: c.Role, Action: act})
 	}
 	if modes := hvacModes(s); len(modes) > 0 {
 		var choices []wire.Choice
+		hasCur := false
 		for _, m := range modes {
-			choices = append(choices, wire.Choice{Value: m, Title: orDash(stateNames[m])})
+			if m == s.State {
+				hasCur = true
+			}
+			choices = append(choices, wire.Choice{Value: m, Title: clip(orDash(stateNames[m]), 12)})
 		}
-		if r.UIVersion >= 2 && len(choices) >= 2 && len(choices) <= 5 {
+		if r.UIVersion >= 2 && hasCur && len(choices) >= 2 && len(choices) <= 5 {
 			sec.Items = append(sec.Items, wire.Component{Type: "segmented", Name: "hvac", Value: s.State, Choices: choices, Action: &wire.Action{ID: "hvac"}})
 		} else if len(choices) >= 2 {
-			sec.Items = append(sec.Items, wire.Component{Type: "field", Name: "hvac", Label: "模式", Kind: "choice", Value: s.State, Choices: choices},
+			val := ""
+			if hasCur {
+				val = s.State
+			}
+			sec.Items = append(sec.Items, wire.Component{Type: "field", Name: "hvac", Label: "模式", Kind: "choice", Value: val, Choices: choices},
 				wire.Component{Type: "button", Title: "设成这个模式", Action: &wire.Action{ID: "hvac", Submit: true}})
 		}
 	}
@@ -795,12 +870,12 @@ func (a *app) controlSection(r *ext.UIRequest, s State) wire.Section {
 		for _, o := range opts {
 			choices = append(choices, wire.Choice{Value: o})
 		}
-		sec.Items = append(sec.Items, wire.Component{Type: "field", Name: "option", Label: "选项", Kind: "choice", Value: s.State, Choices: choices},
+		sec.Items = append(sec.Items, wire.Component{Type: "field", Name: "option", Label: "选项", Kind: "choice", Value: clip(s.State, 2000), Choices: choices},
 			wire.Component{Type: "button", Title: "设成这个", Action: &wire.Action{ID: "opt", Submit: true}})
 	}
 	if lo, hi, step, ok := numberRange(s); ok {
 		sec.Items = append(sec.Items, wire.Component{Type: "field", Name: "value", Label: fmt.Sprintf("数值（%s–%s，步长 %s）", tidy(lo), tidy(hi), tidy(step)),
-			Kind: "number", Value: s.State}, wire.Component{Type: "button", Title: "设成这个数", Action: &wire.Action{ID: "num", Submit: true}})
+			Kind: "number", Value: clip(s.State, 2000)}, wire.Component{Type: "button", Title: "设成这个数", Action: &wire.Action{ID: "num", Submit: true}})
 	}
 	return sec
 }
@@ -811,7 +886,7 @@ func (a *app) historySection(ctx context.Context, s State, loc *time.Location) w
 	h, _, _ := a.client()
 	changes, err := h.History(ctx, s.EntityID, time.Now().Add(-24*time.Hour))
 	if err != nil {
-		sec.Items = append(sec.Items, wire.Component{Type: "text", Text: "读不到历史：" + err.Error(), Style: "secondary"})
+		sec.Items = append(sec.Items, wire.Component{Type: "text", Text: clip("读不到历史："+err.Error(), 1900), Style: "secondary"})
 		return sec
 	}
 	if len(changes) == 0 {
@@ -820,9 +895,9 @@ func (a *app) historySection(ctx context.Context, s State, loc *time.Location) w
 	if pts := series(changes, 96, loc); len(pts) >= 3 {
 		unit := s.attr("unit_of_measurement")
 		for i := range pts {
-			pts[i].Display = tidy(pts[i].Value) + unit
+			pts[i].Display = clip(tidy(pts[i].Value)+unit, 40)
 		}
-		sec.Items = append(sec.Items, wire.Component{Type: "chart", Kind: "line", Unit: unit, Series: []wire.ChartSeries{{Name: s.Name(), Points: pts}}})
+		sec.Items = append(sec.Items, wire.Component{Type: "chart", Kind: "line", Unit: clip(unit, 200), Series: []wire.ChartSeries{{Name: clip(s.Name(), 40), Points: pts}}})
 		return sec
 	}
 	t := wire.Component{Type: "table", Columns: []wire.TableColumn{{Title: "时间"}, {Title: "状态"}}}
@@ -832,7 +907,7 @@ func (a *app) historySection(ctx context.Context, s State, loc *time.Location) w
 	}
 	for i := len(shown) - 1; i >= 0; i-- {
 		c := shown[i]
-		t.Rows = append(t.Rows, []string{c.At.In(loc).Format("01-02 15:04"), orDash(stateText(State{EntityID: s.EntityID, State: c.State, Attributes: s.Attributes}))})
+		t.Rows = append(t.Rows, []string{c.At.In(loc).Format("01-02 15:04"), clip(orDash(stateText(State{EntityID: s.EntityID, State: c.State, Attributes: s.Attributes})), 2000)})
 	}
 	sec.Items = append(sec.Items, t)
 	return sec

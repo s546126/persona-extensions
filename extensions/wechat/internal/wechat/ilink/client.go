@@ -301,7 +301,12 @@ func (c *Client) call(ctx context.Context, method, path string, body any, authed
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
-		if errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return nil, &Error{Code: CodeTimeout, Msg: "iLink call timed out", Retry: true}
+		case ctx.Err() != nil:
+			return nil, &Error{Code: CodeAborted, Msg: "iLink call cancelled", Retry: true}
+		case errors.Is(cctx.Err(), context.DeadlineExceeded):
 			return nil, &Error{Code: CodeTimeout, Msg: "iLink call timed out", Retry: true}
 		}
 		return nil, &Error{Code: CodeNetwork, Msg: "iLink call failed", Retry: true, err: err}

@@ -311,7 +311,7 @@ func (c *Conn) locate(ctx context.Context, cl client, ref string) (*fileLoc, err
 	switch {
 	case len(parts) == 3 && parts[0] == "a":
 		photo, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
+		if err != nil || photo <= 0 {
 			return nil, errNoMedia
 		}
 		c.box.mu.Lock()
@@ -332,7 +332,7 @@ func (c *Conn) locate(ctx context.Context, cl client, ref string) (*fileLoc, err
 		return avatarLoc(p, photo, dc), nil
 	case len(parts) == 4 && parts[0] == "m" && (parts[3] == "f" || parts[3] == "t"):
 		id, err := strconv.Atoi(parts[2])
-		if err != nil {
+		if err != nil || id <= 0 {
 			return nil, errNoMedia
 		}
 		d, err := c.find(ctx, cl, parts[1])

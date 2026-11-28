@@ -69,10 +69,12 @@ func (c *Connector) Watch(ctx context.Context, changed func(connector.Scope)) er
 			}
 			wait = max(w, pollDefault)
 		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 	}
 }
@@ -81,6 +83,7 @@ func (c *Connector) Watch(ctx context.Context, changed func(connector.Scope)) er
 // due, and returns how long GitHub wants the next poll to wait and whether a thing changed. They come 50 to a page,
 // newest first: poll follows the pages up to notificationPages (only the first while requests run low).
 func (c *Connector) poll(ctx context.Context) (time.Duration, bool, error) {
+	gen := c.authGeneration()
 	st := &c.inbox
 	st.mu.Lock()
 	if st.things == nil {
@@ -120,8 +123,14 @@ func (c *Connector) poll(ctx context.Context) (time.Duration, bool, error) {
 		wait = time.Duration(s) * time.Second
 	}
 	if code == http.StatusNotModified {
+		if c.authGeneration() != gen {
+			return wait, false, nil
+		}
 		// No notification moved; open CI items are still followed up when due (followUpCI paces each one).
 		return wait, c.followUpCI(ctx), nil
+	}
+	if c.authGeneration() != gen {
+		return wait, false, nil
 	}
 	st.mu.Lock()
 	st.lastModified = h.Get("Last-Modified")
@@ -129,7 +138,13 @@ func (c *Connector) poll(ctx context.Context) (time.Duration, bool, error) {
 		st.fullAt = time.Now()
 	}
 	st.mu.Unlock()
+	if c.authGeneration() != gen {
+		return wait, false, nil
+	}
 	moved := c.applyNotifications(ctx, ns, whole, c.now())
+	if c.authGeneration() != gen {
+		return wait, false, nil
+	}
 	if c.followUpCI(ctx) {
 		moved = true
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -130,9 +131,13 @@ func (c *conn) body(ctx context.Context, tx *texts, s *session, d *discovery, gu
 
 // componentText is the text of the text displays (type 10) anywhere in a message's components, a line each.
 func componentText(components []json.RawMessage) string {
+	const maxDepth = 32
 	var lines []string
-	var walk func(v any)
-	walk = func(v any) {
+	var walk func(v any, depth int)
+	walk = func(v any, depth int) {
+		if depth > maxDepth {
+			return
+		}
 		switch x := v.(type) {
 		case map[string]any:
 			if t, _ := x["type"].(float64); t == 10 {
@@ -140,19 +145,24 @@ func componentText(components []json.RawMessage) string {
 					lines = append(lines, strings.TrimSpace(s))
 				}
 			}
-			for _, child := range x {
-				walk(child)
+			keys := make([]string, 0, len(x))
+			for k := range x {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			for _, k := range keys {
+				walk(x[k], depth+1)
 			}
 		case []any:
 			for _, child := range x {
-				walk(child)
+				walk(child, depth+1)
 			}
 		}
 	}
 	for _, raw := range components {
 		var v any
 		if json.Unmarshal(raw, &v) == nil {
-			walk(v)
+			walk(v, 0)
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -203,7 +213,7 @@ func (c *conn) resolve(ctx context.Context, s *session, d *discovery, guildID sn
 		if err != nil {
 			return tag
 		}
-		return time.Unix(sec, 0).In(c.zone).Format("2006-01-02 15:04")
+		return time.Unix(sec, 0).In(c.location()).Format("2006-01-02 15:04")
 	})
 	return t
 }

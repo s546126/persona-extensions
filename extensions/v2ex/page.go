@@ -33,23 +33,29 @@ const (
 // what was read, in time.
 var renderBudget = 15 * time.Second
 
-// offers says whether id is a list to show: nodes only with nodes to read.
-func (a *app) offers(id string) bool {
+func offersList(id string, nodes []string) bool {
 	if id == "nodes" {
-		return len(a.nodes) > 0
+		return len(nodes) > 0
 	}
 	return slices.ContainsFunc(lists, func(l listDef) bool { return l.id == id })
 }
 
+// offers says whether id is a list to show: nodes only with nodes to read.
+func (a *app) offers(id string) bool {
+	_, nodes, _, _ := a.snapshot()
+	return offersList(id, nodes)
+}
+
 func (a *app) readState(r *ext.UIRequest) pageState {
+	cfg, nodes, _, _ := a.snapshot()
 	var st pageState
 	if r.DecodeState(&st) != nil {
 		st = pageState{}
 	}
-	if !a.offers(st.List) {
+	if !offersList(st.List, nodes) {
 		st.List = "hot"
-		if a.offers(a.cfg.List) {
-			st.List = a.cfg.List
+		if offersList(cfg.List, nodes) {
+			st.List = cfg.List
 		}
 	}
 	return st
@@ -57,12 +63,13 @@ func (a *app) readState(r *ext.UIRequest) pageState {
 
 // locFor is the time zone to draw in: the extension's own setting, else the user's as the hub says it.
 func (a *app) locFor(r *ext.UIRequest) *time.Location {
-	if a.cfg.TZ == "" && r.TZ != "" {
-		if loc, err := time.LoadLocation(r.TZ); err == nil {
-			return loc
+	cfg, _, _, loc := a.snapshot()
+	if cfg.TZ == "" && r.TZ != "" {
+		if l, err := time.LoadLocation(r.TZ); err == nil {
+			return l
 		}
 	}
-	return a.loc
+	return loc
 }
 
 func (a *app) render(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {
@@ -120,11 +127,11 @@ func staleNote(stale error, at time.Time, loc *time.Location) wire.Component {
 }
 
 // picker chooses the list: a segmented control, or a row each before UI version 2.
-func (a *app) picker(r *ext.UIRequest, st pageState) wire.Section {
+func pickerSection(r *ext.UIRequest, st pageState, nodes []string) wire.Section {
 	if r.UIVersion >= 2 {
 		seg := wire.Component{Type: wire.ComponentSegmented, Name: "list", Value: st.List, Action: &wire.Action{ID: "list"}}
 		for _, l := range lists {
-			if a.offers(l.id) {
+			if offersList(l.id, nodes) {
 				seg.Choices = append(seg.Choices, wire.Choice{Value: l.id, Title: l.title})
 			}
 		}
@@ -132,7 +139,7 @@ func (a *app) picker(r *ext.UIRequest, st pageState) wire.Section {
 	}
 	sec := wire.Section{Title: "看什么"}
 	for _, l := range lists {
-		if !a.offers(l.id) {
+		if !offersList(l.id, nodes) {
 			continue
 		}
 		it := wire.Component{Type: wire.ComponentRow, Title: l.title, Action: &wire.Action{ID: "list:" + l.id}}
@@ -145,11 +152,12 @@ func (a *app) picker(r *ext.UIRequest, st pageState) wire.Section {
 }
 
 func (a *app) listPage(ctx context.Context, r *ext.UIRequest, st pageState, refresh bool) *wire.View {
+	cfg, nodes, badNodes, _ := a.snapshot()
 	now, loc := time.Now(), a.locFor(r)
-	v := &wire.View{Title: "V2EX", State: ext.EncodeState(st), Sections: []wire.Section{a.picker(r, st)}}
-	if len(a.badNodes) > 0 {
+	v := &wire.View{Title: "V2EX", State: ext.EncodeState(st), Sections: []wire.Section{pickerSection(r, st, nodes)}}
+	if len(badNodes) > 0 {
 		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{
-			text(clip("这些不是节点名，没有读："+strings.Join(a.badNodes, "、")+"。要写节点的英文名，也就是节点页面链接 /go/ 后面那段", 1900), wire.TextStyleSecondary)}})
+			text(clip("这些不是节点名，没有读："+strings.Join(badNodes, "、")+"。要写节点的英文名，也就是节点页面链接 /go/ 后面那段", 1900), wire.TextStyleSecondary)}})
 	}
 
 	title := listTitle(st.List)
@@ -170,7 +178,7 @@ func (a *app) listPage(ctx context.Context, r *ext.UIRequest, st pageState, refr
 		v.Sections = append(v.Sections, wire.Section{Items: notes})
 	}
 
-	f := a.cfg.filter()
+	f := cfg.filter()
 	shown := l.topics
 	if !st.All {
 		shown = f.apply(l.topics)
@@ -185,29 +193,50 @@ func (a *app) listPage(ctx context.Context, r *ext.UIRequest, st pageState, refr
 		sec.Title = fmt.Sprintf("%s · %d / %d 条", title, len(shown), len(l.topics))
 		sec.Footer = clip("按你的兴趣："+d+"。在这个扩展的设置里改", 1900)
 	}
-	for _, t := range shown {
-		state := pageState{List: st.List, Topic: t.ID, All: st.All}
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: clip(t.title(), 300), Subtitle: t.meta(now),
-			Action: ext.Open(fmt.Sprintf("topic:%d", t.ID), "", state, clip(t.title(), 200))})
-	}
-	if len(shown) == 0 {
-		sec.Items = append(sec.Items, text("这里没有可看的帖子", wire.TextStyleSecondary))
-	}
-	if f.describe() != "" && (st.All || len(shown) < len(l.topics)) {
-		label := fmt.Sprintf("看全部 %d 条", len(l.topics))
-		if st.All {
-			label = "按我的兴趣过滤"
-		}
-		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: label, Action: &wire.Action{ID: "all"}})
-	}
-	v.Sections = append(v.Sections, sec)
 
 	tail := wire.Section{}
 	if !l.at.IsZero() {
 		tail.Items = append(tail.Items, text("读于 "+l.at.In(loc).Format("15:04")+"（几分钟内不重读）", wire.TextStyleCaption))
 	}
 	tail.Items = append(tail.Items, button("刷新", "refresh"))
-	v.Sections = append(v.Sections, tail)
+
+	hasToggle := f.describe() != "" && (st.All || len(shown) < len(l.topics))
+	used := len(tail.Items)
+	for _, s := range v.Sections {
+		used += len(s.Items)
+	}
+	if hasToggle {
+		used++
+	}
+	room := max(wire.ItemsMost-used, 0)
+	truncated := len(shown) > room
+	renderTopics := shown
+	if truncated {
+		if room > 1 {
+			renderTopics = shown[:room-1]
+		} else {
+			renderTopics = nil
+		}
+	}
+	for _, t := range renderTopics {
+		state := pageState{List: st.List, Topic: t.ID, All: st.All}
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: clip(t.title(), 300), Subtitle: clip(oneLine(t.meta(now)), 1900),
+			Action: ext.Open(fmt.Sprintf("topic:%d", t.ID), "", state, clip(t.title(), 200))})
+	}
+	if truncated && room > 0 {
+		sec.Items = append(sec.Items, text(fmt.Sprintf("这里只显示前 %d 条，共 %d 条；其余可在网页或调整筛选后查看", len(renderTopics), len(shown)), wire.TextStyleCaption))
+	}
+	if len(shown) == 0 {
+		sec.Items = append(sec.Items, text("这里没有可看的帖子", wire.TextStyleSecondary))
+	}
+	if hasToggle {
+		label := fmt.Sprintf("看全部 %d 条", len(l.topics))
+		if st.All {
+			label = "按我的兴趣过滤"
+		}
+		sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Title: label, Action: &wire.Action{ID: "all"}})
+	}
+	v.Sections = append(v.Sections, sec, tail)
 	return v
 }
 
@@ -255,8 +284,14 @@ func (a *app) topicPage(ctx context.Context, r *ext.UIRequest, st pageState, ref
 			if i > 0 {
 				sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentDivider})
 			}
-			who := fmt.Sprintf("#%d %s · %s", floors[i], rp.Member.Username, time.Unix(rp.Created, 0).In(loc).Format("01-02 15:04"))
-			sec.Items = append(sec.Items, text(who, wire.TextStyleCaption))
+			who := fmt.Sprintf("#%d", floors[i])
+			if u := oneLine(rp.Member.Username); u != "" {
+				who += " " + u
+			}
+			if rp.Created > 0 {
+				who += " · " + time.Unix(rp.Created, 0).In(loc).Format("01-02 15:04")
+			}
+			sec.Items = append(sec.Items, text(clip(who, 1900), wire.TextStyleCaption))
 			if s := tidy(rp.Content); s != "" {
 				sec.Items = append(sec.Items, text(clip(s, replyMost), wire.TextStyleBody))
 			}

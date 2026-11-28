@@ -228,7 +228,7 @@ func Score(e *Entry) int {
 		u += 4
 	}
 	s += math.Min(28, u)
-	if slices.Contains(e.Flags, "LOW_CONFIDENCE") {
+	if slices.Contains(e.Flags, FlagLowConfidence) {
 		s -= 10
 	}
 	if e.Facet == World && strings.EqualFold(strings.TrimSpace(e.Type), "status") {
@@ -409,4 +409,21 @@ func ColdStartEligible(e *Entry) bool {
 		return Hard(e) || wideLasting
 	}
 	return wideLasting && e.Principle() != ""
+}
+
+// FlagLowConfidence is the verifier's flag for an entry the extraction itself was unsure of (verify.LowConfidence).
+const FlagLowConfidence = "LOW_CONFIDENCE"
+
+// IsUnreliableOneOff says whether e is too shaky to describe the user: an entry the extraction flagged
+// LOW_CONFIDENCE, or a persona entry read from a single sighting whose reach is one_off (one vent about one day, not
+// who the user is). The user's own entries (IsTrueUserOwned) never are. Such entries stay for on-demand recall but are
+// kept out of the profile summary (and Phase 1 of migrate-v04 demotes the stable LOW_CONFIDENCE persona ones).
+func IsUnreliableOneOff(e *Entry) bool {
+	if e == nil || IsTrueUserOwned(e) {
+		return false
+	}
+	if slices.Contains(e.Flags, FlagLowConfidence) {
+		return true
+	}
+	return e.Facet == Persona && e.Count <= 1 && e.Leverage != nil && e.Leverage.Reach == ReachOneOff
 }

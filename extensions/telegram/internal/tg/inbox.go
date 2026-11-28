@@ -51,6 +51,20 @@ type markState struct {
 	top      int // the newest message when they went up: the item's move
 }
 
+// clearBox drops all account-scoped cached conversations, inbox state, and media lookups.
+func (c *Conn) clearBox() {
+	c.box.mu.Lock()
+	defer c.box.mu.Unlock()
+	c.box.dialogs = nil
+	c.box.contexts = nil
+	c.box.marks = nil
+	c.box.seen = nil
+	c.box.peers = nil
+	c.box.locs = nil
+	c.box.members = nil
+	c.box.photoDCs = nil
+}
+
 // Collect gives a thing for each conversation that needs the user or did (so an item read elsewhere closes). Each
 // needs the user (action), as the built-in connector said; with the user's own triage rules the hub's model sorts it
 // by them instead, and it is action when no model does (the fallback, extra.rule_tier: Telegram never waits for one).
@@ -161,7 +175,7 @@ func (c *Conn) refreshInbox(ctx context.Context) {
 	c.box.refresh.Lock()
 	defer c.box.refresh.Unlock()
 	ds, err := cl.Dialogs(ctx, inboxDialogs)
-	if err != nil {
+	if err != nil || c.client() != cl {
 		return
 	}
 	c.noteDialogs(ds)
@@ -216,7 +230,13 @@ func (c *Conn) readContexts(ctx context.Context, cl client) {
 			}
 			fmt.Fprintf(&b, "%s %s：%s\n", c.when(m.At), from, clip(oneLine(m.Text), lineCap))
 		}
+		if c.client() != cl {
+			return
+		}
 		c.box.mu.Lock()
+		if c.box.contexts == nil {
+			c.box.contexts = map[string]threadContext{}
+		}
 		c.box.contexts[t.Thread] = threadContext{last: t.Last, text: b.String()}
 		c.box.mu.Unlock()
 		if ctx.Err() != nil {

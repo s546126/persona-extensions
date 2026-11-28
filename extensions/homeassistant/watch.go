@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -102,6 +103,10 @@ func (r *Rule) check() error {
 		return fmt.Errorf("「%s」不是类型（domain）", clip(r.Domain, 30))
 	case r.To == "" && r.From == "" && r.Above == nil && r.Below == nil:
 		return errors.New("要写条件：to（变成什么状态，offline 是离线）、from、above 或 below")
+	case r.Above != nil && (math.IsNaN(*r.Above) || math.IsInf(*r.Above, 0)):
+		return errors.New("above 要是有限的数")
+	case r.Below != nil && (math.IsNaN(*r.Below) || math.IsInf(*r.Below, 0)):
+		return errors.New("below 要是有限的数")
 	case r.Above != nil && r.Below != nil && *r.Above >= *r.Below:
 		return errors.New("above 要小于 below")
 	case r.For < 0 || r.For > 7*24*3600:
@@ -218,7 +223,7 @@ func parseRule(line string) (Rule, error) {
 			r.To = "unavailable"
 		case strings.HasPrefix(t, ">") || strings.HasPrefix(t, "<"):
 			n, err := strconv.ParseFloat(t[1:], 64)
-			if err != nil {
+			if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 				return r, fmt.Errorf("「%s」不是数", t[1:])
 			}
 			if t[0] == '>' {
@@ -394,12 +399,28 @@ func (w *watcher) save() error {
 	if file == "" {
 		return errors.New("扩展没有数据目录，存不下规则")
 	}
-	b, _ := json.MarshalIndent(rules, "", "  ")
-	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	b, err := json.MarshalIndent(rules, "", "  ")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, file)
+	tmp, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, file)
 }
 
 func (w *watcher) rules() []Rule {

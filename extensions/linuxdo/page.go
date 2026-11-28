@@ -31,10 +31,11 @@ const (
 )
 
 func (p *plugin) readState(raw string) pageState {
+	cfg, _ := p.snapshot()
 	var st pageState
 	_ = json.Unmarshal([]byte(raw), &st)
 	if _, _, ok := listOf(st.List); !ok {
-		st.List = p.cfg.list()
+		st.List = cfg.list()
 	}
 	return st
 }
@@ -51,8 +52,9 @@ type draw struct {
 }
 
 func (p *plugin) drawFor(r pluginkit.UIRequest) draw {
-	d := draw{loc: p.loc, v2: r.Draws(2)}
-	if p.cfg.TZ == "" { // the plugin's own setting wins; else the user's, as the hub says it
+	cfg, loc := p.snapshot()
+	d := draw{loc: loc, v2: r.Draws(2)}
+	if cfg.TZ == "" { // the plugin's own setting wins; else the user's, as the hub says it
 		d.loc = r.Location()
 	}
 	return d
@@ -129,11 +131,12 @@ func (p *plugin) listPage(ctx context.Context, d draw, st pageState, refresh boo
 	topics, err := p.hot(ctx, st.List, refresh)
 	if err != nil {
 		v.Sections = append(v.Sections, pluginkit.Section{Title: title, Items: []pluginkit.Item{
-			{Type: "text", Text: err.Error(), Style: "secondary"},
+			{Type: "text", Text: clip(oneLine(err.Error()), 1900), Style: "secondary"},
 			{Type: "button", Title: "重试", Action: &pluginkit.UIAction{ID: "refresh"}}}})
 		return v
 	}
-	f := p.cfg.filter()
+	cfg, _ := p.snapshot()
+	f := cfg.filter()
 	shown := topics
 	if !st.All {
 		shown = f.apply(topics)
@@ -145,14 +148,42 @@ func (p *plugin) listPage(ctx context.Context, d draw, st pageState, refresh boo
 		sec.Footer = "没按你的兴趣过滤"
 	case f.describe() != "":
 		sec.Title = fmt.Sprintf("%s · %d / %d 条", title, len(shown), len(topics))
-		sec.Footer = "按你的兴趣：" + f.describe() + "。在 设置 › 插件 › LINUX DO 的设置里改"
+		sec.Footer = clip("按你的兴趣："+f.describe()+"。在 设置 › 插件 › LINUX DO 的设置里改", 1900)
 	default:
 		sec.Title = fmt.Sprintf("%s · %d 条", title, len(topics))
 		sec.Footer = "想只看感兴趣的：在 设置 › 插件 › LINUX DO 的设置里填分类、关键词"
 	}
-	for _, t := range shown {
-		sec.Items = append(sec.Items, pluginkit.Item{Type: "row", Title: clip(t.Title, 300), Subtitle: t.meta(now),
+	tail := pluginkit.Section{Items: []pluginkit.Item{
+		{Type: "text", Text: "读于 " + now.In(d.loc).Format("15:04") + "（几分钟内不重读）", Style: "caption"},
+		{Type: "button", Title: "刷新", Action: &pluginkit.UIAction{ID: "refresh"}}}}
+	hasToggle := f.describe() != "" && (st.All || len(shown) < len(topics))
+	used := len(tail.Items)
+	for _, s := range v.Sections {
+		used += len(s.Items)
+	}
+	if hasToggle {
+		used++
+	}
+	room := max(300-used, 0)
+	truncated := len(shown) > room
+	renderTopics := shown
+	if truncated {
+		if room > 1 {
+			renderTopics = shown[:room-1]
+		} else {
+			renderTopics = nil
+		}
+	}
+	for _, t := range renderTopics {
+		rowTitle := clip(oneLine(t.Title), 300)
+		if rowTitle == "" {
+			rowTitle = fmt.Sprintf("帖子 %d", t.ID)
+		}
+		sec.Items = append(sec.Items, pluginkit.Item{Type: "row", Title: rowTitle, Subtitle: clip(oneLine(t.meta(now)), 1900),
 			Action: &pluginkit.UIAction{ID: fmt.Sprintf("topic:%d", t.ID)}})
+	}
+	if truncated && room > 0 {
+		sec.Items = append(sec.Items, pluginkit.Item{Type: "text", Text: fmt.Sprintf("这里只显示前 %d 条，共 %d 条；其余可在网页或调整筛选后查看", len(renderTopics), len(shown)), Style: "caption"})
 	}
 	switch {
 	case len(topics) == 0:
@@ -160,16 +191,14 @@ func (p *plugin) listPage(ctx context.Context, d draw, st pageState, refresh boo
 	case len(shown) == 0:
 		sec.Items = append(sec.Items, pluginkit.Item{Type: "text", Text: "没有符合你兴趣的帖子", Style: "secondary"})
 	}
-	if f.describe() != "" && (st.All || len(shown) < len(topics)) {
+	if hasToggle {
 		label := fmt.Sprintf("看全部 %d 条", len(topics))
 		if st.All {
 			label = "按我的兴趣过滤"
 		}
 		sec.Items = append(sec.Items, pluginkit.Item{Type: "row", Title: label, Action: &pluginkit.UIAction{ID: "all"}})
 	}
-	v.Sections = append(v.Sections, sec, pluginkit.Section{Items: []pluginkit.Item{
-		{Type: "text", Text: "读于 " + now.In(d.loc).Format("15:04") + "（几分钟内不重读）", Style: "caption"},
-		{Type: "button", Title: "刷新", Action: &pluginkit.UIAction{ID: "refresh"}}}})
+	v.Sections = append(v.Sections, sec, tail)
 	return v
 }
 
@@ -179,13 +208,16 @@ func (p *plugin) topicPage(ctx context.Context, d draw, st pageState) pluginkit.
 	t, err := p.topic(ctx, st.Topic)
 	if err != nil {
 		v.Sections = []pluginkit.Section{{Items: []pluginkit.Item{
-			{Type: "text", Text: err.Error(), Style: "secondary"},
+			{Type: "text", Text: clip(oneLine(err.Error()), 1900), Style: "secondary"},
 			{Type: "link", Title: "在网页打开", URL: topicURL(st.Topic)}, back}}}
 		return v
 	}
 	v.Title = clip(oneLine(t.Title), 200)
+	if v.Title == "" {
+		v.Title = fmt.Sprintf("帖子 %d", t.ID)
+	}
 
-	head := []pluginkit.Item{{Type: "text", Text: topicMeta(t, d.loc), Style: "caption"}}
+	head := []pluginkit.Item{{Type: "text", Text: clip(oneLine(topicMeta(t, d.loc)), 1900), Style: "caption"}}
 	if op, ok := t.opening(); ok {
 		more := pluginkit.Item{Type: "text", Text: "正文太长，后面的在网页里看", Style: "caption"}
 		left, room := openingMost, openingRoom
@@ -223,11 +255,17 @@ func (p *plugin) topicPage(ctx context.Context, d draw, st pageState) pluginkit.
 			if i > 0 {
 				sec.Items = append(sec.Items, pluginkit.Item{Type: "divider"})
 			}
-			who := fmt.Sprintf("#%d %s · %s", r.PostNumber, r.Username, r.CreatedAt.In(d.loc).Format("01-02 15:04"))
+			who := fmt.Sprintf("#%d", r.PostNumber)
+			if u := oneLine(r.Username); u != "" {
+				who += " " + u
+			}
+			if !r.CreatedAt.IsZero() {
+				who += " · " + r.CreatedAt.In(d.loc).Format("01-02 15:04")
+			}
 			if n := r.likes(); n > 0 {
 				who += fmt.Sprintf(" · %d 赞", n)
 			}
-			sec.Items = append(sec.Items, pluginkit.Item{Type: "text", Text: who, Style: "caption"},
+			sec.Items = append(sec.Items, pluginkit.Item{Type: "text", Text: clip(who, 1900), Style: "caption"},
 				pluginkit.Item{Type: "text", Text: clip(plainText(r.Cooked), replyMost), Style: "body"})
 		}
 		v.Sections = append(v.Sections, sec)

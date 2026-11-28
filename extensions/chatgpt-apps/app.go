@@ -117,6 +117,7 @@ func manifestVersion() string {
 }
 
 func (a *App) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]any, error) {
+	loaded := make(chan struct{})
 	a.mu.Lock()
 	a.ctx, a.hub, a.text = ctx, hub, textsFor(in.Hub.Locale)
 	a.dataDir = in.Info().DataDir
@@ -124,9 +125,10 @@ func (a *App) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]
 		a.dataDir = ext.Env().Data
 	}
 	a.ledger = newLedger(a.dataDir)
+	a.loaded = loaded
 	a.mu.Unlock()
 	// The stored sign-in comes from the hub (connector.secrets.load), asked once initialize is answered.
-	go a.loadTokens(ctx)
+	go a.loadTokensWith(ctx, hub, loaded)
 	// The connector as the manifest has it, so the hub does not log that the program does not say it has one.
 	var m struct {
 		Contributes struct {
@@ -139,9 +141,25 @@ func (a *App) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]
 	return map[string]any{"connectors": m.Contributes.Connectors}, nil
 }
 
+func (a *App) getLedger() *ledger {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.ledger
+}
+
 func (a *App) loadTokens(ctx context.Context) {
-	defer close(a.loaded)
-	data, err := a.hub.LoadSecret(ctx, connectorID)
+	a.mu.Lock()
+	hub, loaded := a.hub, a.loaded
+	a.mu.Unlock()
+	a.loadTokensWith(ctx, hub, loaded)
+}
+
+func (a *App) loadTokensWith(ctx context.Context, hub *ext.Hub, loaded chan struct{}) {
+	defer close(loaded)
+	if hub == nil {
+		return
+	}
+	data, err := hub.LoadSecret(ctx, connectorID)
 	if err != nil {
 		log.Printf("could not read the stored sign-in: %v", err)
 		return
@@ -160,10 +178,15 @@ func (a *App) loadTokens(ctx context.Context) {
 
 // waitLoaded waits (a little) for the stored sign-in, so a call right after a start does not read as signed out.
 func (a *App) waitLoaded(ctx context.Context) {
+	a.mu.Lock()
+	loaded := a.loaded
+	a.mu.Unlock()
+	timer := time.NewTimer(a.loadTimeout)
+	defer timer.Stop()
 	select {
-	case <-a.loaded:
+	case <-loaded:
 	case <-ctx.Done():
-	case <-time.After(a.loadTimeout):
+	case <-timer.C:
 	}
 }
 

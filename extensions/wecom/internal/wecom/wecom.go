@@ -73,7 +73,9 @@ type Bot struct {
 	replied map[string]time.Time
 	queue   chan queued
 	// paused holds Run back while binding checks new credentials, so the check is the robot's only subscriber.
-	paused bool
+	paused     bool
+	pauseCount int
+	sessionGen uint64
 	// serving is closed when the current serve returns (nil while none runs).
 	serving chan struct{}
 	// hubErrorTold are the owner's messages the hub failed to take that the owner was already told about.
@@ -100,8 +102,9 @@ type owner struct {
 
 // queued is a message the connection brought, waiting for its turn.
 type queued struct {
-	c *api.Client
-	m api.Message
+	c   *api.Client
+	gen uint64
+	m   api.Message
 }
 
 // queueMost is how many messages wait at once; more are dropped with a log line (WeCom does not deliver again).
@@ -263,6 +266,7 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 		b.kick() // the credentials changed under it: Run starts over with the new ones
 		return
 	}
+	gen := b.sessionGen
 	b.serving = done
 	b.restart = cancel
 	if err == nil {
@@ -273,6 +277,9 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
+		if b.serving == done {
+			b.serving = nil
+		}
 		if b.client == c {
 			b.client, b.session = nil, nil
 		}
@@ -286,10 +293,12 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 	for ctx.Err() == nil {
 		err := c.Run(ctx, func(s *api.Session) {
 			b.mu.Lock()
-			b.session, b.problem = s, ""
+			if b.sessionGen == gen {
+				b.session, b.problem = s, ""
+			}
 			b.mu.Unlock()
 			failures = 0
-		}, func(f api.Frame) { b.take(c, f) })
+		}, func(f api.Frame) { b.take(c, gen, f) })
 		b.mu.Lock()
 		b.session = nil
 		b.mu.Unlock()
@@ -314,7 +323,7 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 }
 
 // take queues a message the connection brought; events other than being taken over are not used.
-func (b *Bot) take(c *api.Client, f api.Frame) {
+func (b *Bot) take(c *api.Client, gen uint64, f api.Frame) {
 	if f.Cmd != api.CmdMessage {
 		return
 	}
@@ -323,7 +332,7 @@ func (b *Bot) take(c *api.Client, f api.Frame) {
 		return
 	}
 	select {
-	case b.queue <- queued{c: c, m: m}:
+	case b.queue <- queued{c: c, gen: gen, m: m}:
 	default:
 		log.Printf("wecom: too many messages waiting; one was dropped")
 	}
@@ -336,9 +345,15 @@ func (b *Bot) work(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case q := <-b.queue:
-			b.handle(ctx, q.c, q.m)
+			b.handle(ctx, q.c, q.gen, q.m)
 		}
 	}
+}
+
+func (b *Bot) sendGeneration() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sessionGen
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {

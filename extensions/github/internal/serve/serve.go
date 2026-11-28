@@ -520,7 +520,7 @@ func (s *server) handle(ctx context.Context, method string, params json.RawMessa
 		if p.RequestID == "" {
 			return nil, errors.New("actions.do without a request_id")
 		}
-		return s.once.do(p.RequestID, func() (CallResult, error) {
+		return s.once.doContext(ctx, p.RequestID, func() (CallResult, error) {
 			text, err := a.Do(ctx, p.Name, p.Args)
 			return CallResult{Text: text}, err
 		})
@@ -588,10 +588,12 @@ func (s *server) watch(e connector.Events) {
 			wait = watchFirst
 		}
 		log.Printf("watch stopped (%v), again in %s", err, wait)
+		timer := time.NewTimer(wait)
 		select {
 		case <-s.ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 		wait = min(wait*2, watchLast)
 	}
@@ -616,11 +618,19 @@ type write struct {
 }
 
 func (w *writes) do(id string, run func() (CallResult, error)) (CallResult, error) {
+	return w.doContext(context.Background(), id, run)
+}
+
+func (w *writes) doContext(ctx context.Context, id string, run func() (CallResult, error)) (CallResult, error) {
 	w.mu.Lock()
 	if prev, ok := w.running[id]; ok {
 		w.mu.Unlock()
-		<-prev.done
-		return prev.res, prev.err
+		select {
+		case <-prev.done:
+			return prev.res, prev.err
+		case <-ctx.Done():
+			return CallResult{}, ctx.Err()
+		}
 	}
 	if prev, ok := w.done[id]; ok {
 		for i, cached := range w.order {

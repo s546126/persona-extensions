@@ -61,21 +61,39 @@ func (p *plugin) configure(ip pluginkit.InitParams) error {
 			return fmt.Errorf("config: %w", err)
 		}
 	}
+	loc := time.Local
 	if cfg.TZ != "" {
 		l, err := time.LoadLocation(cfg.TZ)
 		if err != nil {
 			return fmt.Errorf("时区 %q 不认识", cfg.TZ)
 		}
-		p.loc = l
+		loc = l
 	}
+	p.mu.Lock()
+	p.loc = loc
 	p.cfg = cfg
+	p.mu.Unlock()
 	return nil
+}
+
+func (p *plugin) snapshot() (Config, *time.Location) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	loc := p.loc
+	if loc == nil {
+		loc = time.Local
+	}
+	return p.cfg, loc
 }
 
 // read reads the site and keeps how it went for the status. A cached copy standing in for a failed read is
 // handed to the caller, but the failure still counts for the status.
 func (p *plugin) read(ctx context.Context, path string, fresh time.Duration) ([]byte, error) {
-	body, err := p.site.get(ctx, path, fresh)
+	return p.readValidated(ctx, path, fresh, nil)
+}
+
+func (p *plugin) readValidated(ctx context.Context, path string, fresh time.Duration, validate func([]byte) error) ([]byte, error) {
+	body, err := p.site.getValidated(ctx, path, fresh, validate)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	switch {

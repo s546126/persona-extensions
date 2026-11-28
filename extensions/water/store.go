@@ -7,7 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
+)
+
+const (
+	recordIDMost = 128
+	seenMost     = 512
 )
 
 type record struct {
@@ -56,6 +63,28 @@ func (s *state) prune(now time.Time) {
 			delete(s.Seen, k)
 		}
 	}
+	if len(s.Seen) > seenMost {
+		type entry struct {
+			k string
+			t time.Time
+		}
+		entries := make([]entry, 0, len(s.Seen))
+		for k, t := range s.Seen {
+			entries = append(entries, entry{k: k, t: t})
+		}
+		slices.SortFunc(entries, func(a, b entry) int {
+			if a.t.Before(b.t) {
+				return -1
+			}
+			if a.t.After(b.t) {
+				return 1
+			}
+			return strings.Compare(a.k, b.k)
+		})
+		for _, e := range entries[:len(entries)-seenMost] {
+			delete(s.Seen, e.k)
+		}
+	}
 }
 
 func load(path string, now time.Time, hubZone ...string) (state, error) {
@@ -74,9 +103,14 @@ func load(path string, now time.Time, hubZone ...string) (state, error) {
 	err = json.Unmarshal(b, &s)
 	if err == nil {
 		for _, r := range s.Records {
-			if r.ID == "" || r.At.IsZero() || r.ML < 1 || r.ML > 3000 {
+			if r.ID == "" || len(r.ID) > recordIDMost || r.At.IsZero() || r.ML < 1 || r.ML > 3000 {
 				err = errors.New("invalid record")
 				break
+			}
+			if numStr, ok := strings.CutPrefix(r.ID, "d"); ok {
+				if n, perr := strconv.ParseUint(numStr, 10, 64); perr == nil && n > s.Sequence {
+					s.Sequence = n
+				}
 			}
 		}
 		if p := s.Pending; p != nil && (p.At.IsZero() || p.RetryAt.IsZero() || p.Attempts < 1 || p.Attempts > 3 || p.Notice.UI != "water" || p.Notice.ID != "water-reminder") {

@@ -190,3 +190,38 @@ test("connector.tools.call rejects explicit limit 0 and non-integer limits and l
     assert.ok(slow.error?.message?.includes("took too long"), `expected localized slow error, got ${JSON.stringify(slow)}`);
   } finally { h.p.close(); }
 });
+
+test("subsequent searches after a refresh use the cache instead of staying forced-refresh", async () => {
+  const h = await setup();
+  try {
+    const oatPath = searchPath.replace("chocolate", "oat");
+    const oatResponse = {
+      ...searchResponse,
+      products: [{ ...searchResponse.products[1], product_name: "OatCrunch" }],
+    };
+    h.fixture.put(oatPath, oatResponse);
+    await h.call("ui.page.mount", { session: "refresh-reset", params: { contribution: "products", locale: "en", ui_version: 5 } });
+    let snap = await settled(h, "refresh-reset", "foodfacts-welcome-text");
+
+    // Search chocolate -> hit 1
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "t1", interaction: interaction(snap, "foodfacts-submit", { query: "chocolate" }) });
+    snap = await settled(h, "refresh-reset", "Nutella");
+    assert.equal(h.fixture.hits.get(searchPath), 1);
+
+    // Search oat -> hit 1
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "t2", interaction: interaction(snap, "foodfacts-submit", { query: "oat" }) });
+    snap = await settled(h, "refresh-reset", "OatCrunch");
+    assert.equal(h.fixture.hits.get(oatPath), 1);
+
+    // Explicit refresh on oat -> hit 2
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "t3", interaction: interaction(snap, "foodfacts-refresh") });
+    await until(async () => h.fixture.hits.get(oatPath) ?? 0, n => n >= 2);
+    snap = await settled(h, "refresh-reset", "OatCrunch");
+
+    // Search chocolate again -> must hit cache (still 1 upstream fetch, NOT forced refresh!)
+    await h.call("ui.page.event", { session: "refresh-reset", ticket: "t4", interaction: interaction(snap, "foodfacts-submit", { query: "chocolate" }) });
+    await settled(h, "refresh-reset", "Nutella");
+    assert.equal(h.fixture.hits.get(searchPath), 1, "new search after refresh should reuse cached result");
+    await h.call("ui.page.dispose", { session: "refresh-reset" });
+  } finally { h.p.close(); }
+});

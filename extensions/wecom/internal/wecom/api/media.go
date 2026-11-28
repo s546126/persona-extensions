@@ -91,16 +91,25 @@ func fileName(disposition string) string {
 			name = d
 		}
 	}
+	return SanitizeFileName(name)
+}
+
+// SanitizeFileName strips directory components and control characters from an attachment filename.
+func SanitizeFileName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
 	name = path.Base(strings.ReplaceAll(name, "\\", "/"))
 	if name == "." || name == "/" || name == ".." {
 		return ""
 	}
-	return strings.Map(func(r rune) rune {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return -1
 		}
 		return r
-	}, name)
+	}, name))
 }
 
 // mediaClient is the HTTP client for media: every redirect must stay on HTTPS and on the media hosts.
@@ -200,7 +209,12 @@ func bytesOf(b byte, n int) []byte {
 
 // hostAllowed says host matches one of hosts ("example.com" exactly, "*.example.com" any subdomain).
 func hostAllowed(host string, hosts []string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" {
+		return false
+	}
 	for _, h := range hosts {
+		h = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
 		if suffix, ok := strings.CutPrefix(h, "*."); ok {
 			if strings.HasSuffix(host, "."+suffix) {
 				return true

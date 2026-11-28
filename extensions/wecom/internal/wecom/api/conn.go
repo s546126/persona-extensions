@@ -75,7 +75,7 @@ func New(opt Options) (*Client, error) {
 		opt.URL = Origin
 	}
 	u, err := url.Parse(opt.URL)
-	if err != nil || u.Scheme != "wss" || u.Host == "" {
+	if err != nil || u.Scheme != "wss" || u.Host == "" || u.User != nil {
 		return nil, fmt.Errorf("wecom: the long-connection address must be wss: %q", opt.URL)
 	}
 	if opt.HTTP == nil {
@@ -394,8 +394,14 @@ func errText(msg string) string {
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if r := []rune(s); len(r) > n {
-		return string(r[:n]) + "…"
+		if n == 1 {
+			return "…"
+		}
+		return string(r[:n-1]) + "…"
 	}
 	return s
 }

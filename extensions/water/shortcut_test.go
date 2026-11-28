@@ -28,7 +28,7 @@ func TestShortcutProtocol(t *testing.T) {
 	if err := json.Unmarshal(manifest, &m); err != nil {
 		t.Fatal(err)
 	}
-	if h.Init.Version != "0.4.0" || m.Version != "0.4.0" {
+	if m.Version == "" || h.Init.Version != m.Version {
 		t.Fatalf("versions: program=%s manifest=%s", h.Init.Version, m.Version)
 	}
 	want := []wire.ShortcutItem{{ID: "log_water", Title: "记一杯水", Description: "记一杯水；填了毫升数就按填的量记。", UI: "water",

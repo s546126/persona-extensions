@@ -74,12 +74,8 @@ func (t topicDoc) tags() []string {
 	return names
 }
 
-func (p *plugin) topic(ctx context.Context, id int64) (topicDoc, error) {
+func parseTopic(raw []byte) (topicDoc, error) {
 	var t topicDoc
-	raw, err := p.read(ctx, fmt.Sprintf("/t/topic/%d.json", id), topicFor)
-	if err != nil {
-		return t, err
-	}
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return t, fmt.Errorf("LINUX DO 的帖子读不懂：%w", err)
 	}
@@ -87,6 +83,17 @@ func (p *plugin) topic(ctx context.Context, id int64) (topicDoc, error) {
 		return t, errNoTopic
 	}
 	return t, nil
+}
+
+func (p *plugin) topic(ctx context.Context, id int64) (topicDoc, error) {
+	raw, err := p.readValidated(ctx, fmt.Sprintf("/t/topic/%d.json", id), topicFor, func(b []byte) error {
+		_, err := parseTopic(b)
+		return err
+	})
+	if err != nil {
+		return topicDoc{}, err
+	}
+	return parseTopic(raw)
 }
 
 // opening is the topic's first post.

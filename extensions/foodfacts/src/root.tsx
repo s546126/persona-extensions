@@ -20,7 +20,10 @@ export function Root(options: RootOptions): Node {
       }
       return callback(values => {
         if (id === "refresh") setRefresh(previous => previous + 1);
-        else setState(previous => transition(previous, id, values));
+        else {
+          setRefresh(0);
+          setState(previous => transition(previous, id, values));
+        }
       }, { submit: true });
     } });
 }

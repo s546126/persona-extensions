@@ -16,6 +16,15 @@ var (
 	errBadPath  = errors.New("path 要是站内相对路径（以 / 开头、不是完整 URL、不含 ..）")
 )
 
+func hasControlChar(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeBase is the hub address without its trailing slash, or why it cannot be one. A path already in the
 // address (a hub behind a prefix) is kept; only a trailing slash is dropped so the path below joins cleanly.
 func normalizeBase(raw string) (string, error) {
@@ -23,8 +32,12 @@ func normalizeBase(raw string) (string, error) {
 	if raw == "" {
 		return "", errNoHubURL
 	}
+	if hasControlChar(raw) {
+		return "", fmt.Errorf("「%s」不是 http(s) 地址", clip(raw, 80))
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if err != nil || u.Scheme == "" || u.Hostname() == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "?#") {
 		return "", fmt.Errorf("「%s」不是 http(s) 地址", clip(raw, 80))
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
@@ -36,13 +49,18 @@ func normalizeBase(raw string) (string, error) {
 // validPath says whether p is a same-site relative path: it starts with one /, is not a full or scheme-relative URL,
 // and has no .. segment. Query and hash are kept as they are (a .. there is not a path step).
 func validPath(p string) bool {
-	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.Contains(p, "://") {
+	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.Contains(p, "://") ||
+		strings.Contains(p, "\\") || hasControlChar(p) {
 		return false
 	}
 	before, _, _ := strings.Cut(p, "?")
 	before, _, _ = strings.Cut(before, "#")
 	for _, seg := range strings.Split(before, "/") {
 		if seg == ".." {
+			return false
+		}
+		unesc, err := url.PathUnescape(seg)
+		if err != nil || unesc == ".." || strings.ContainsAny(unesc, "/\\") {
 			return false
 		}
 	}
@@ -52,7 +70,12 @@ func validPath(p string) bool {
 // buildLink is the Feishu applink for path (a same-site relative path) on the hub's address; target is the page it
 // opens.
 func (a *app) buildLink(path string) (link, target string, err error) {
-	base, err := normalizeBase(a.hubURL)
+	hubURL, _ := a.snapshot()
+	return buildLinkFor(hubURL, path)
+}
+
+func buildLinkFor(hubURL, path string) (link, target string, err error) {
+	base, err := normalizeBase(hubURL)
 	if err != nil {
 		return "", "", err
 	}
@@ -91,12 +114,15 @@ func uriSafe(c byte) bool {
 
 // clip cuts s to at most n characters, on a rune boundary.
 func clip(s string, n int) string {
-	if n <= 0 || len(s) <= n {
-		return s
+	if n <= 0 {
+		return ""
 	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
 	}
-	return string(r[:n]) + "…"
+	if n == 1 {
+		return "…"
+	}
+	return string(r[:n-1]) + "…"
 }

@@ -25,7 +25,47 @@ func lower(v *wire.View, version int) *wire.View {
 	if version < 2 {
 		v = below2(v)
 	}
-	return v
+	return fitItemLimit(v)
+}
+
+// fitItemLimit ensures lowering (which expands filters, tabs, stat grids, and segmented controls into extra items)
+// never pushes a view past wire.ItemsMost. Normal views under the limit are returned unchanged.
+func fitItemLimit(v *wire.View) *wire.View {
+	if v == nil {
+		return nil
+	}
+	total := 0
+	for _, s := range v.Sections {
+		for _, it := range s.Items {
+			total += max(1, len(it.Tiles))
+		}
+	}
+	if total <= wire.ItemsMost {
+		return v
+	}
+	out := *v
+	out.Sections = make([]wire.Section, len(v.Sections))
+	for i, s := range v.Sections {
+		ns := s
+		ns.Items = append([]wire.Component(nil), s.Items...)
+		out.Sections[i] = ns
+	}
+	for total > wire.ItemsMost {
+		best := -1
+		bestCount := 0
+		for i, s := range out.Sections {
+			if len(s.Items) > bestCount {
+				best, bestCount = i, len(s.Items)
+			}
+		}
+		if best < 0 || bestCount <= 1 {
+			break
+		}
+		last := out.Sections[best].Items[bestCount-1]
+		out.Sections[best].Items = out.Sections[best].Items[:bestCount-1]
+		total -= max(1, len(last.Tiles))
+	}
+	return &out
 }
 
 // below4 draws the header as texts, the tabs as a leading section of rows, and drops the split layout. A pushed page

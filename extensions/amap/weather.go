@@ -88,7 +88,7 @@ func (a *app) weather(ctx context.Context, adcode string, forecastToo bool) (wea
 	if forecastToo {
 		ext, ttl = "all", castFor
 	}
-	body, err := a.client.get(ctx, groupWeather, "/v3/weather/weatherInfo", url.Values{"city": {adcode}, "extensions": {ext}}, ttl)
+	body, err := a.currentClient().get(ctx, groupWeather, "/v3/weather/weatherInfo", url.Values{"city": {adcode}, "extensions": {ext}}, ttl)
 	if err != nil {
 		return weatherAnswer{}, err
 	}

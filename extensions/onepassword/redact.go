@@ -62,6 +62,9 @@ func redact(text, token string) string {
 
 // clip cuts text to at most n runes.
 func clip(text string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(text) <= n {
 		return text
 	}

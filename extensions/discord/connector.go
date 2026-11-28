@@ -140,9 +140,10 @@ type conn struct {
 	loadRetry   time.Duration // the first wait before reading the kept sign-in again after a failure
 	// ready is closed once init has run; startGate, when set, holds back reading the sign-in (tests).
 	ready     chan struct{}
+	readyOnce sync.Once
 	startGate chan struct{}
 
-	// set once by init
+	// guarded by mu
 	ctx      context.Context
 	hub      *ext.Hub
 	cfg      config
@@ -182,45 +183,83 @@ func (c *conn) program(version string) ext.Program {
 
 // init reads what the hub sent and starts reading the sign-in.
 func (c *conn) init(ctx context.Context, in *ext.Init, hub *ext.Hub) (map[string]any, error) {
-	if err := in.Config(&c.cfg); err != nil {
+	var cfg config
+	if err := in.Config(&cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	c.ctx, c.hub = ctx, hub
-	c.tx = textsFor(in.Hub.Locale)
+	tx := textsFor(in.Hub.Locale)
+	zone := time.UTC
 	if in.Hub.Timezone != "" {
 		if z, err := time.LoadLocation(in.Hub.Timezone); err == nil {
-			c.zone = z
+			zone = z
 		}
 	}
+	var netCfg network
+	hasProxy := false
+	proxyErr := ""
 	if raw := in.Secrets["proxy"]; strings.TrimSpace(raw) != "" {
+		hasProxy = true
 		if p, err := parseProxy(raw); err != nil {
-			c.proxyErr = fmt.Sprintf(c.tx.proxyBad, err)
+			proxyErr = fmt.Sprintf(tx.proxyBad, err)
 			c.logf("discord: the proxy is not usable: %v", err)
 		} else {
-			c.net.proxy = p
+			netCfg.proxy = p
 		}
 	}
-	go c.start()
-	close(c.ready)
+	c.mu.Lock()
+	c.cfg = cfg
+	c.ctx, c.hub = ctx, hub
+	c.tx, c.zone = tx, zone
+	if hasProxy {
+		c.net = netCfg
+	}
+	c.proxyErr = proxyErr
+	c.mu.Unlock()
+	go c.start(ctx, hub)
+	c.readyOnce.Do(func() { close(c.ready) })
 	return nil, nil
+}
+
+func (c *conn) config() config {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg
+}
+
+func (c *conn) texts() *texts {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tx
+}
+
+func (c *conn) location() *time.Location {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.zone == nil {
+		return time.UTC
+	}
+	return c.zone
 }
 
 // start reads the sign-in kept in the hub and, when there is one, starts its session. A failure to read it (the
 // hub busy) is tried again, waiting longer each time; a sign-in or logout meanwhile decides instead.
-func (c *conn) start() {
+func (c *conn) start(rootCtx context.Context, hub *ext.Hub) {
 	if c.startGate != nil {
 		<-c.startGate
+	}
+	if hub == nil {
+		return
 	}
 	c.mu.Lock()
 	gen := c.gen
 	c.mu.Unlock()
 	wait := c.loadRetry
 	for {
-		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
-		raw, err := c.hub.LoadSecret(ctx, connectorID)
+		ctx, cancel := context.WithTimeout(rootCtx, 30*time.Second)
+		raw, err := hub.LoadSecret(ctx, connectorID)
 		cancel()
 		c.mu.Lock()
-		if c.gen != gen || c.ctx.Err() != nil {
+		if c.gen != gen || rootCtx.Err() != nil {
 			c.mu.Unlock()
 			return
 		}
@@ -241,10 +280,12 @@ func (c *conn) start() {
 		c.loadErr = c.tx.secretUnreadable
 		c.mu.Unlock()
 		c.logf("discord: reading the sign-in: %v", err)
+		timer := time.NewTimer(wait)
 		select {
-		case <-c.ctx.Done():
+		case <-rootCtx.Done():
+			timer.Stop()
 			return
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 		wait = min(wait*2, 5*time.Minute)
 	}
@@ -370,7 +411,8 @@ func (c *conn) check(ctx context.Context, s *session) *trouble {
 		return c.troubleOf(err)
 	}
 	if !inAny {
-		return &trouble{state: wire.ConnectorStateNoPermission, text: c.tx.noServers, guide: []string{fmt.Sprintf(c.tx.invite, c.inviteURL(s))},
+		tx := c.texts()
+		return &trouble{state: wire.ConnectorStateNoPermission, text: tx.noServers, guide: []string{fmt.Sprintf(tx.invite, c.inviteURL(s))},
 			definite: true}
 	}
 	return nil
@@ -379,24 +421,26 @@ func (c *conn) check(ctx context.Context, s *session) *trouble {
 // intentOff is the trouble of the Message Content intent turned off: Discord then shows the bot no message's
 // content, so nothing is archived until it is back on.
 func (c *conn) intentOff() *trouble {
-	return &trouble{state: wire.ConnectorStateNoPermission, text: c.tx.intentOff, guide: c.tx.intentGuide, definite: true}
+	tx := c.texts()
+	return &trouble{state: wire.ConnectorStateNoPermission, text: tx.intentOff, guide: tx.intentGuide, definite: true}
 }
 
 // troubleOf is what a failed request means for the status: a refused token, a long rate limit, or Discord out of
 // reach.
 func (c *conn) troubleOf(err error) *trouble {
+	tx := c.texts()
 	e, ok := asAPIError(err)
 	switch {
 	case !ok:
-		return &trouble{state: wire.ConnectorStateError, text: fmt.Sprintf(c.tx.unreachable, clip(oneLine(err.Error()), 160)),
-			guide: []string{c.tx.proxyGuide}}
+		return &trouble{state: wire.ConnectorStateError, text: fmt.Sprintf(tx.unreachable, clip(oneLine(err.Error()), 160)),
+			guide: []string{tx.proxyGuide}}
 	case e.Status == 401:
-		return &trouble{state: wire.ConnectorStateNotSignedIn, text: c.tx.tokenRevoked, definite: true}
+		return &trouble{state: wire.ConnectorStateNotSignedIn, text: tx.tokenRevoked, definite: true}
 	case e.Status == 429:
-		return &trouble{state: wire.ConnectorStateRateLimited, text: fmt.Sprintf(c.tx.rateLimited, seconds(e.RetryAfter)),
+		return &trouble{state: wire.ConnectorStateRateLimited, text: fmt.Sprintf(tx.rateLimited, seconds(e.RetryAfter)),
 			until: time.Now().Add(e.RetryAfter)}
 	}
-	return &trouble{state: wire.ConnectorStateError, text: fmt.Sprintf(c.tx.unreachable, e.Error())}
+	return &trouble{state: wire.ConnectorStateError, text: fmt.Sprintf(tx.unreachable, e.Error())}
 }
 
 // refused notes a 401 from any call: the token is no longer good, and nothing asks Discord until a new sign-in.
@@ -439,26 +483,29 @@ func (c *conn) inviteURL(s *session) string {
 // loginStep is the sign-in: one step, the bot token. It never waits on the rest of the setup: with Message Content
 // off or the bot in no server yet, it signs in and the status says what to do, until a check finds it done.
 func (c *conn) loginStep(ctx context.Context, p wire.ConnectorLoginParams) (wire.ConnectorPrompt, error) {
+	c.mu.Lock()
+	tx, proxyErr, netCfg, hub := c.tx, c.proxyErr, c.net, c.hub
+	c.mu.Unlock()
 	ask := func(why string) wire.ConnectorPrompt {
-		return wire.ConnectorPrompt{Step: "token", Hint: c.tx.tokenHint, Error: why,
-			Fields: []wire.ConnectorField{{Name: "token", Label: c.tx.tokenLabel, Secret: true, Placeholder: c.tx.tokenPlaceholder}}}
+		return wire.ConnectorPrompt{Step: "token", Hint: tx.tokenHint, Error: why,
+			Fields: []wire.ConnectorField{{Name: "token", Label: tx.tokenLabel, Secret: true, Placeholder: tx.tokenPlaceholder}}}
 	}
 	if p.Step != "token" {
 		return ask(""), nil
 	}
-	if c.proxyErr != "" {
-		return ask(c.proxyErr), nil
+	if proxyErr != "" {
+		return ask(proxyErr), nil
 	}
 	token := cleanToken(p.Values["token"])
 	if token == "" {
-		return ask(c.tx.tokenEmpty), nil
+		return ask(tx.tokenEmpty), nil
 	}
 	actx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	app, err := newAPI(c.ep.API, token, version, c.net.httpClient()).application(actx)
+	app, err := newAPI(c.ep.API, token, version, netCfg.httpClient()).application(actx)
 	cancel()
 	if err != nil {
 		if statusOf(err) == 401 {
-			return ask(c.tx.tokenWrong), nil
+			return ask(tx.tokenWrong), nil
 		}
 		t := c.troubleOf(err)
 		return ask(strings.Join(append([]string{t.text}, t.guide...), "; ")), nil
@@ -474,7 +521,7 @@ func (c *conn) loginStep(ctx context.Context, p wire.ConnectorLoginParams) (wire
 		in.OwnerID = app.Owner.ID.String()
 	}
 	raw, _ := json.Marshal(in)
-	if err := c.hub.SaveSecret(ctx, connectorID, raw); err != nil {
+	if err := hub.SaveSecret(ctx, connectorID, raw); err != nil {
 		return wire.ConnectorPrompt{}, fmt.Errorf("keeping the sign-in in the hub: %w", err)
 	}
 	c.mu.Lock()
@@ -482,7 +529,7 @@ func (c *conn) loginStep(ctx context.Context, p wire.ConnectorLoginParams) (wire
 	c.loaded, c.loadErr = true, ""
 	c.startLocked(in)
 	c.mu.Unlock()
-	return wire.ConnectorPrompt{Done: true, Account: fmt.Sprintf(c.tx.account, in.BotName)}, nil
+	return wire.ConnectorPrompt{Done: true, Account: fmt.Sprintf(tx.account, in.BotName)}, nil
 }
 
 // cleanToken is the token as pasted, without spaces, quotes or a "Bot " in front.
@@ -501,8 +548,9 @@ func (c *conn) logout(ctx context.Context, _ wire.ConnectorParams) (wire.Empty, 
 	c.loaded = true
 	c.stopLocked()
 	c.trouble, c.loadErr = nil, ""
+	hub := c.hub
 	c.mu.Unlock()
-	if err := c.hub.DeleteSecret(ctx, connectorID); err != nil {
+	if err := hub.DeleteSecret(ctx, connectorID); err != nil {
 		return wire.Empty{}, fmt.Errorf("forgetting the sign-in in the hub: %w", err)
 	}
 	return wire.Empty{}, nil

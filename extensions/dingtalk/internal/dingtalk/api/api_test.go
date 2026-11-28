@@ -141,7 +141,9 @@ func TestStreamAnswersPingsAndCallbacksInOrder(t *testing.T) {
 			t.Fatal("no callback")
 		}
 	}
-	apitest.Eventually(t, "the acks", func() bool { return f.AckOf("e1") != nil })
+	apitest.Eventually(t, "the acks", func() bool {
+		return f.AckOf("p1") != nil && f.AckOf("f1") != nil && f.AckOf("f2") != nil && f.AckOf("e1") != nil
+	})
 	if a := f.AckOf("p1"); a == nil || a["code"] != float64(200) || a["data"] != `{"opaque":"x"}` {
 		t.Errorf("the pong: %v", a)
 	}

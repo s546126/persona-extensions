@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "foodfacts",
   "name": "食品商品查询",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "icon": "assets/icon.png",
   "description": "按商品名称或条码查询 Open Food Facts，查看品牌、配料、标称过敏原、营养等级和原始商品链接。众包信息可能不完整，过敏和饮食决策请以实际包装为准。",
   "publisher": "nwverse",
@@ -20,7 +20,7 @@
     "source": {
       "entry": "src/index.ts",
       "bundle": "build/foodfacts.mjs",
-      "sha256": "18e5852da6f0da530554a41c9a346f9a745d934959f06b357186f4af54fdaf51"
+      "sha256": "d1900b503e9625b8b9523f49e34c7f3e56917e23eec36a9e8bd7123df0e1108e"
     }
   },
   "contributes": {

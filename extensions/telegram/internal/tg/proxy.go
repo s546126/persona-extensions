@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	gotddcs "github.com/gotd/td/telegram/dcs"
@@ -64,6 +65,9 @@ func (e proxyError) Unwrap() error { return e.error }
 
 // connectTunnel opens a CONNECT tunnel to addr through the HTTP proxy p.
 func connectTunnel(ctx context.Context, d *net.Dialer, p *url.URL, addr string) (net.Conn, error) {
+	if addr == "" || strings.ContainsFunc(addr, func(r rune) bool { return r <= 0x20 || r == 0x7f }) {
+		return nil, fmt.Errorf("invalid CONNECT target %q", addr)
+	}
 	host := p.Host
 	if p.Port() == "" {
 		host = net.JoinHostPort(p.Hostname(), "80")
@@ -72,6 +76,8 @@ func connectTunnel(ctx context.Context, d *net.Dialer, p *url.URL, addr string) 
 	if err != nil {
 		return nil, fmt.Errorf("proxy %s: %w", host, err)
 	}
+	stop := context.AfterFunc(ctx, func() { _ = c.SetDeadline(time.Now()) })
+	defer stop()
 	if dl, ok := ctx.Deadline(); ok {
 		_ = c.SetDeadline(dl)
 	} else {
@@ -96,6 +102,13 @@ func connectTunnel(ctx context.Context, d *net.Dialer, p *url.URL, addr string) 
 	if res.StatusCode != http.StatusOK {
 		c.Close()
 		return nil, fmt.Errorf("proxy %s: CONNECT %s: %s", host, addr, res.Status)
+	}
+	if !stop() {
+		c.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("proxy %s: %w", host, err)
+		}
+		return nil, fmt.Errorf("proxy %s: canceled", host)
 	}
 	_ = c.SetDeadline(time.Time{})
 	if br.Buffered() > 0 { // the proxy sent bytes past its answer: keep them

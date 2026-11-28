@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "space-conversations",
   "name": "空间对话",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "icon": "assets/icon.png",
   "description": "为生活的不同部分建立独立空间，保留各自的 SPACE.md、记忆边界和 Persona 对话。",
   "publisher": "nwverse",

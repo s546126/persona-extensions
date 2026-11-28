@@ -123,7 +123,7 @@ func (c *conn) when(id snowflake) string {
 	if id == 0 {
 		return "no messages"
 	}
-	return "last message " + id.Time().In(c.zone).Format("2006-01-02 15:04")
+	return "last message " + id.Time().In(c.location()).Format("2006-01-02 15:04")
 }
 
 // placeName is a channel as the tools say it: "#channel" or "#channel › thread", on one line (names are anyone's
@@ -163,6 +163,7 @@ func (c *conn) channelsTool(ctx context.Context, s *session, server string) (str
 	var b strings.Builder
 	b.WriteString("Discord servers the bot is in and their channels, most recently active first. Pass a channel id to discord_messages.\n")
 	shown := 0
+outer:
 	for _, g := range guilds {
 		fmt.Fprintf(&b, "\n%s (server %s)\n", oneLine(g.Name), g.ID)
 		list := byGuild[g.ID]
@@ -173,7 +174,7 @@ func (c *conn) channelsTool(ctx context.Context, s *session, server string) (str
 		for _, v := range list {
 			if shown == 300 {
 				b.WriteString("- … more channels left out\n")
-				break
+				break outer
 			}
 			shown++
 			what := "channel"
@@ -255,7 +256,7 @@ func (c *conn) writeMessage(ctx context.Context, b *strings.Builder, s *session,
 		who += " (a bot)"
 	}
 	text = strings.ReplaceAll(clip(text, 2000), "\n", "\n    ")
-	fmt.Fprintf(b, "[%s]%s %s (message %s):\n    %s\n", m.Timestamp.In(c.zone).Format("2006-01-02 15:04"), where, who, m.ID, text)
+	fmt.Fprintf(b, "[%s]%s %s (message %s):\n    %s\n", m.Timestamp.In(c.location()).Format("2006-01-02 15:04"), where, who, m.ID, text)
 }
 
 // lineBreaks turns every kind of line break into \n, so that each is indented.

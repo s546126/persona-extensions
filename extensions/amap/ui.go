@@ -28,7 +28,9 @@ const (
 	tabPlaces = "places"
 	tabUsage  = "usage"
 
-	mapRefCap = 64
+	mapRefCap        = 64
+	maxPlacesRows    = 100
+	maxViewTextLines = 200
 )
 
 // uiState is carried in View.State across renders and actions (compact JSON keys, well under 16 KB).
@@ -54,18 +56,20 @@ type uiState struct {
 	Run         bool   `json:"r,omitempty"`
 }
 
-func readUIState(r *ext.UIRequest) uiState {
-	var st uiState
-	_ = r.DecodeState(&st)
+func sanitizeUIState(st uiState) uiState {
 	switch st.Tab {
 	case tabSearch, tabRoute, tabMap, tabPlaces, tabUsage:
 	default:
 		st.Tab = tabSearch
 	}
-	if st.Mode == "" {
+	switch st.Mode {
+	case "driving", "transit", "walking", "cycling", "ebike":
+	default:
 		st.Mode = "driving"
 	}
-	if st.Prefer == "" {
+	switch st.Prefer {
+	case "recommended", "fastest", "avoid_congestion", "avoid_tolls", "avoid_highways":
+	default:
 		st.Prefer = "recommended"
 	}
 	if st.Zoom < 0 {
@@ -73,7 +77,25 @@ func readUIState(r *ext.UIRequest) uiState {
 	} else if st.Zoom > 17 {
 		st.Zoom = 17
 	}
+	st.Keywords = clip(st.Keywords, 200)
+	st.City = clip(st.City, 120)
+	st.From = clip(st.From, 200)
+	st.To = clip(st.To, 200)
+	st.Waypoints = clip(st.Waypoints, 400)
+	st.Place = clip(st.Place, 200)
+	st.PlaceLabel = clip(st.PlaceLabel, 200)
+	st.Markers = clip(st.Markers, 400)
+	st.WeatherCity = clip(st.WeatherCity, 120)
+	st.DraftName = clip(st.DraftName, 120)
+	st.DraftTarget = clip(st.DraftTarget, 400)
+	st.PlaceErr = clip(st.PlaceErr, 400)
 	return st
+}
+
+func readUIState(r *ext.UIRequest) uiState {
+	var st uiState
+	_ = r.DecodeState(&st)
+	return sanitizeUIState(st)
 }
 
 // mapRefSpec is the server-built staticmap query behind a ui.image ref. Keeping the spec server-side ensures ui.image
@@ -130,7 +152,8 @@ func (s *mapRefStore) get(ref string) (mapRefSpec, bool) {
 
 // renderCard renders the compact overview card (amap-card) from memory without spending quota.
 func (a *app) renderCard(_ context.Context, _ *ext.UIRequest) (*wire.View, error) {
-	if a.client.key == "" {
+	cl := a.currentClient()
+	if cl.key == "" {
 		return &wire.View{
 			Title: "高德地图",
 			Sections: []wire.Section{{
@@ -143,7 +166,7 @@ func (a *app) renderCard(_ context.Context, _ *ext.UIRequest) (*wire.View, error
 			}},
 		}, nil
 	}
-	keyErr, _, u := a.client.state()
+	keyErr, _, u := cl.state()
 	if keyErr != nil {
 		return &wire.View{
 			Title: "高德地图",
@@ -396,13 +419,14 @@ func (a *app) imagePage(ctx context.Context, r *ext.ImageRequest) (*wire.UIImage
 		ttl = drivingFor
 		maxAge = 120
 	}
-	img, err := a.client.getImage(ctx, groupLBS, "/v3/staticmap", q, ttl)
+	cl := a.currentClient()
+	img, err := cl.getImage(ctx, groupLBS, "/v3/staticmap", q, ttl)
 	if err != nil {
 		return nil, err
 	}
 	if len(img) > staticMapMaxBytes {
 		q.Set("scale", "1")
-		img, err = a.client.getImage(ctx, groupLBS, "/v3/staticmap", q, ttl)
+		img, err = cl.getImage(ctx, groupLBS, "/v3/staticmap", q, ttl)
 		if err != nil {
 			return nil, err
 		}
@@ -411,7 +435,9 @@ func (a *app) imagePage(ctx context.Context, r *ext.ImageRequest) (*wire.UIImage
 }
 
 func (a *app) buildPage(ctx context.Context, st uiState, interactive bool) (*wire.View, error) {
-	if a.client.key == "" {
+	st = sanitizeUIState(st)
+	cl := a.currentClient()
+	if cl.key == "" {
 		return &wire.View{
 			Title: "高德地图",
 			Sections: []wire.Section{{
@@ -427,7 +453,7 @@ func (a *app) buildPage(ctx context.Context, st uiState, interactive bool) (*wir
 			}},
 		}, nil
 	}
-	keyErr, _, u := a.client.state()
+	keyErr, _, u := cl.state()
 	if keyErr != nil {
 		return &wire.View{
 			Title: "高德地图",
@@ -561,7 +587,7 @@ func (a *app) searchSections(ctx context.Context, st uiState, interactive bool) 
 				Values: map[string]string{
 					"lat":  strconv.FormatFloat(at.Lat, 'f', 6, 64),
 					"lng":  strconv.FormatFloat(at.Lng, 'f', 6, 64),
-					"name": p.Name.String(),
+					"name": clip(p.Name.String(), 200),
 				},
 			}
 			row.Action = openAction
@@ -731,6 +757,12 @@ func (a *app) routeSections(ctx context.Context, st uiState, interactive bool) [
 			continue
 		}
 		resultItems = append(resultItems, wire.Component{Type: wire.ComponentText, Text: clip(line, 1800)})
+		if len(resultItems) >= maxViewTextLines {
+			break
+		}
+	}
+	if len(resultItems) == 0 {
+		resultItems = append(resultItems, wire.Component{Type: wire.ComponentEmpty, Icon: "car", Title: "暂无路线详情"})
 	}
 	out := []wire.Section{form, {Title: "规划结果", Items: resultItems}}
 
@@ -1083,7 +1115,7 @@ func (a *app) mapSections(ctx context.Context, st uiState, interactive bool) []w
 		items = append(items, wire.Component{
 			Type:     wire.ComponentRow,
 			Icon:     "location",
-			Title:    fmt.Sprintf("%c. %s", rune('A'+i), m.label()),
+			Title:    clip(fmt.Sprintf("%c. %s", rune('A'+i), m.label()), 300),
 			Subtitle: "WGS-84: " + m.at.String(),
 		})
 	}
@@ -1128,8 +1160,11 @@ func (a *app) placesSections(st uiState) []wire.Section {
 			}},
 		})
 	} else {
-		rows := make([]wire.Component, 0, len(fps))
+		rows := make([]wire.Component, 0, min(len(fps), maxPlacesRows))
 		for _, fp := range fps {
+			if len(rows) >= maxPlacesRows {
+				break
+			}
 			icon := "location"
 			if canonicalSlotKey(fp.Name) == "home" {
 				icon = "home"
@@ -1242,9 +1277,14 @@ func (a *app) usageSections(ctx context.Context, st uiState, u usage) []wire.Sec
 			for _, line := range strings.Split(text, "\n") {
 				if line = strings.TrimSpace(line); line != "" {
 					lines = append(lines, wire.Component{Type: wire.ComponentText, Text: clip(line, 1800)})
+					if len(lines) >= maxViewTextLines {
+						break
+					}
 				}
 			}
-			sections = append(sections, wire.Section{Title: "天气结果", Items: lines})
+			if len(lines) > 0 {
+				sections = append(sections, wire.Section{Title: "天气结果", Items: lines})
+			}
 		}
 	}
 

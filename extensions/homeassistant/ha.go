@@ -178,6 +178,8 @@ func (h *ha) send(ctx context.Context, method, path string, body any) ([]byte, e
 	return raw, err
 }
 
+const maxHAResponse = 32 << 20
+
 // sendTyped is send with the answer's content type.
 func (h *ha) sendTyped(ctx context.Context, method, path string, body any) ([]byte, string, error) {
 	if !h.configured() {
@@ -216,10 +218,13 @@ func (h *ha) sendTyped(ctx context.Context, method, path string, body any) ([]by
 		return nil, "", err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxHAResponse+1))
 	switch {
 	case err != nil:
 		err = fmt.Errorf("读 Home Assistant 的回答出错：%w", err)
+	case len(raw) > maxHAResponse:
+		raw = nil
+		err = fmt.Errorf("Home Assistant 的回答太大（超过 %d MB）", maxHAResponse>>20)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		where, _, _ := strings.Cut(path, "?")
 		err = fmt.Errorf("%w。被拒的是 %s %s（HTTP %d）", errUnauthorized, method, where, resp.StatusCode)
@@ -438,9 +443,15 @@ func (h *ha) History(ctx context.Context, id string, since time.Time) ([]Change,
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
+	}
+	if n == 1 {
+		return "…"
 	}
 	return string(r[:n-1]) + "…"
 }

@@ -20,6 +20,7 @@ const (
 	imagesMost  = 4
 	filesMost   = 4
 	maxSeen     = 200
+	maxReplied  = 1024
 	strangerGap = 10 * time.Minute
 	typingEvery = 4 * time.Second
 	typingFor   = 30 * time.Second
@@ -29,7 +30,17 @@ func (b *Bot) handleMessage(ctx context.Context, c *Client, creds credentials, m
 	if m.Chat.Type != "private" || m.From == nil {
 		return
 	}
+	// Check owner before recording Seen/LastEvent: Telegram message_ids are per-chat,
+	// so recording a stranger's MessageID would collide with and drop owner messages.
+	if m.From.ID != creds.OwnerID || m.Chat.ID != creds.ChatID {
+		b.stranger(ctx, c, m)
+		return
+	}
 	b.mu.Lock()
+	if b.st.Creds != nil && (b.st.Creds.Token != creds.Token || b.st.Creds.OwnerID != creds.OwnerID || b.st.Creds.ChatID != creds.ChatID) {
+		b.mu.Unlock()
+		return
+	}
 	if slices.Contains(b.st.Seen, m.MessageID) {
 		b.mu.Unlock()
 		return
@@ -39,13 +50,10 @@ func (b *Bot) handleMessage(ctx context.Context, c *Client, creds credentials, m
 		b.st.Seen = b.st.Seen[len(b.st.Seen)-maxSeen:]
 	}
 	b.status.LastEvent = b.opt.Now()
-	b.saveLocked(ctx)
-	b.mu.Unlock()
-
-	if m.From.ID != creds.OwnerID || m.Chat.ID != creds.ChatID {
-		b.stranger(ctx, c, m)
-		return
+	if b.st.Creds != nil {
+		b.saveLocked(ctx)
 	}
+	b.mu.Unlock()
 
 	msg := b.compose(ctx, c, m)
 	if emptyMessage(msg) {
@@ -69,12 +77,15 @@ func (b *Bot) stranger(ctx context.Context, c *Client, m Message) {
 		b.mu.Unlock()
 		return
 	}
-	b.replied[m.From.ID] = now
 	for who, at := range b.replied {
 		if now.Sub(at) >= strangerGap {
 			delete(b.replied, who)
 		}
 	}
+	if len(b.replied) >= maxReplied {
+		clear(b.replied)
+	}
+	b.replied[m.From.ID] = now
 	b.mu.Unlock()
 	_, _ = c.SendMessage(ctx, m.Chat.ID, t(b.lang(), "chat.stranger"), m.MessageID)
 }
@@ -272,7 +283,7 @@ func splitText(s string, maxRunes int) []string {
 	if s == "" {
 		return nil
 	}
-	if utf8.RuneCountInString(s) <= maxRunes {
+	if maxRunes <= 0 || utf8.RuneCountInString(s) <= maxRunes {
 		return []string{s}
 	}
 	var parts []string
@@ -304,8 +315,8 @@ func byteIndexAtRune(s string, n int) int {
 }
 
 type typingLoop struct {
-	stop chan struct{}
-	done chan struct{}
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // Typing shows or stops the Telegram "typing..." chat action while a turn is running.
@@ -325,26 +336,37 @@ func (b *Bot) Typing(ctx context.Context, on bool) error {
 	if err != nil {
 		return nil
 	}
-	tl := &typingLoop{stop: make(chan struct{}), done: make(chan struct{})}
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	tl := &typingLoop{cancel: loopCancel, done: make(chan struct{})}
 	b.mu.Lock()
-	if b.typing != nil {
+	if b.typing != nil || b.st.Creds == nil || b.st.Creds.Token != creds.Token {
 		b.mu.Unlock()
+		loopCancel()
 		return nil
 	}
 	b.typing = tl
 	chatID := creds.ChatID
 	b.mu.Unlock()
 
-	_ = c.SendChatAction(ctx, chatID, "typing")
+	initCtx, initCancel := context.WithCancel(ctx)
+	stopWatch := context.AfterFunc(loopCtx, initCancel)
+	_ = c.SendChatAction(initCtx, chatID, "typing")
+	stopWatch()
+	initCancel()
+	if loopCtx.Err() != nil {
+		close(tl.done)
+		return nil
+	}
 	go func() {
 		defer close(tl.done)
+		defer loopCancel()
 		tk := time.NewTicker(typingEvery)
 		defer tk.Stop()
 		deadline := time.NewTimer(typingFor)
 		defer deadline.Stop()
 		for {
 			select {
-			case <-tl.stop:
+			case <-loopCtx.Done():
 				return
 			case <-deadline.C:
 				b.mu.Lock()
@@ -354,7 +376,7 @@ func (b *Bot) Typing(ctx context.Context, on bool) error {
 				b.mu.Unlock()
 				return
 			case <-tk.C:
-				cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				cctx, cancel := context.WithTimeout(loopCtx, 5*time.Second)
 				_ = c.SendChatAction(cctx, chatID, "typing")
 				cancel()
 			}
@@ -369,7 +391,7 @@ func (b *Bot) stopTyping() {
 	b.typing = nil
 	b.mu.Unlock()
 	if tl != nil {
-		close(tl.stop)
+		tl.cancel()
 		<-tl.done
 	}
 }

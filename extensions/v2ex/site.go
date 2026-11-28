@@ -162,12 +162,15 @@ func (s *site) fetch(ctx context.Context, path string) ([]byte, error) {
 		return nil, requestError(err)
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, answerMost))
+	body, err := io.ReadAll(io.LimitReader(res.Body, answerMost+1))
 	if err != nil {
 		return nil, requestError(err)
 	}
 	s.noteQuota(res.Header)
-	return s.judge(res, body)
+	if int64(len(body)) > answerMost {
+		return nil, errBadAnswer
+	}
+	return s.judge(path, res, body)
 }
 
 // requestError says a failed request in words: too slow (the page's budget or the client's timeout), the caller gone,
@@ -185,7 +188,7 @@ func requestError(err error) error {
 
 // judge turns an answer into its body or what is wrong with it. Every path this reads answers a JSON array, so
 // anything else (a firewall's page, a cut answer, a refusal in a 200) never replaces a good copy in the cache.
-func (s *site) judge(res *http.Response, body []byte) ([]byte, error) {
+func (s *site) judge(path string, res *http.Response, body []byte) ([]byte, error) {
 	var refusal struct {
 		Message   string `json:"message"`
 		RateLimit struct {
@@ -210,6 +213,16 @@ func (s *site) judge(res *http.Response, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("V2EX：HTTP %d", res.StatusCode)
 	case !bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")), !json.Valid(body):
 		return nil, errBadAnswer
+	}
+	switch {
+	case strings.HasPrefix(path, "/replies/"):
+		if _, err := parseReplies(body); err != nil {
+			return nil, errBadAnswer
+		}
+	case strings.HasPrefix(path, "/topics/"):
+		if _, err := parseTopics(body); err != nil {
+			return nil, errBadAnswer
+		}
 	}
 	return body, nil
 }

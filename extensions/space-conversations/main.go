@@ -22,6 +22,14 @@ import (
 
 var manifest = pluginkit.PackagedManifest(authorManifest)
 
+var about = func() (out struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}) {
+	_ = json.Unmarshal(manifest, &out)
+	return out
+}()
+
 //go:embed persona-extension.json
 var authorManifest json.RawMessage
 
@@ -35,7 +43,7 @@ type App struct {
 func program() ext.Program {
 	a := &App{}
 	return ext.Program{
-		ID: "space-conversations", Version: "0.3.0", Manifest: manifest,
+		ID: about.ID, Version: about.Version, Manifest: manifest,
 		Init: func(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any, error) {
 			a.mu.Lock()
 			a.client = NewClient(in.Hub.URL, in.Hub.Token)
@@ -70,7 +78,7 @@ func (a *App) render(ctx context.Context, r *ext.UIRequest) (*wire.View, error) 
 	case "new":
 		return newView(), nil
 	case "edit":
-		if slug == "" || slug == allValue {
+		if slug == "" || slug == allValue || len(slug) > 120 || strings.ContainsAny(slug, "/\x00\r\n") {
 			// Opened as an entry of its own (an extension's settings list every page): no space is chosen yet.
 			return pickerView(ctx, c, "编辑 SPACE.md", "选择要编辑 SPACE.md 的空间。", "edit")
 		}
@@ -115,16 +123,22 @@ func isSpace(t Track) bool { return !t.Builtin && t.Config.Sidebar.Group == "spa
 func isActiveSpace(t Track) bool { return isSpace(t) && !t.Archived }
 
 func spaceTitle(t Track) string {
-	return clipRunes(cmp.Or(strings.TrimSpace(t.Title), t.Slug), wire.StringMost)
+	return clipRunes(cmp.Or(strings.TrimSpace(t.Title), strings.TrimSpace(t.Slug), "未命名空间"), wire.StringMost)
 }
 
 // spaceRows appends a row per active space, each sending actionID with its slug, or an empty state when there is none.
 func spaceRows(items []wire.Component, tracks []Track, actionID string) []wire.Component {
 	count := 0
+	seen := make(map[string]struct{}, len(tracks))
 	for _, t := range tracks {
-		if !isActiveSpace(t) {
+		slug := strings.TrimSpace(t.Slug)
+		if !isActiveSpace(t) || slug == "" {
 			continue
 		}
+		if _, dup := seen[slug]; dup {
+			continue
+		}
+		seen[slug] = struct{}{}
 		if len(items) >= wire.ItemsMost {
 			break
 		}
@@ -133,7 +147,7 @@ func spaceRows(items []wire.Component, tracks []Track, actionID string) []wire.C
 			Title:    spaceTitle(t),
 			Subtitle: clipRunes(strings.TrimSpace(t.Description), wire.StringMost),
 			Icon:     "chat",
-			Action:   action(actionID, map[string]string{"slug": t.Slug}),
+			Action:   action(actionID, map[string]string{"slug": clipRunes(slug, wire.StringMost)}),
 		})
 		count++
 	}
@@ -175,10 +189,17 @@ func editView(ctx context.Context, c *Client, slug string) (*wire.View, error) {
 	if err != nil {
 		return nil, err
 	}
+	if utf8.RuneCountInString(md.Content) > wire.StringMost {
+		return &wire.View{Title: "编辑 SPACE.md", State: slug, Sections: []wire.Section{{Items: []wire.Component{
+			{Type: wire.ComponentText, Text: fmt.Sprintf("SPACE.md 超过 %d 字，暂不支持在页面内直接编辑，避免保存时截断内容。请在助手所在电脑上编辑该文件。", wire.StringMost), Style: "secondary"},
+			{Type: wire.ComponentText, Text: clipRunes(strings.TrimSpace(md.Content), 1800)},
+			button("open", "返回空间", map[string]string{"slug": slug}),
+		}}}}, nil
+	}
 	return &wire.View{Title: "编辑 SPACE.md", State: slug, Sections: []wire.Section{{Items: []wire.Component{
 		{Type: wire.ComponentText, Text: "SPACE.md 是这个空间长期保留的说明。Persona 管理的状态块不可在这里修改。", Style: "secondary"},
 		{Type: wire.ComponentField, Name: "content", Label: "SPACE.md", Kind: wire.FieldKindMultiline, Value: md.Content},
-		{Type: wire.ComponentButton, Title: "保存", Action: &wire.Action{ID: "save", Submit: true, Values: map[string]string{"slug": slug, "digest": md.Digest}}},
+		{Type: wire.ComponentButton, Title: "保存", Action: &wire.Action{ID: "save", Submit: true, Values: map[string]string{"slug": slug, "digest": clipRunes(md.Digest, wire.StringMost)}}},
 	}}}}, nil
 }
 
@@ -243,7 +264,7 @@ func (a *App) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 		}
 		archived := r.Action == "archive"
 		for _, track := range tracks {
-			if track.Slug == slug {
+			if isSpace(track) && track.Slug == slug {
 				if err := c.Archive(ctx, track, archived); err != nil {
 					return nil, err
 				}

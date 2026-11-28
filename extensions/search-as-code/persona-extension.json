@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "search-as-code",
   "name": "AI 聊天记录搜索",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "icon": "assets/icon.png",
   "description": "在你以前和 Claude Code、Codex 的聊天记录里找东西，比如「上次那个 429 报错是怎么修好的？」：找出当时的聊天，标明是哪个项目、哪台电脑上的。可以同时搜你的几台电脑（不在线的电脑搜之前同步过来的精简副本），也可以连你指定的代码文件夹一起搜；用 disklessly 移到云端的聊天照样能搜到，并能一键恢复到原来的位置。可以在页面上直接输入几个词搜，也可以让 Persona 助手帮你搜：它读其他电脑或其他项目的聊天记录前会先问你。常用的搜索可以存起来，点一下就搜。",
   "publisher": "nwverse",

@@ -53,25 +53,31 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 		}
 		// WeCom keeps one connection per robot: the check must not compete with the robot's own connection (it
 		// would close it), so that one is ended first and started again after the check
-		b.pause()
+		b.pause(ctx)
 		c, err := b.opt.NewClient(id, secret)
 		if err == nil {
 			err = c.Subscribe(ctx)
 		}
 		if err != nil {
 			b.mu.Lock()
-			b.paused = false
+			resumed := b.unpauseLocked()
 			b.mu.Unlock()
-			b.kick()
+			if resumed {
+				b.kick()
+			}
 			return credsPrompt(l, t(l, "login.creds_refused", "error", api.ErrText(err))), nil
 		}
 		b.mu.Lock()
-		b.paused = false
+		b.unpauseLocked()
 		b.unreadable = false // binding again replaces a stored state that did not read
 		if b.st.BotID != id {
 			b.st.Seen = nil
 		}
+		b.sessionGen++
 		b.st.BotID, b.st.Secret, b.st.Owner = id, secret, nil
+		b.last = time.Time{}
+		b.replied = map[string]time.Time{}
+		b.hubErrorTold = map[string]bool{}
 		b.problem = ""
 		b.pairing = &pairing{code: b.opt.Code(), expires: b.opt.Now().Add(pairFor)}
 		b.saveLocked(ctx)
@@ -94,9 +100,10 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 	return credsPrompt(l, ""), nil
 }
 
-// pause ends the robot's connection, if any, and holds Run back until paused is cleared.
-func (b *Bot) pause() {
+// pause ends the robot's connection, if any, and holds Run back until unpauseLocked drops the refcount to zero.
+func (b *Bot) pause(ctx context.Context) {
 	b.mu.Lock()
+	b.pauseCount++
 	b.paused = true
 	restart, serving := b.restart, b.serving
 	b.restart = nil
@@ -105,11 +112,22 @@ func (b *Bot) pause() {
 		restart()
 	}
 	if serving != nil {
+		tm := time.NewTimer(10 * time.Second)
+		defer tm.Stop()
 		select {
 		case <-serving:
-		case <-time.After(10 * time.Second):
+		case <-ctx.Done():
+		case <-tm.C:
 		}
 	}
+}
+
+func (b *Bot) unpauseLocked() bool {
+	if b.pauseCount > 0 {
+		b.pauseCount--
+	}
+	b.paused = b.pauseCount > 0
+	return !b.paused
 }
 
 func credsPrompt(l, errText string) wire.ConnectorPrompt {
@@ -174,7 +192,11 @@ func (b *Bot) Logout(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.sessionGen++
 	b.st, b.pairing, b.problem, b.unreadable = state{}, nil, "", false
+	b.last = time.Time{}
+	b.replied = map[string]time.Time{}
+	b.hubErrorTold = map[string]bool{}
 	b.reconnectLocked()
 	return b.secrets.Delete(ctx)
 }

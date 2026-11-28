@@ -392,3 +392,11 @@ func TestTier2CandidatesBoundedToMaxPairs(t *testing.T) {
 		}
 	}
 }
+
+func TestTier2SystemPromptNegativeGuardrails(t *testing.T) {
+	for _, want := range []string{"Launch", "Platform", "*-dist", "*-sdk", "*-cli", "*-字节版", "Data-arch-push", "data_tiktok_push"} {
+		if !strings.Contains(tier2SystemPrompt, want) {
+			t.Errorf("tier2SystemPrompt missing explicit negative guardrail %q", want)
+		}
+	}
+}

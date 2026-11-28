@@ -122,6 +122,7 @@ type Conn struct {
 	mu     sync.Mutex
 	st     stored
 	loaded bool
+	gen    uint64             // bumped on credential change or logout to invalidate stale connections
 	cl     client             // nil while not connected
 	stop   context.CancelFunc // ends cl
 	status connector.Status
@@ -277,6 +278,12 @@ func (c *Conn) Run(ctx context.Context) {
 		// there were credentials ("还没填…", which would have the user enter them and sign in again). A connection
 		// that dropped keeps its ok meanwhile.
 		c.mu.Lock()
+		if !c.st.hasCredentials() {
+			c.mu.Unlock()
+			continue
+		}
+		st = c.st
+		gen := c.gen
 		if c.status.State != connector.StateOK {
 			why := "正在连 Telegram"
 			if len(st.Session) > 0 {
@@ -289,7 +296,11 @@ func (c *Conn) Run(ctx context.Context) {
 		cl, err := c.dial(cctx, creds{st.APIID, st.APIHash}, sessionOf{c}, c.gate, c.updated)
 		if err != nil {
 			stop()
-			c.setStatus(connector.Status{State: connector.StateError, Via: st.via(), Error: "连不上 Telegram：" + explain(err)})
+			c.mu.Lock()
+			if c.gen == gen && c.st.hasCredentials() {
+				c.status = connector.Status{State: connector.StateError, Via: st.via(), Error: "连不上 Telegram：" + explain(err)}
+			}
+			c.mu.Unlock()
 			log.Printf("connect: %s", explain(err))
 			if !c.sleep(ctx, wait) {
 				return
@@ -299,6 +310,11 @@ func (c *Conn) Run(ctx context.Context) {
 		}
 		wait = retryFirst
 		c.mu.Lock()
+		if c.gen != gen || !c.st.hasCredentials() {
+			c.mu.Unlock()
+			stop()
+			continue
+		}
 		c.cl, c.stop = cl, stop
 		c.mu.Unlock()
 		c.checkSignedIn(cctx)
@@ -317,12 +333,14 @@ func (c *Conn) Run(ctx context.Context) {
 }
 
 func (c *Conn) sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
 	case <-c.wake:
 		return true
-	case <-time.After(d):
+	case <-t.C:
 		return true
 	}
 }
@@ -330,25 +348,31 @@ func (c *Conn) sleep(ctx context.Context, d time.Duration) bool {
 // checkSignedIn sets the status from who the session is.
 func (c *Conn) checkSignedIn(ctx context.Context) {
 	c.mu.Lock()
-	cl, st := c.cl, c.st
+	cl, st, gen := c.cl, c.st, c.gen
 	c.mu.Unlock()
-	if cl == nil {
+	if cl == nil || !st.hasCredentials() {
 		return
 	}
 	me, ok, err := cl.Me(ctx)
+	c.mu.Lock()
+	if c.gen != gen || c.cl != cl || !c.st.hasCredentials() {
+		c.mu.Unlock()
+		return
+	}
 	switch {
 	case err != nil:
-		c.setStatus(connector.Status{State: connector.StateError, Via: st.via(), Error: "Telegram：" + explain(err)})
+		c.status = connector.Status{State: connector.StateError, Via: st.via(), Error: "Telegram：" + explain(err)}
+		c.mu.Unlock()
 	case !ok:
-		c.setStatus(connector.Status{State: connector.StateNotSignedIn, Via: st.via(), Error: "还没登录 Telegram"})
+		c.status = connector.Status{State: connector.StateNotSignedIn, Via: st.via(), Error: "还没登录 Telegram"}
+		c.mu.Unlock()
 	default:
-		c.mu.Lock()
 		if c.st.Account != me {
 			c.st.Account = me
 			_ = c.saveLocked(ctx)
 		}
+		c.status = connector.Status{State: connector.StateOK, Account: me, Via: st.via()}
 		c.mu.Unlock()
-		c.setStatus(connector.Status{State: connector.StateOK, Account: me, Via: st.via()})
 		c.updated() // the inbox and the archive catch up now
 	}
 }
@@ -370,6 +394,9 @@ func (s sessionOf) LoadSession(context.Context) ([]byte, error) {
 func (s sessionOf) StoreSession(ctx context.Context, data []byte) error {
 	s.c.mu.Lock()
 	defer s.c.mu.Unlock()
+	if !s.c.st.hasCredentials() {
+		return nil
+	}
 	s.c.st.Session = append([]byte(nil), data...)
 	return s.c.saveLocked(ctx)
 }

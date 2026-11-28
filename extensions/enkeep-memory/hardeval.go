@@ -467,21 +467,13 @@ func heMemories(st *store.State, ov *overview.State, cog []string, f heFilter, c
 					bucket = memsrc.BucketContract
 					maxBytes = memsrc.ContractTextMost
 				}
-				suffix := ""
-				if len(p.Poles) >= 2 {
-					w0 := strings.TrimSuffix(strings.TrimSpace(p.Poles[0].When), "时")
-					w1 := strings.TrimSuffix(strings.TrimSpace(p.Poles[1].When), "时")
-					suffix = "（两端：" + w0 + "时，" + strings.TrimSpace(p.Poles[0].Choice) + "；" +
-						w1 + "时，" + strings.TrimSpace(p.Poles[1].Choice) + "）"
-				} else if x := strings.TrimSpace(p.Exception); x != "" && !strings.Contains(p.Text, x) {
-					suffix = "（例外：" + x + "）"
-				}
+				body, suffix := overview.StandingParts(p)
 				quotes := p.UniqueQuotes
 				if quotes <= 0 {
 					quotes = p.SourcesCount
 				}
 				prefix := memsrc.StandingPrefix(bucket, p.Hard, p.Polarity)
-				txt := memsrc.FormatResidentLine(prefix+strings.TrimSpace(p.Text), suffix, maxBytes)
+				txt := memsrc.FormatResidentLine(prefix+body, suffix, maxBytes)
 				ovCands = append(ovCands, memsrc.Candidate{
 					ID:        p.ID,
 					Text:      txt,

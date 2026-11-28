@@ -76,14 +76,23 @@ func parseFeed(raw []byte) ([]hotTopic, error) {
 	if err := xml.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("LINUX DO 的列表读不懂：%w", err)
 	}
+	seen := make(map[int64]bool, len(doc.Channel.Items))
 	var out []hotTopic
 	for _, it := range doc.Channel.Items {
 		m := topicLinkRE.FindStringSubmatch(it.Link)
 		if m == nil {
 			continue
 		}
-		id, _ := strconv.ParseInt(m[1], 10, 64)
-		t := hotTopic{ID: id, Title: oneLine(html.UnescapeString(it.Title)), URL: topicURL(id), Author: strings.TrimSpace(it.Creator),
+		id, err := strconv.ParseInt(m[1], 10, 64)
+		if err != nil || id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		title := oneLine(html.UnescapeString(it.Title))
+		if title == "" {
+			title = fmt.Sprintf("帖子 %d", id)
+		}
+		t := hotTopic{ID: id, Title: title, URL: topicURL(id), Author: strings.TrimSpace(it.Creator),
 			Category: strings.TrimSpace(html.UnescapeString(it.Category)), Pinned: strings.EqualFold(strings.TrimSpace(it.Pinned), "yes")}
 		if at, err := time.Parse(time.RFC1123Z, strings.TrimSpace(it.PubDate)); err == nil {
 			t.At = at.UTC()
@@ -117,7 +126,10 @@ func (p *plugin) hot(ctx context.Context, list string, refresh bool) ([]hotTopic
 	if refresh {
 		fresh = 0
 	}
-	raw, err := p.read(ctx, path, fresh)
+	raw, err := p.readValidated(ctx, path, fresh, func(b []byte) error {
+		_, err := parseFeed(b)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -237,9 +249,15 @@ func oneLine(s string) string { return strings.TrimSpace(spaceRE.ReplaceAllStrin
 
 // clip cuts s to at most n characters, marking the cut; leading spaces (a code line's indentation) stay.
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
+	if n == 1 {
+		return "…"
+	}
 	r := []rune(s)
-	return strings.TrimRightFunc(string(r[:n]), unicode.IsSpace) + "…"
+	return strings.TrimRightFunc(string(r[:n-1]), unicode.IsSpace) + "…"
 }

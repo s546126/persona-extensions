@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "telegram-bot",
   "name": "Telegram 机器人",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "icon": "assets/icon.png",
   "description": "Telegram 机器人：通过官方 Bot API（@BotFather 令牌 + 私聊 6 位配对码）在 Telegram 里和 Persona 对话；只转发绑定人的私聊消息，支持图片、文件、引用回复、正在输入和主动推送，支持可选 HTTP(S) 代理。登录信息加密保存在 hub，升级无需重新绑定。",
   "publisher": "nwverse",

@@ -79,6 +79,9 @@ func pinKey(name string, args json.RawMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// pinsMost bounds the in-memory confirmation pin cache within its 1-hour window.
+const pinsMost = 512
+
 // pin keeps what describe showed.
 func pin(name string, args json.RawMessage, val string) {
 	if val == "" {
@@ -91,7 +94,23 @@ func pin(name string, args json.RawMessage, val string) {
 			delete(pins, k)
 		}
 	}
-	pins[pinKey(name, args)] = pinRec{val, time.Now()}
+	k := pinKey(name, args)
+	if _, exists := pins[k]; !exists {
+		for len(pins) >= pinsMost {
+			var oldest string
+			var oldestAt time.Time
+			for ek, ep := range pins {
+				if oldest == "" || ep.at.Before(oldestAt) {
+					oldest, oldestAt = ek, ep.at
+				}
+			}
+			if oldest == "" {
+				break
+			}
+			delete(pins, oldest)
+		}
+	}
+	pins[k] = pinRec{val, time.Now()}
 }
 
 var errChanged = errors.New("确认卡片上的内容和现在的不一样了（Home Assistant 里刚有变化），没有执行：请重新发起，在新的卡片上确认")

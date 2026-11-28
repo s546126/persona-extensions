@@ -39,7 +39,7 @@ import (
 
 const (
 	FileName           = "profile-summary.json"
-	CurrentVersion     = 2 // 2: patterns first, coherent sections, recent highlights only the user's own
+	CurrentVersion     = 3 // 3: sensitive sections only the user's own, world led by the user's own facts, no one-off misreads
 	ModeDeterministic  = "deterministic"
 	ModeModel          = "model"
 	MaxPointsPerFacet  = 8
@@ -47,6 +47,9 @@ const (
 	RecentDays         = 30
 	MaxSensitivePoints = 6
 	MaxSubjects        = 12
+	// MaxWorldPeople caps how many people-card lines the world section may carry after the user's own projects,
+	// working relations and world facts, at most one per person, so one colleague never fills the section.
+	MaxWorldPeople = 2
 )
 
 // Facets are the six profile facets in display order.
@@ -80,6 +83,13 @@ type CandidateItem struct {
 	Own bool
 	// Pattern: a cross-event pattern of the periodic overview (internal/overview), not a single entry.
 	Pattern bool
+	// Person is the contact a people-card item (entry.People) is about; "" for the user's own items. Such items
+	// never enter the sensitive sections (someone else's health or money is not the user's profile) and fill the world
+	// section only after the user's own lines, one per person, at most MaxWorldPeople.
+	Person string
+	// Others are the other people a world relation line names (its target, when a person): they count towards the
+	// one-line-per-person cap like Person.
+	Others []string
 }
 
 // InputProvider supplies normalized candidate items for building a profile Summary.
@@ -107,6 +117,11 @@ func (EntriesProvider) Items(st *store.State) []CandidateItem {
 			continue
 		}
 		cats := entryCategories(e)
+		// Someone else's sensitive facts (a colleague's loan, a friend's diet) are not the user's profile: they stay in
+		// the person's card and the sensitive review list, never in profile:cat:* nor in the general sections.
+		if e.Facet == entry.People && len(cats) > 0 {
+			continue
+		}
 		// Entries from a non-empty domain space outside interaction/persona stay out of general profile unless tagged sensitive.
 		if len(cats) == 0 && e.OriginSpace != "" && e.Facet != entry.Interaction && e.Facet != entry.Persona {
 			continue
@@ -119,11 +134,23 @@ func (EntriesProvider) Items(st *store.State) []CandidateItem {
 			continue
 		}
 		weight := e.Count * max(1, len(e.Kinds))
-		if targetFacet == entry.World {
+		person, others := "", []string(nil)
+		if e.Facet == entry.People {
+			// The contact's score orders people lines among themselves; they come after the user's own world lines.
 			weight += contactScore[e.Person] / 10
+			if person = strings.TrimSpace(e.Person); person == "" {
+				person = e.ID
+			}
+		} else if e.Facet == entry.World && isPersonRef(e.Subject) {
+			// A relation between other people ("A 和 B 合作", "A 负责 X") is about them, not the user's own world:
+			// it is capped like a people card, counting both ends.
+			person = strings.TrimSpace(e.Subject)
+			if isPersonRef(e.Target) {
+				others = []string{strings.TrimSpace(e.Target)}
+			}
 		}
 		originSpace := e.OriginSpace
-		if len(cats) == 0 && entry.IsWorkMethodFacet(e.Facet) {
+		if entry.IsOpsRunbookEntry(e) || (len(cats) == 0 && entry.IsWorkMethodFacet(e.Facet)) {
 			originSpace = ""
 		}
 		out = append(out, CandidateItem{
@@ -139,6 +166,8 @@ func (EntriesProvider) Items(st *store.State) []CandidateItem {
 			Subjects:    collectEntrySubjects(st, e),
 			IsFocus:     e.Type == "current_focus",
 			Own:         own(e),
+			Person:      person,
+			Others:      others,
 		})
 	}
 	return out
@@ -216,24 +245,26 @@ func groupOf(f entry.Facet) string {
 	}
 }
 
-// entryCategories returns the Payload-First sensitive categories of e (v0.4.0 §1.6):
-//   - Work-methodology facets (interaction, tools, workflow, judgement) carry ONLY explicit ByUser categories and
-//     genuine privacy disclosures matched by entry.PayloadCategories on e's own payload (never topic/tone or
-//     OriginSpace contagion), guaranteeing 0 work rules leak into profile:cat:emotion / profile:cat:health.
-//   - Non-work facets (persona, world, people) retain ByUser, BySpaceDefault, SpaceDefaults, and payload-supported
-//     categories.
+// entryCategories returns the sensitive categories of e using state.json's persisted categories as the single source
+// of truth (v0.4.0 §1.6):
+//   - Ops runbook entries (entry.IsOpsRunbookEntry) NEVER enter profile:cat:* sensitive sections.
+//   - Never re-runs entry.PayloadCategories from scratch to resurrect categories already cleared by Phase 1/2.2.
+//   - Work-methodology facets (interaction, tools, workflow, judgement) accept ONLY persisted ByUser categories or
+//     persisted ByModel categories still corroborated by entry.PayloadCategories (never OriginSpace or zero-tag items).
+//   - Non-work facets (persona, world, people) retain persisted Categories, legacy Sensitive, and SpaceDefaults.
 func entryCategories(e *entry.Entry) []string {
+	if e == nil || entry.IsOpsRunbookEntry(e) {
+		return nil
+	}
 	var cats []string
 	add := func(c string) {
 		if cn := entry.CategoryOf(c); cn != "" && !slices.Contains(cats, cn) && !slices.Contains(e.CatsRemoved, cn) {
 			cats = append(cats, cn)
 		}
 	}
-	ownPayload := entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
-	for _, c := range ownPayload {
-		add(c)
-	}
 	workMethod := entry.IsWorkMethodFacet(e.Facet)
+	var ownPayload []string
+	payloadChecked := false
 	for _, c := range e.Categories {
 		cn := entry.CategoryOf(c.Name)
 		if cn == "" {
@@ -243,6 +274,14 @@ func entryCategories(e *entry.Entry) []string {
 			add(cn)
 		} else if !workMethod {
 			add(cn)
+		} else if c.By == entry.ByModel {
+			if !payloadChecked {
+				ownPayload = entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
+				payloadChecked = true
+			}
+			if slices.Contains(ownPayload, cn) {
+				add(cn)
+			}
 		}
 	}
 	if !workMethod {
@@ -270,6 +309,12 @@ func isS3S4Only(e *entry.Entry) bool {
 	return true
 }
 
+// isPersonRef says whether a relation end is someone else's contact ("person:<id>"), not the user.
+func isPersonRef(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "person:") && s != "person:me"
+}
+
 // ownTypes are the ⑥ types that say what the user is doing or keeping an eye on now (the prompt's keys and the
 // class names they are filed under).
 var ownTypes = []string{"current_work", "current_focus", "goal", "在做的事", "目标", "关注"}
@@ -291,6 +336,11 @@ func eligible(st *store.State, e *entry.Entry) bool {
 		return false
 	}
 	if e.Facet == entry.Persona && isS3S4Only(e) {
+		return false
+	}
+	// LOW_CONFIDENCE extractions and single one-off persona sightings (a vent read as a life fact) never describe the
+	// user (entry.IsUnreliableOneOff).
+	if entry.IsUnreliableOneOff(e) {
 		return false
 	}
 	if e.Origin == entry.Seed && !entry.On(st.Switches, entry.K21Seeds) {
@@ -538,6 +588,9 @@ func BuildWith(st *store.State, src InputProvider, now time.Time, lang string) *
 		it.Categories = cats
 
 		if len(cats) > 0 {
+			if it.Person != "" {
+				continue // someone else's sensitive facts never enter the user's sensitive sections
+			}
 			for _, cat := range cats {
 				sensitiveByCat[cat] = append(sensitiveByCat[cat], it)
 			}
@@ -555,14 +608,30 @@ func BuildWith(st *store.State, src InputProvider, now time.Time, lang string) *
 	for _, f := range Facets {
 		es := generalByFacet[f]
 		sortCandidates(es)
+		if f == entry.World {
+			// The user's own projects, working relations and world facts first; people cards only fill what is left.
+			sort.SliceStable(es, func(i, j int) bool { return es[i].Person == "" && es[j].Person != "" })
+		}
 
 		seen := map[string]bool{}
+		seenPerson := map[string]bool{}
+		people := 0
 		var pts []Point
 		var picked []CandidateItem
 		for _, it := range es {
 			key := norm.Q(it.Text)
 			if key == "" || seen[key] {
 				continue
+			}
+			if it.Person != "" {
+				names := append([]string{it.Person}, it.Others...)
+				if people >= MaxWorldPeople || slices.ContainsFunc(names, func(n string) bool { return seenPerson[n] }) {
+					continue
+				}
+				for _, n := range names {
+					seenPerson[n] = true
+				}
+				people++
 			}
 			seen[key] = true
 			pts = append(pts, Point{ID: it.ID, Text: it.Text, Last: it.Last, Pattern: it.Pattern})

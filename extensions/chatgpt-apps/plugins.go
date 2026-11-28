@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/wire"
 )
@@ -46,17 +47,38 @@ type pluginDetail struct {
 }
 
 func (p pluginDetail) title() string {
-	if p.Release.DisplayName != "" {
-		return p.Release.DisplayName
+	if s := strings.TrimSpace(p.Release.DisplayName); s != "" {
+		return s
 	}
-	return p.Name
+	if s := strings.TrimSpace(p.Name); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(p.ID); s != "" {
+		return s
+	}
+	return "Plugin"
+}
+
+func safeHTTPSURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || utf8.RuneCountInString(raw) > wire.StringMost {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return ""
+	}
+	return raw
 }
 
 func (p pluginDetail) connectURL() string {
-	if p.ShareURL != "" {
-		return p.ShareURL
+	if u := safeHTTPSURL(p.ShareURL); u != "" {
+		return u
 	}
-	return "https://chatgpt.com/plugins/" + url.PathEscape(p.ID)
+	if strings.TrimSpace(p.ID) == "" {
+		return ""
+	}
+	return safeHTTPSURL("https://chatgpt.com/plugins/" + url.PathEscape(p.ID))
 }
 
 type appState struct {
@@ -87,11 +109,15 @@ func summary(p pluginDetail, installed map[string]bool) pluginSummary {
 func (a *App) remember(p pluginDetail) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if old, ok := a.plugins[p.ID]; ok && p.apps == nil {
-		p.apps = old.apps
+	if p.ID != "" {
+		if old, ok := a.plugins[p.ID]; ok && p.apps == nil {
+			p.apps = old.apps
+		}
+		a.plugins[p.ID] = p
 	}
-	a.plugins[p.ID] = p
-	a.plugins[p.Name] = p
+	if p.Name != "" {
+		a.plugins[p.Name] = p
+	}
 }
 
 func (a *App) remembered(ref string) (pluginDetail, bool) {
@@ -120,6 +146,8 @@ func isPluginID(ref string) bool {
 func (a *App) paged(ctx context.Context, path string, params url.Values, most int) ([]pluginDetail, error) {
 	var out []pluginDetail
 	token := ""
+	seenTokens := map[string]bool{}
+	seenIDs := map[string]bool{}
 	for page := 0; page < most; page++ {
 		q := url.Values{}
 		for k, v := range params {
@@ -137,11 +165,21 @@ func (a *App) paged(ctx context.Context, path string, params url.Values, most in
 		if err := a.backend(ctx, http.MethodGet, path+"?"+q.Encode(), nil, &res); err != nil {
 			return nil, err
 		}
-		out = append(out, res.Plugins...)
-		if res.Pagination.NextPageToken == "" || res.Pagination.NextPageToken == token {
+		for _, p := range res.Plugins {
+			if p.ID != "" {
+				if seenIDs[p.ID] {
+					continue
+				}
+				seenIDs[p.ID] = true
+			}
+			out = append(out, p)
+		}
+		next := res.Pagination.NextPageToken
+		if next == "" || next == token || seenTokens[next] || len(res.Plugins) == 0 {
 			break
 		}
-		token = res.Pagination.NextPageToken
+		seenTokens[next] = true
+		token = next
 	}
 	return out, nil
 }
@@ -513,6 +551,7 @@ func extract(r io.Reader, dir string) error {
 	if err != nil {
 		return fmt.Errorf("the plugin package is not a .tar.gz: %v", err)
 	}
+	defer gz.Close()
 	tr := tar.NewReader(gz)
 	var total int64
 	for files := 0; ; files++ {
@@ -537,10 +576,13 @@ func extract(r io.Reader, dir string) error {
 				return err
 			}
 		case tar.TypeReg:
-			total += h.Size
-			if total > maxPackage {
+			if name == "." {
+				return fmt.Errorf("refusing a regular file at package root: %s", h.Name)
+			}
+			if h.Size < 0 || h.Size > maxPackage-total {
 				return errors.New("the plugin package is too large")
 			}
+			total += h.Size
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
@@ -560,6 +602,22 @@ func extract(r io.Reader, dir string) error {
 			return fmt.Errorf("refusing a link or special file in the plugin package: %s", h.Name)
 		}
 	}
+}
+
+func pluginVersions(base string) []string {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasSuffix(name, ".partial") || !safeName.MatchString(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 func skillNames(dest string) []string {
@@ -584,7 +642,7 @@ func (a *App) pluginSkill(ctx context.Context, args toolArgs) (wire.ConnectorCal
 	if base == "" {
 		return wire.ConnectorCallResult{}, fmt.Errorf("no plugin %q here (give its name as chatgpt_plugins_installed lists it)", args.Plugin)
 	}
-	versions, _ := os.ReadDir(base)
+	versions := pluginVersions(base)
 	if len(versions) == 0 {
 		p, err := a.resolve(ctx, name)
 		if err != nil {
@@ -593,12 +651,12 @@ func (a *App) pluginSkill(ctx context.Context, args toolArgs) (wire.ConnectorCal
 		if _, err := a.download(ctx, p); err != nil {
 			return wire.ConnectorCallResult{}, fmt.Errorf("could not get the plugin's package: %s", statusOnly(err))
 		}
-		versions, _ = os.ReadDir(base)
+		versions = pluginVersions(base)
 		if len(versions) == 0 {
 			return wire.ConnectorCallResult{}, fmt.Errorf("%s has no package with skills", name)
 		}
 	}
-	latest := versions[len(versions)-1].Name()
+	latest := versions[len(versions)-1]
 	root := filepath.Join(base, latest, "skills")
 	names := skillNames(filepath.Join(base, latest))
 	if args.Skill == "" {

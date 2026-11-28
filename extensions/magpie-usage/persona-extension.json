@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "magpie-usage",
   "name": "Magpie Subscription Usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "icon": "assets/icon.png",
   "description": "Shows subscription allowance windows from Magpie accounts in Persona.",
   "publisher": "nwverse",

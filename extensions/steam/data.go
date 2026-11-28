@@ -23,48 +23,156 @@ type steamData struct {
 	client      steamClient
 	config      config
 	setup       problem
+	session     *qrSession
 	vanity      *cacheSlot[string]
 	profile     *cacheSlot[player]
 	library     *cacheSlot[gameList]
 	recent      *cacheSlot[gameList]
 	wishes      *cacheSlot[wishList]
-	prices      *PriceHistoryStore
-	playtime    *PlaytimeSnapshotStore
+	wishIDs     *cacheSlot[map[uint32]struct{}]
+	friendList  *cacheSlot[friendRoster]
+	friendState *cacheSlot[[]player]
+	stores      steamStores
+	memory      memoryObservations
 	lastAccount atomic.Pointer[reading[player]]
+	inbox       atomic.Pointer[[]wishlistDelivery]
 }
 
 func newSteamData(cfg config, key, dir string, httpClient *http.Client, now func() time.Time) *steamData {
-	cfg, setup := cfg.normalized()
 	key = strings.TrimSpace(key)
-	if setup == "" {
-		switch {
-		case key == "":
-			setup = problemSetup
-		case cfg.SteamID == key || strings.ContainsAny(key, "\r\n\x00"):
-			setup = problemKey
+	cfg, setup := cfg.normalized(key)
+	if cfg.AuthMode == modeQR || setup != "" {
+		if setup == "" {
+			setup = problemAuthRequired
 		}
+		return &steamData{config: cfg, setup: setup, client: steamClient{key: key}}
+	}
+	return newAccountData(cfg, steamClient{http: httpClient, key: key}, dir, now, nil)
+}
+
+func newAccountData(cfg config, client steamClient, dataDir string, now func() time.Time, session *qrSession) *steamData {
+	if cfg.AuthMode != modeWebAPIKey || session != nil {
+		dataDir = ""
 	}
 	var cacheDir string
-	if dir != "" {
-		cacheDir = filepath.Join(dir, "steam-cache-v1")
+	if dataDir != "" {
+		cacheDir = filepath.Join(dataDir, "steam-cache-v1")
 	}
-	return &steamData{
-		client:   steamClient{http: httpClient, key: key},
-		config:   cfg,
-		setup:    setup,
-		vanity:   newSlot[string](cacheDir, "vanity", now),
-		profile:  newSlot[player](cacheDir, "profile", now),
-		library:  newSlot[gameList](cacheDir, "library", now),
-		recent:   newSlot[gameList](cacheDir, "recent", now),
-		wishes:   newSlot[wishList](cacheDir, "wishlist", now),
-		prices:   NewPriceHistoryStore(dir),
-		playtime: NewPlaytimeSnapshotStore(dir),
+	d := &steamData{
+		client:  client,
+		config:  cfg,
+		session: session,
+		vanity:  newSlot[string](cacheDir, "vanity", now, session),
+		profile: newSlot[player](cacheDir, "profile", now, session),
+		library: newSlot[gameList](cacheDir, "library", now, session),
+		recent:  newSlot[gameList](cacheDir, "recent", now, session),
+		wishes:  newSlot[wishList](cacheDir, "wishlist", now, session),
+		wishIDs: newSlot[map[uint32]struct{}]("", "", now, session),
+		stores:  newSteamStores(dataDir),
 	}
+	if cfg.FriendsRadarEnabled {
+		d.friendList = newSlot[friendRoster]("", "", now, session)
+		d.friendState = newSlot[[]player]("", "", now, session)
+		d.friendList.freshOnly, d.friendState.freshOnly = true, true
+	}
+	return d
+}
+
+// A UI or tool call uses one credential generation from its first read to its
+// final response, even if the user signs in to a different account mid-call.
+func (a *app) readContext(parent context.Context) (*steamData, context.Context, func()) {
+	ctx, cancel := context.WithTimeout(parent, readBudget)
+	if a.qr == nil || a.setup != "" && a.setup != problemAuthRequired {
+		return a.steamData, ctx, cancel
+	}
+	if !a.qr.waitLoaded(ctx) {
+		return &steamData{config: a.config, setup: sanitizeError(ctx.Err())}, ctx, cancel
+	}
+	a.qr.mu.Lock()
+	s := a.qr.sessionLocked()
+	issue := a.qr.issue
+	if a.qr.login != nil {
+		issue = problemAuthPending
+	}
+	if s == nil {
+		a.qr.mu.Unlock()
+		return &steamData{config: a.config, setup: issue}, ctx, cancel
+	}
+	d := s.reads
+	a.qr.mu.Unlock()
+	stop := context.AfterFunc(s.ctx, cancel)
+	if s.ctx.Err() != nil {
+		cancel()
+	}
+	return d, ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (d *steamData) sessionIssue() problem {
+	if d.session == nil {
+		return ""
+	}
+	a := d.session.auth
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if d.session.currentLocked() && a.sessionLocked() == d.session {
+		return ""
+	}
+	if a.issue == problemAuthExpired {
+		return problemAuthExpired
+	}
+	return problemAuthRequired
+}
+
+func (d *steamData) readClient(ctx context.Context) (steamClient, problem) {
+	c := d.client
+	if d.session != nil {
+		t, issue := d.session.access(ctx)
+		if issue != "" {
+			return steamClient{}, issue
+		}
+		c.access, c.refresh = t.access, t.secret.RefreshToken
+	}
+	return c, ""
+}
+
+// The session lock also guards lookup and publication of these in-memory slots.
+func (d *steamData) clearLocked() {
+	d.profile.clear()
+	d.library.clear()
+	d.recent.clear()
+	d.wishes.clear()
+	d.wishIDs.clear()
+	if d.friendList != nil {
+		d.friendList.clear()
+		d.friendState.clear()
+	}
+	d.stores.clearMemory()
+	d.memory.genres.clearMemory()
+	d.memory.achievements.clearMemory()
+	d.inbox.Store(nil)
+}
+
+func (d *steamData) recordSnapshot(record func()) {
+	if s := d.session; s != nil {
+		a := s.auth
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if !s.currentLocked() || a.sessionLocked() != s {
+			return
+		}
+	}
+	record()
 }
 
 func (d *steamData) account(ctx context.Context, ttl time.Duration, refresh bool) (out reading[player]) {
 	if d.setup != "" {
 		return reading[player]{Issue: d.setup}
+	}
+	if d.session != nil {
+		return d.readPlayer(ctx, d.config.SteamID, ttl, refresh)
 	}
 	defer func() {
 		if out.Issue != problemCanceled {
@@ -73,9 +181,7 @@ func (d *steamData) account(ctx context.Context, ttl time.Duration, refresh bool
 	}()
 	id := d.config.SteamID
 	if !validSteamID(id) {
-		r := d.vanity.read(ctx, id, profileTTL, refresh, func(ctx context.Context) (*string, problem) {
-			return d.client.resolve(ctx, id)
-		})
+		r := d.resolveVanity(ctx, refresh)
 		if r.Data == nil {
 			return reading[player]{Issue: r.Issue}
 		}
@@ -90,9 +196,20 @@ func (d *steamData) account(ctx context.Context, ttl time.Duration, refresh bool
 	return d.readPlayer(ctx, id, ttl, refresh)
 }
 
+func (d *steamData) resolveVanity(ctx context.Context, refresh bool) reading[string] {
+	name := d.config.SteamID
+	return d.vanity.read(ctx, name, profileTTL, refresh, func(ctx context.Context) (*string, problem) {
+		return d.client.resolve(ctx, name)
+	})
+}
+
 func (d *steamData) readPlayer(ctx context.Context, id string, ttl time.Duration, refresh bool) reading[player] {
 	return d.profile.read(ctx, id, ttl, refresh, func(ctx context.Context) (*player, problem) {
-		return d.client.profile(ctx, id)
+		c, issue := d.readClient(ctx)
+		if issue != "" {
+			return nil, issue
+		}
+		return c.profile(ctx, id)
 	})
 }
 
@@ -109,48 +226,77 @@ func publicProfile(p reading[player]) problem {
 	return ""
 }
 
-func (d *steamData) ownedGames(ctx context.Context, p reading[player], refresh bool) reading[gameList] {
-	if issue := publicProfile(p); issue != "" {
-		return reading[gameList]{Issue: issue}
+func (d *steamData) readID(p reading[player]) (string, problem) {
+	if d.setup != "" {
+		return "", d.setup
 	}
-	id := p.Data.SteamID
-	return d.library.read(ctx, id, libraryTTL, refresh, func(ctx context.Context) (*gameList, problem) {
-		list, issue := d.client.games(ctx, id, false)
-		if issue == "" && list != nil && !list.Truncated && !p.Stale {
-			_ = d.playtime.Record(id, snapshotPlaytime(list, d.library.now()))
-		}
-		return list, issue
-	})
+	if d.session != nil {
+		return d.config.SteamID, ""
+	}
+	if issue := publicProfile(p); issue != "" {
+		return "", issue
+	}
+	return p.Data.SteamID, ""
+}
+
+func (d *steamData) ownedGames(ctx context.Context, p reading[player], refresh bool) reading[gameList] {
+	return d.readGames(ctx, p, d.library, libraryTTL, refresh, false)
 }
 
 func (d *steamData) recentGames(ctx context.Context, p reading[player], refresh bool) reading[gameList] {
-	if issue := publicProfile(p); issue != "" {
+	return d.readGames(ctx, p, d.recent, recentTTL, refresh, true)
+}
+
+func (d *steamData) readGames(ctx context.Context, p reading[player], slot *cacheSlot[gameList], ttl time.Duration, refresh, recent bool) reading[gameList] {
+	id, issue := d.readID(p)
+	if issue != "" {
 		return reading[gameList]{Issue: issue}
 	}
-	return d.recent.read(ctx, p.Data.SteamID, recentTTL, refresh, func(ctx context.Context) (*gameList, problem) {
-		return d.client.games(ctx, p.Data.SteamID, true)
+	return slot.read(ctx, id, ttl, refresh, func(ctx context.Context) (*gameList, problem) {
+		c, issue := d.readClient(ctx)
+		if issue != "" {
+			return nil, issue
+		}
+		list, issue := c.games(ctx, id, recent)
+		if !recent && issue == "" && list != nil && !list.Truncated && !p.Stale {
+			snapshot := snapshotPlaytime(list, slot.now())
+			d.recordSnapshot(func() { _ = d.stores.playtime.Record(id, snapshot) })
+		}
+		return list, issue
 	})
 }
 
 func (d *steamData) wishlist(ctx context.Context, p reading[player], language string, refresh bool) reading[wishList] {
-	if issue := publicProfile(p); issue != "" {
+	id, issue := d.readID(p)
+	if issue != "" {
 		return reading[wishList]{Issue: issue}
 	}
-	id, country := p.Data.SteamID, d.config.CountryCode
+	country := d.config.CountryCode
 	return d.wishes.read(ctx, id+"/"+country+"/"+language, wishlistTTL, refresh, func(ctx context.Context) (*wishList, problem) {
-		list, issue := d.client.wishlist(ctx, id, country, language)
+		c, issue := d.readClient(ctx)
+		if issue != "" {
+			return nil, issue
+		}
+		list, issue := c.wishlist(ctx, id, country, language)
 		if list != nil && issue != problemCanceled && !p.Stale {
-			_ = d.prices.Observe(id, country, d.wishes.now(), wishlistQuotes(list))
+			at, quotes := d.wishes.now(), wishlistQuotes(list)
+			d.recordSnapshot(func() { _ = d.stores.prices.Observe(id, country, at, quotes) })
 		}
 		return list, issue
 	})
 }
 
-func (d *steamData) achievements(ctx context.Context, p reading[player], appID uint32) reading[achievementProgress] {
-	if issue := publicProfile(p); issue != "" {
+func (d *steamData) achievements(ctx context.Context, p reading[player], appID uint32, language string) reading[achievementProgress] {
+	id, issue := d.readID(p)
+	if issue != "" {
 		return reading[achievementProgress]{Issue: issue}
 	}
-	progress, issue := d.client.achievements(ctx, p.Data.SteamID, appID)
+	c, issue := d.readClient(ctx)
+	if issue != "" {
+		return reading[achievementProgress]{Issue: issue}
+	}
+	progress, issue := c.achievements(ctx, id, appID, language)
+	d.rememberAchievement(id, progress)
 	return reading[achievementProgress]{Data: progress, Issue: issue}
 }
 

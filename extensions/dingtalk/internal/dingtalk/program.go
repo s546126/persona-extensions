@@ -135,7 +135,7 @@ func (p *program) channel(ctx context.Context, method string, params json.RawMes
 		if sp.Ref == "" {
 			return nil, errors.New("channel.send without a ref")
 		}
-		res, err := p.sent.do(sp.Ref, func() (wire.ChannelSendResult, error) { return b.Send(ctx, sp) })
+		res, err := p.sent.do(ctx, b.sendScope()+":"+sp.Ref, func() (wire.ChannelSendResult, error) { return b.Send(ctx, sp) })
 		if errors.Is(err, errCannotSend) {
 			return nil, ext.CannotSend(err.Error())
 		}
@@ -179,12 +179,16 @@ type sentRef struct {
 	err  error
 }
 
-func (r *sentRefs) do(ref string, send func() (wire.ChannelSendResult, error)) (wire.ChannelSendResult, error) {
+func (r *sentRefs) do(ctx context.Context, ref string, send func() (wire.ChannelSendResult, error)) (wire.ChannelSendResult, error) {
 	r.mu.Lock()
 	if prev, ok := r.sent[ref]; ok {
 		r.mu.Unlock()
-		<-prev.done
-		return prev.res, prev.err
+		select {
+		case <-prev.done:
+			return prev.res, prev.err
+		case <-ctx.Done():
+			return wire.ChannelSendResult{}, ctx.Err()
+		}
 	}
 	if r.sent == nil {
 		r.sent = map[string]*sentRef{}

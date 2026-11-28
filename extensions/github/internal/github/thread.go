@@ -63,6 +63,7 @@ func (c *Connector) cachedGet(ctx context.Context, path string, out any) error {
 
 // cachedGetLink is cachedGet that also answers the Link header of the answer it used.
 func (c *Connector) cachedGetLink(ctx context.Context, path string, out any) (string, error) {
+	gen := c.authGeneration()
 	e := &c.etags
 	e.mu.Lock()
 	if e.m == nil {
@@ -86,26 +87,33 @@ func (c *Connector) cachedGetLink(ctx context.Context, path string, out any) (st
 		return "", err
 	}
 	link := h.Get("Link")
-	e.mu.Lock()
-	if code == http.StatusNotModified && old != nil {
-		old.at = time.Now()
-		if link == "" { // a 304 may still say the list has grown: page 1's body is the same, its last page is not
-			link = old.link
-		}
-		body, old.link = old.body, link
-	} else if tag := h.Get("ETag"); tag != "" {
-		e.m[path] = &etagEntry{etag: tag, body: body, link: link, at: time.Now(), used: time.Now()}
-		if len(e.m) > etagKeep {
-			oldest := ""
-			for k, v := range e.m {
-				if oldest == "" || v.used.Before(e.m[oldest].used) {
-					oldest = k
-				}
+	if c.authGeneration() == gen {
+		e.mu.Lock()
+		if code == http.StatusNotModified && old != nil {
+			old.at = time.Now()
+			if link == "" { // a 304 may still say the list has grown: page 1's body is the same, its last page is not
+				link = old.link
 			}
-			delete(e.m, oldest)
+			body, old.link = old.body, link
+		} else if tag := h.Get("ETag"); tag != "" {
+			if e.m == nil {
+				e.m = map[string]*etagEntry{}
+			}
+			e.m[path] = &etagEntry{etag: tag, body: body, link: link, at: time.Now(), used: time.Now()}
+			if len(e.m) > etagKeep {
+				oldest := ""
+				for k, v := range e.m {
+					if oldest == "" || v.used.Before(e.m[oldest].used) {
+						oldest = k
+					}
+				}
+				delete(e.m, oldest)
+			}
 		}
+		e.mu.Unlock()
+	} else if code == http.StatusNotModified && old != nil {
+		body = old.body
 	}
-	e.mu.Unlock()
 	return link, decodeBody(path, body, out)
 }
 
@@ -501,6 +509,7 @@ func (c *Connector) checkLog(ctx context.Context, repo string, job int64) string
 
 // jobLog is the end of a finished job's log (pageLogTail of it), read once per job.
 func (c *Connector) jobLog(ctx context.Context, repo string, job int64) (string, bool) {
+	gen := c.authGeneration()
 	e := &c.etags
 	e.mu.Lock()
 	log, ok := e.logs[job]
@@ -513,12 +522,14 @@ func (c *Connector) jobLog(ctx context.Context, repo string, job int64) (string,
 		return "", false
 	}
 	log = tail(raw, pageLogTail)
-	e.mu.Lock()
-	if e.logs == nil || len(e.logs) > etagKeep {
-		e.logs = map[int64]string{}
+	if c.authGeneration() == gen {
+		e.mu.Lock()
+		if e.logs == nil || len(e.logs) > etagKeep {
+			e.logs = map[int64]string{}
+		}
+		e.logs[job] = log
+		e.mu.Unlock()
 	}
-	e.logs[job] = log
-	e.mu.Unlock()
 	return log, true
 }
 
@@ -553,9 +564,11 @@ func (c *Connector) JobLog(repo string, job int64, wait time.Duration, done func
 		}()
 	}
 	e.mu.Unlock()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case <-ch:
-	case <-time.After(wait):
+	case <-timer.C:
 		return "", true
 	}
 	e.mu.Lock()

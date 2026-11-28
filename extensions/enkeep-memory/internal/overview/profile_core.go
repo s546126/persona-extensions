@@ -210,7 +210,7 @@ func (r *Runner) SyncProfileCore(ctx context.Context, st *store.State, s *State,
 			p = ext
 		}
 		if p == nil {
-			id := patternID(KindProfileCore, prop.Kind, "", text)
+			id := patternID(KindProfileCore, "", "", prop.Kind+"|"+text)
 			p = s.Patterns[id]
 			if p == nil {
 				p = &Pattern{ID: id, Facet: string(entry.Persona), Kind: KindProfileCore, Lifecycle: Core, Created: now}

@@ -168,7 +168,8 @@ func (a *app) toolStaticMap(ctx context.Context, in args) (wire.ConnectorCallRes
 	if in.Traffic {
 		ttl = drivingFor
 	}
-	img, err := a.client.getImage(ctx, groupLBS, "/v3/staticmap", q, ttl)
+	cl := a.currentClient()
+	img, err := cl.getImage(ctx, groupLBS, "/v3/staticmap", q, ttl)
 	if err != nil {
 		return wire.ConnectorCallResult{}, err
 	}
@@ -178,7 +179,7 @@ func (a *app) toolStaticMap(ctx context.Context, in args) (wire.ConnectorCallRes
 			q1[k] = v
 		}
 		q1.Set("scale", "1")
-		img1, err := a.client.getImage(ctx, groupLBS, "/v3/staticmap", q1, ttl)
+		img1, err := cl.getImage(ctx, groupLBS, "/v3/staticmap", q1, ttl)
 		if err != nil {
 			return wire.ConnectorCallResult{}, err
 		}

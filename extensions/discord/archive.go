@@ -147,7 +147,7 @@ func (c *conn) changes(ctx context.Context, p wire.ConnectorChangesParams) (wire
 		return wire.ConnectorChangesResult{}, c.callError(s, err)
 	}
 	now := time.Now()
-	cutoff := now.AddDate(0, 0, -c.cfg.historyDays())
+	cutoff := now.AddDate(0, 0, -c.config().historyDays())
 	limit := p.Limit
 	if limit <= 0 {
 		limit = 20
@@ -157,7 +157,6 @@ func (c *conn) changes(ctx context.Context, p wire.ConnectorChangesParams) (wire
 
 	var res wire.ConnectorChangesResult
 	var stop error
-	refused := map[snowflake]bool{}
 	size := 0
 	for i, v := range c.archiveOrder(s, d, found, cur) {
 		if i > 0 && (len(res.Batches) >= limit || size > c.bytesMost || time.Since(start) > c.budget) {
@@ -202,7 +201,6 @@ func (c *conn) changes(ctx context.Context, p wire.ConnectorChangesParams) (wire
 		switch {
 		case statusOf(err) == 403 || statusOf(err) == 404:
 			s.hold(v, c.holdFor, true) // refused, or gone: refusals count toward an IP ban
-			refused[v.ID] = true
 		case local(err):
 			wait := retryFailed
 			if e != nil && e.Status == 429 {
@@ -236,7 +234,9 @@ func (c *conn) changes(ctx context.Context, p wire.ConnectorChangesParams) (wire
 				}
 				cur.Owe[t.ID.String()] = owed{Last: t.LastMessageID.String(), Parent: l.parent.ID.String(), Name: t.Name}
 			}
-			pos.Upto = archivedAt(t).UnixMilli()
+			if at := archivedAt(t); !at.IsZero() {
+				pos.Upto = at.UnixMilli()
+			}
 		}
 		switch {
 		case done:
@@ -246,8 +246,14 @@ func (c *conn) changes(ctx context.Context, p wire.ConnectorChangesParams) (wire
 			// A whole page archived at the very moment it went on from: step past it, or it would be listed forever.
 			pos.Upto--
 			cur.List[key] = pos
+			if stop == nil {
+				res.More = true
+			}
 		default:
 			cur.List[key] = pos
+			if walked && stop == nil {
+				res.More = true
+			}
 		}
 	}
 	for id := range found {
@@ -343,9 +349,13 @@ func (c *conn) readAfter(ctx context.Context, s *session, ch, after snowflake) (
 				last = m.ID
 			}
 		}
-		if p.newest > anchor {
-			anchor = p.newest // past a message that could not be read, too
+		if p.newest <= anchor {
+			if anchor > after {
+				last = anchor
+			}
+			return out, last, false, nil
 		}
+		anchor = p.newest // past a message that could not be read, too
 		if p.n < pageSize {
 			if anchor > after {
 				last = anchor
@@ -364,7 +374,7 @@ func (c *conn) readAfter(ctx context.Context, s *session, ch, after snowflake) (
 func (c *conn) readBack(ctx context.Context, s *session, ch snowflake, cutoff time.Time) ([]message, snowflake, error) {
 	var kept []message
 	var newest, before snowflake
-	for len(kept) < backfillMost {
+	for pages := 0; len(kept) < backfillMost && pages < 20; pages++ {
 		p, err := s.api.messagesBefore(ctx, ch, before, pageSize)
 		if err != nil {
 			return nil, 0, err
@@ -382,7 +392,7 @@ func (c *conn) readBack(ctx context.Context, s *session, ch snowflake, cutoff ti
 			}
 			kept = append(kept, m)
 		}
-		if done || p.oldest == 0 {
+		if done || p.oldest == 0 || (before != 0 && p.oldest >= before) {
 			break
 		}
 		before = p.oldest // past a message that could not be read, too
@@ -450,11 +460,11 @@ func (c *conn) listArchived(ctx context.Context, s *session, d *discovery, cur c
 			}
 			continue
 		}
-		l.end = !more
+		l.end = !more || len(threads) == 0
 		for _, t := range threads {
 			t.GuildID = p.GuildID
 			v := view{channel: t, guildName: p.guildName, parentName: p.Name}
-			if archivedAt(v).Before(since) {
+			if at := archivedAt(v); !at.IsZero() && at.Before(since) {
 				l.end = true
 				break
 			}
@@ -540,10 +550,11 @@ func prune(cur cursor, d *discovery, keep map[snowflake]bool, cutoff time.Time) 
 // id and no handles, so the knowledge base keeps no people from Discord (Discord's developer policy forbids
 // profiling its users).
 func (c *conn) batch(ctx context.Context, s *session, d *discovery, v view, msgs []message) wire.ConnectorChatBatch {
-	chat := &wire.ConnectorArchiveChat{ID: v.ID.String(), Name: v.chatName(c.tx.nameSep), Kind: "group"}
+	tx := c.texts()
+	chat := &wire.ConnectorArchiveChat{ID: v.ID.String(), Name: v.chatName(tx.nameSep), Kind: "group"}
 	var out []wire.ConnectorArchiveMessage
 	for _, m := range msgs {
-		text, kind := c.render(ctx, c.tx, s, d, v.GuildID, m)
+		text, kind := c.render(ctx, tx, s, d, v.GuildID, m)
 		if text == "" {
 			continue
 		}

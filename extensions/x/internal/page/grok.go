@@ -96,6 +96,9 @@ func grokHeader(r *ext.UIRequest, t text, o x.Overview, d x.GrokDigest, loc *tim
 	if st.Error != "" && st.State != connector.StateOK {
 		items = append(items, wire.Component{Type: wire.ComponentText, Key: "error", Text: clip(st.Error, chunkMost), Style: wire.TextStyleSecondary})
 		for i, g := range st.Guide {
+			if i >= maxGuideItems {
+				break
+			}
 			items = append(items, wire.Component{Type: wire.ComponentText, Key: fmt.Sprintf("guide:%d", i), Text: clip(fmt.Sprintf("%d. %s", i+1, g), chunkMost), Style: wire.TextStyleCaption})
 		}
 	}
@@ -105,7 +108,10 @@ func grokHeader(r *ext.UIRequest, t text, o x.Overview, d x.GrokDigest, loc *tim
 
 // grokPost is one post Grok found: "Name @author", the text as Grok quoted it, why it matters, the permalink.
 func (b *builder) grokPost(section string, gp x.GrokPost, t text, loc *time.Location) []wire.Component {
-	key := section + ":" + gp.ID
+	key, ok := b.uniqueKey(section, gp.ID)
+	if !ok {
+		return nil
+	}
 	sub := t.grokNoTime
 	if !gp.At.IsZero() {
 		sub = gp.At.In(loc).Format("01-02 15:04")
@@ -113,7 +119,7 @@ func (b *builder) grokPost(section string, gp x.GrokPost, t text, loc *time.Loca
 	if gp.Why != "" {
 		sub += " · " + clip(gp.Why, 300)
 	}
-	out := []wire.Component{{Type: wire.ComponentRow, Key: key, Title: clip(name(gp.Name, gp.Author), 300), Subtitle: sub}}
+	out := []wire.Component{{Type: wire.ComponentRow, Key: key, Title: clip(name(gp.Name, gp.Author), 300), Subtitle: clip(sub, 600)}}
 	cs := chunks(gp.Text, chunkMost)
 	cut := false
 	room := min(postChunksMost, b.left-reserve-len(out)-2)
@@ -126,7 +132,9 @@ func (b *builder) grokPost(section string, gp x.GrokPost, t text, loc *time.Loca
 	if cut {
 		out = append(out, wire.Component{Type: wire.ComponentText, Key: key + ":more", Text: t.moreOnX, Style: wire.TextStyleCaption})
 	}
-	out = append(out, wire.Component{Type: wire.ComponentLink, Key: key + ":link", Title: t.openOnX, URL: gp.Permalink()})
+	if link := gp.Permalink(); linkable(link) {
+		out = append(out, wire.Component{Type: wire.ComponentLink, Key: key + ":link", Title: t.openOnX, URL: link})
+	}
 	if b.left-len(out) < reserve {
 		return nil
 	}

@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "wechat",
   "name": "微信",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "icon": "assets/icon.png",
   "description": "微信机器人：通过公开 iLink 接口扫码绑定，在个人微信里和 Persona 对话；只转发绑定人的消息，支持图片、文件、视频、语音转写及无转写音频兜底、引用还原和正在输入。登录信息加密保存在 hub，升级无需重新扫码；引用索引保存在本机数据目录并自动过期。",
   "publisher": "nwverse",

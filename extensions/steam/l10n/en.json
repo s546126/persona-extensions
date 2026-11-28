@@ -1,52 +1,78 @@
 {
   "name": "Steam",
-  "description": "See Steam player status, two weeks of playtime, your game library, achievement progress and regional prices for your public wishlist in Persona. Access is read-only. The Hub encrypts your Steam Web API key.",
+  "description": "Research Steam Store games in Persona. Read your library, achievements, updates, wishlist prices and playtime recaps, and track progress locally. Opt in to Friends Radar, wishlist alerts or gaming profile memory. Use Steam Mobile QR or a read-only Web API key.",
   "configuration": {
+    "auth_mode": {
+      "title": "Sign-in method",
+      "description": "Defaults to Steam Mobile QR. Existing settings with a player ID and Web API key continue to use the key.",
+      "choices": {"qr": "Steam Mobile QR", "web_api_key": "Web API key"}
+    },
     "steam_id": {
       "title": "Steam player ID",
-      "description": "Enter your 17-digit SteamID64 or the vanity name from your Steam profile URL."
+      "description": "For Web API key mode. Enter your 17-digit SteamID64 or the vanity name from your Steam profile URL."
     },
     "country_code": {
       "title": "Store country or region",
-      "description": "Two-letter ISO 3166-1 country or region code for wishlist prices and currency. Defaults to US."
+      "description": "Two-letter ISO 3166-1 Store country or region code for wishlist prices and research budgets. Defaults to US."
+    },
+    "friends_radar_enabled": {
+      "title": "Friends Radar",
+      "description": "Off by default. Enable it to read friends' online status and public game libraries in the Steam page and assistant tools."
     },
     "inbox_events_enabled": {
       "title": "Steam Inbox events",
-      "description": "Send wishlist price drops, releases, major sales and game updates to the Inbox. Inbox triage may use AI tokens. Off by default."
+      "description": "Check the wishlist automatically and alert you to deals, releases and demos. Turning this off stops background checks and uses zero extra AI tokens."
     },
     "inbox_max_events_per_day": {
       "title": "Daily Steam Inbox event limit",
-      "description": "Maximum number of Steam events sent per day when Inbox events are enabled. Range 1–50, default 5."
+      "description": "Maximum number of new Steam Inbox events per UTC day. Range 1–50, default 5."
+    },
+    "wishlist_event_triggers": {
+      "title": "Wishlist alert triggers",
+      "description": "Choose discount, local_low, release, demo and giveaway alerts. The same price in a sale or an already announced release or demo version is reported once."
+    },
+    "wishlist_discount_threshold": {
+      "title": "Wishlist discount threshold (%)",
+      "description": "Alert when the discount reaches this percentage. Range 1–100, default 50."
+    },
+    "wishlist_target_prices": {
+      "title": "Wishlist target prices",
+      "description": "Optional. Separate up to 20 rules with commas in AppID:CURRENCY:Steam price units format. For example, 123:USD:999 means $9.99."
     },
     "patch_notes_summary_enabled": {
       "title": "AI summaries of major updates",
-      "description": "Use AI tokens to summarize major update announcements for games you often play. Off by default."
+      "description": "Share short announcement excerpts with the assistant for summaries. Off by default, with headlines, dates, sources and links available."
     },
     "sale_roundup_enabled": {
       "title": "Wishlist sale roundups",
-      "description": "Send a roundup of wishlist deals to the Inbox during major sales. Requires Steam Inbox events, and triage may use AI tokens. Off by default."
+      "description": "When at least three wishlist games are discounted, replace their individual price alerts with one roundup. Requires Steam Inbox events. Off by default."
     },
     "memory_export_enabled": {
-      "title": "Export gaming preferences to assistant memory",
-      "description": "Share personal gaming preferences through memory_sources. Loading them into the assistant uses context tokens. Off by default."
+      "title": "Export gaming profile to assistant memory",
+      "description": "Let Persona use a compact Steam gaming profile. Turning this off returns no entries, makes zero Steam requests, and uses zero extra context tokens. Off by default."
+    },
+    "memory_export_dimensions": {
+      "title": "Gaming profile dimensions",
+      "description": "Choose the details to share. All are selected by default. Clear all selections to stop exporting.",
+      "choices": {"playstyle": "Game and genre preferences", "active_games": "Active games", "backlog_progress": "Backlog progress", "milestones": "Milestones"}
     },
     "memory_max_items": {
-      "title": "Gaming preference export limit",
-      "description": "Maximum number of personal gaming preference items exported when memory export is enabled. Range 1–30, default 10."
+      "title": "Gaming profile export limit",
+      "description": "Export up to this many gaming profile entries. Range 1–100, default 20. Entries share a 2,048-byte text budget."
     },
     "discovery_tools_enabled": {
       "title": "Steam game research tools and skill",
-      "description": "Allow game research tools and their skill to add detailed results to the assistant's context. Turn this off to disable those research features. On by default."
+      "description": "Game research tools are on by default. The skill has a separate switch under Contributions and follows Hub delivery rules. Turning this setting off disables both."
     },
     "discovery_max_results": {
       "title": "Game research result limit",
-      "description": "Maximum number of candidates per search or research request when game research is enabled. Range 1–50, default 15."
+      "description": "Maximum number of results per research call. Range 1–50, default 15. A game details batch is also capped at 10 games."
     }
   },
   "secrets": {
     "steam_api_key": {
       "title": "Steam Web API key",
-      "description": "Get a key from your Steam Web API settings. The Hub encrypts it and sends it only to api.steampowered.com."
+      "description": "For Web API key mode. The Hub encrypts the key, and the extension sends it only to api.steampowered.com."
     }
   },
   "ui": {"steam": "Steam", "steam-summary": "Steam overview"},

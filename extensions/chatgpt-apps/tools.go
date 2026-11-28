@@ -53,17 +53,23 @@ func (t mcpTool) synthetic() bool {
 }
 
 func (t mcpTool) title() string {
-	if t.Annotations != nil && t.Annotations.Title != "" {
-		return t.Annotations.Title
+	if t.Annotations != nil && strings.TrimSpace(t.Annotations.Title) != "" {
+		return strings.TrimSpace(t.Annotations.Title)
 	}
-	if t.Title != "" {
-		return t.Title
+	if strings.TrimSpace(t.Title) != "" {
+		return strings.TrimSpace(t.Title)
 	}
-	name := t.Name
+	name := strings.TrimSpace(t.Name)
 	if i := strings.LastIndex(name, "."); i >= 0 {
-		name = name[i+1:]
+		name = strings.TrimSpace(name[i+1:])
 	}
-	return name
+	if name != "" {
+		return name
+	}
+	if strings.TrimSpace(t.Name) != "" {
+		return strings.TrimSpace(t.Name)
+	}
+	return "Tool"
 }
 
 // writeWords are verbs that make a tool a change whatever its annotations say: a third-party app may mark a write
@@ -138,6 +144,8 @@ func (a *App) listTools(ctx context.Context, fresh bool) ([]mcpTool, error) {
 	}
 	var all []mcpTool
 	cursor := ""
+	seenCursors := map[string]bool{}
+	seenNames := map[string]bool{}
 	for page := 0; page < 50; page++ {
 		params := map[string]any{}
 		if cursor != "" {
@@ -150,11 +158,21 @@ func (a *App) listTools(ctx context.Context, fresh bool) ([]mcpTool, error) {
 		if err := a.rpc(ctx, "tools/list", params, &res); err != nil {
 			return nil, err
 		}
-		all = append(all, res.Tools...)
-		if res.NextCursor == "" || res.NextCursor == cursor {
+		for _, t := range res.Tools {
+			if t.Name != "" {
+				if seenNames[t.Name] {
+					continue
+				}
+				seenNames[t.Name] = true
+			}
+			all = append(all, t)
+		}
+		next := res.NextCursor
+		if next == "" || next == cursor || seenCursors[next] || len(res.Tools) == 0 {
 			break
 		}
-		cursor = res.NextCursor
+		seenCursors[next] = true
+		cursor = next
 	}
 	if all == nil {
 		all = []mcpTool{}

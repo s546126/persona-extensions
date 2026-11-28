@@ -10,6 +10,8 @@ const (
 	steamIDBase    = 76561197960265728
 	defaultCountry = "US"
 	keyName        = "steam_api_key"
+	modeQR         = "qr"
+	modeWebAPIKey  = "web_api_key"
 )
 
 var (
@@ -18,29 +20,50 @@ var (
 )
 
 type config struct {
-	SteamID     string `json:"steam_id"`
-	CountryCode string `json:"country_code"`
+	AuthMode                  string   `json:"auth_mode"`
+	SteamID                   string   `json:"steam_id"`
+	CountryCode               string   `json:"country_code"`
+	FriendsRadarEnabled       bool     `json:"friends_radar_enabled"`
+	WishlistDiscountThreshold int      `json:"wishlist_discount_threshold"`
+	WishlistTargetPrices      string   `json:"wishlist_target_prices"`
+	WishlistEventTriggers     []string `json:"wishlist_event_triggers"`
 	TokenConfig
 }
 
-func (c config) normalized() (config, problem) {
+func (c config) normalized(key string) (config, problem) {
 	c.SteamID = strings.TrimSpace(c.SteamID)
 	c.CountryCode = strings.ToUpper(strings.TrimSpace(c.CountryCode))
 	if c.CountryCode == "" {
 		c.CountryCode = defaultCountry
 	}
-	switch {
-	case c.SteamID == "":
-		return c, problemSetup
-	case digits.MatchString(c.SteamID):
-		if !validSteamID(c.SteamID) {
+	if c.AuthMode == "" {
+		c.AuthMode = modeQR
+		if c.SteamID != "" && key != "" {
+			c.AuthMode = modeWebAPIKey
+		}
+	}
+	switch c.AuthMode {
+	case modeQR:
+	case modeWebAPIKey:
+		switch {
+		case c.SteamID == "":
+			return c, problemSetup
+		case digits.MatchString(c.SteamID) && !validSteamID(c.SteamID), !vanityName.MatchString(c.SteamID):
 			return c, problemInvalidID
 		}
-	case !vanityName.MatchString(c.SteamID):
-		return c, problemInvalidID
+	default:
+		return c, problemMode
 	}
 	if len(c.CountryCode) != 2 || !strings.Contains(isoCountries, " "+c.CountryCode+" ") {
 		return c, problemCountry
+	}
+	if c.AuthMode == modeWebAPIKey {
+		switch {
+		case key == "":
+			return c, problemSetup
+		case c.SteamID == key || strings.ContainsAny(key, "\r\n\x00"):
+			return c, problemKey
+		}
 	}
 	return c, ""
 }

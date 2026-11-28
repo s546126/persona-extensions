@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nwverse/persona/sdk/go/wire"
@@ -23,6 +24,7 @@ const (
 var botTokenRE = regexp.MustCompile(`^\d+:[A-Za-z0-9_-]{20,}$`)
 
 type pendingPair struct {
+	mu       sync.Mutex
 	token    string
 	proxy    string
 	bot      User
@@ -136,6 +138,7 @@ func (b *Bot) submitToken(ctx context.Context, values map[string]string) (wire.C
 	}
 	b.mu.Lock()
 	b.pair = p
+	b.cancelPollLocked()
 	b.mu.Unlock()
 	b.kick()
 	return p.pairPrompt(l, ""), nil
@@ -147,6 +150,14 @@ func (b *Bot) pollPair(ctx context.Context) (wire.ConnectorPrompt, error) {
 	p := b.pair
 	b.mu.Unlock()
 	if p == nil {
+		return tokenPrompt(l, ""), nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	b.mu.Lock()
+	still := b.pair == p
+	b.mu.Unlock()
+	if !still {
 		return tokenPrompt(l, ""), nil
 	}
 	if b.opt.Now().Sub(p.started) > pairMaxAge {
@@ -179,6 +190,12 @@ func (b *Bot) pollPair(ctx context.Context) (wire.ConnectorPrompt, error) {
 			}
 			b.stopTyping()
 			b.mu.Lock()
+			if b.pair != p {
+				b.mu.Unlock()
+				return tokenPrompt(l, ""), nil
+			}
+			b.sessionGen++
+			b.cancelPollLocked()
 			b.st = state{
 				Creds:  creds,
 				Offset: p.offset,

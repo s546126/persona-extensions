@@ -26,6 +26,8 @@ var (
 	listFor    = 5 * time.Minute  // a list is read again after this
 	topicFor   = 10 * time.Minute // a topic is read again after this
 	pauseFor   = 10 * time.Minute // after a 429
+	pauseMost  = time.Hour        // cap Retry-After so a bogus header cannot lock out the plugin
+	answerMost = int64(8 << 20)
 )
 
 // cacheKeep bounds the cache: an answer past its per-kind TTL is pruned, then the oldest answers go.
@@ -62,6 +64,10 @@ func newSite(base string) *site {
 // get reads path, from the cache when it is younger than fresh (fresh 0 reads it again). When the read fails
 // and an older copy is cached, it returns that copy together with the error.
 func (s *site) get(ctx context.Context, path string, fresh time.Duration) ([]byte, error) {
+	return s.getValidated(ctx, path, fresh, nil)
+}
+
+func (s *site) getValidated(ctx context.Context, path string, fresh time.Duration, validate func([]byte) error) ([]byte, error) {
 	s.mu.Lock()
 	c, ok := s.cache[path]
 	s.mu.Unlock()
@@ -69,8 +75,11 @@ func (s *site) get(ctx context.Context, path string, fresh time.Duration) ([]byt
 		return c.body, nil
 	}
 	body, err := s.fetch(ctx, path)
+	if err == nil && validate != nil {
+		err = validate(body)
+	}
 	if err != nil {
-		if ok && !errors.Is(err, errNoTopic) { // an older copy beats an error page
+		if ok && !errors.Is(err, errNoTopic) && !errors.Is(err, context.Canceled) { // an older copy beats an error page
 			return c.body, err
 		}
 		return nil, err
@@ -114,10 +123,12 @@ func (s *site) fetch(ctx context.Context, path string) ([]byte, error) {
 		return nil, errRateLimited
 	}
 	if wait := requestGap - time.Since(s.last); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+path, nil)
@@ -131,9 +142,12 @@ func (s *site) fetch(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("连不上 LINUX DO：%w", err)
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(res.Body, answerMost+1))
 	if err != nil {
 		return nil, fmt.Errorf("连不上 LINUX DO：%w", err)
+	}
+	if int64(len(body)) > answerMost {
+		return nil, fmt.Errorf("LINUX DO 的回答太大了")
 	}
 	// The firewall's page answers 403 or 503; a 200 topic or feed may just
 	// mention the phrase.
@@ -142,7 +156,7 @@ func (s *site) fetch(ctx context.Context, path string) ([]byte, error) {
 	case res.StatusCode == http.StatusTooManyRequests:
 		pause := pauseFor
 		if secs, err := strconv.Atoi(res.Header.Get("Retry-After")); err == nil && secs > 0 {
-			pause = max(time.Duration(secs)*time.Second, time.Minute)
+			pause = max(time.Duration(min(secs, int(pauseMost.Seconds())))*time.Second, time.Minute)
 		}
 		s.paused = time.Now().Add(pause)
 		return nil, errRateLimited

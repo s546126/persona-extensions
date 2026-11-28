@@ -48,9 +48,11 @@ func (e *APIError) Retryable() bool {
 
 // Client talks to the Telegram Bot API over HTTPS (optionally via an HTTP/HTTPS proxy).
 type Client struct {
-	base  string
-	token string
-	http  *http.Client
+	base   string
+	token  string
+	proxy  string
+	redact []string
+	http   *http.Client
 }
 
 // NewClient constructs a Bot API client. proxyRaw may be empty (then http.ProxyFromEnvironment applies).
@@ -70,17 +72,44 @@ func NewClient(base, token, proxyRaw string) (*Client, error) {
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 40 * time.Second,
 	}
-	if strings.TrimSpace(proxyRaw) != "" {
-		pu, perr := ParseProxyURL(proxyRaw)
+	var redact []string
+	addSecret := func(s string) {
+		if s != "" {
+			redact = append(redact, s)
+		}
+	}
+	addSecret(token)
+	if esc := url.PathEscape(token); esc != token {
+		addSecret(esc)
+	}
+	proxyTrimmed := strings.TrimSpace(proxyRaw)
+	if proxyTrimmed != "" {
+		pu, perr := ParseProxyURL(proxyTrimmed)
 		if perr != nil {
 			return nil, perr
+		}
+		if pu.User != nil {
+			if pw, ok := pu.User.Password(); ok {
+				addSecret(pw)
+				if esc := url.QueryEscape(pw); esc != pw {
+					addSecret(esc)
+				}
+			}
+			addSecret(pu.User.String())
 		}
 		tr.Proxy = http.ProxyURL(pu)
 	}
 	return &Client{
-		base:  u.String(),
-		token: token,
-		http:  &http.Client{Transport: tr, Timeout: 45 * time.Second},
+		base:   u.String(),
+		token:  token,
+		proxy:  proxyTrimmed,
+		redact: redact,
+		http: &http.Client{
+			Transport: tr,
+			Timeout:   45 * time.Second,
+			// Never follow redirects so the bot token in the request URL cannot leak to another origin.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}, nil
 }
 
@@ -186,10 +215,13 @@ type apiEnvelope struct {
 }
 
 func (c *Client) scrub(s string) string {
-	if c.token == "" {
-		return s
+	for _, secret := range c.redact {
+		s = strings.ReplaceAll(s, secret, "[redacted]")
 	}
-	return strings.ReplaceAll(s, c.token, "[redacted]")
+	if c.token != "" {
+		s = strings.ReplaceAll(s, c.token, "[redacted]")
+	}
+	return s
 }
 
 func (c *Client) call(ctx context.Context, method string, body any, out any) error {
@@ -217,9 +249,15 @@ func (c *Client) doJSON(req *http.Request, out any) error {
 		return errors.New(c.scrub(err.Error()))
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
 	if err != nil {
 		return errors.New(c.scrub(err.Error()))
+	}
+	if len(raw) > maxAPIResponseBytes {
+		return errors.New("telegram response too large")
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return &APIError{Code: resp.StatusCode, Message: http.StatusText(resp.StatusCode)}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -293,14 +331,16 @@ func (c *Client) SendPhoto(ctx context.Context, chatID int64, filename, mime str
 		})
 		_ = w.WriteField("reply_parameters", string(rp))
 	}
+	filename = escapeQuotes(filename)
 	if filename == "" {
 		filename = "image.png"
 	}
+	mime = sanitizeHeaderValue(mime)
 	if mime == "" {
 		mime = "image/png"
 	}
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="photo"; filename="%s"`, escapeQuotes(filename)))
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="photo"; filename="%s"`, filename))
 	h.Set("Content-Type", mime)
 	part, err := w.CreatePart(h)
 	if err != nil {
@@ -325,8 +365,18 @@ func (c *Client) SendPhoto(ctx context.Context, chatID int64, filename, mime str
 }
 
 func escapeQuotes(s string) string {
+	s = sanitizeHeaderValue(s)
 	s = strings.ReplaceAll(s, `\`, `_`)
 	return strings.ReplaceAll(s, `"`, `_`)
+}
+
+func sanitizeHeaderValue(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s))
 }
 
 // SendChatAction sends a chat action such as "typing".
@@ -348,7 +398,7 @@ func (c *Client) GetFile(ctx context.Context, fileID string) (File, error) {
 // DownloadFile downloads a file from Telegram up to maxBytes.
 func (c *Client) DownloadFile(ctx context.Context, filePath string, maxBytes int64) ([]byte, error) {
 	rel := strings.TrimLeft(filePath, "/")
-	if rel == "" || strings.Contains(rel, "..") {
+	if !validTelegramFilePath(rel) {
 		return nil, errors.New("invalid telegram file path")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/file/bot"+c.token+"/"+rel, nil)
@@ -360,7 +410,7 @@ func (c *Client) DownloadFile(ctx context.Context, filePath string, maxBytes int
 		return nil, errors.New(c.scrub(err.Error()))
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &APIError{Code: resp.StatusCode, Message: http.StatusText(resp.StatusCode)}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
@@ -371,4 +421,21 @@ func (c *Client) DownloadFile(ctx context.Context, filePath string, maxBytes int
 		return nil, errors.New("file too large")
 	}
 	return data, nil
+}
+
+func validTelegramFilePath(rel string) bool {
+	if rel == "" {
+		return false
+	}
+	for _, r := range rel {
+		if r < 0x20 || r == 0x7f || r == '\\' || r == '?' || r == '#' {
+			return false
+		}
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
 }

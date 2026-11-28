@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "dingtalk",
   "name": "钉钉",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "钉钉机器人：用你自己组织的企业内部应用机器人（Stream 模式，hub 无需公网地址），在钉钉单聊里和 Persona 对话；填入应用凭证后发配对码绑定，只转发配对人的消息，支持图片、文件和语音转写。凭证加密保存在 hub。",
   "icon": "assets/icon.png",
   "publisher": "nwverse",

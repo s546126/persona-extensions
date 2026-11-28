@@ -132,14 +132,22 @@ func pageView(ctx context.Context, c *Client, e env, sel string) (*wire.View, er
 	missing := sel != "" && selected == nil
 
 	var spaces []Track
+	seenSlug := make(map[string]struct{}, len(tracks))
 	for _, t := range tracks {
-		if isActiveSpace(t) {
-			spaces = append(spaces, t)
+		if !isActiveSpace(t) || strings.TrimSpace(t.Slug) == "" {
+			continue
 		}
+		if _, dup := seenSlug[t.Slug]; dup {
+			continue
+		}
+		seenSlug[t.Slug] = struct{}{}
+		spaces = append(spaces, t)
 	}
 	if selected != nil && selected.Archived {
-		// still in the switcher, so its value is one of the items
-		spaces = append(spaces, *selected)
+		if _, dup := seenSlug[selected.Slug]; !dup {
+			// still in the switcher, so its value is one of the items
+			spaces = append(spaces, *selected)
+		}
 	}
 	if len(spaces) == 0 {
 		var items []wire.Component
@@ -263,10 +271,10 @@ func limitChoices(items []switchItem, value string) []switchItem {
 	return out
 }
 
-// pickAction chooses a space: values {space} from UI version 4, the space in the id before.
+// pickAction chooses a space: values {space} from UI version 4, the space in the id before (falling back to values when the id would exceed 128 bytes).
 func pickAction(e env, value string) *wire.Action {
-	if e.atLeast(4) {
-		return action("pick", map[string]string{"space": value})
+	if e.atLeast(4) || len(pickPrefix)+len(value) > 128 {
+		return action("pick", map[string]string{"space": clipRunes(value, wire.StringMost)})
 	}
 	return action(pickPrefix+value, nil)
 }
@@ -299,15 +307,24 @@ func selectedSections(e env, info *spaceInfo, launchers TrackLaunchers, used int
 				defaultLabel = "默认（" + clipRunes(launchers.Default.Launcher, 24) + "）"
 			}
 			choices := []wire.Choice{{Value: "", Title: defaultLabel}}
+			seenLaunchers := map[string]struct{}{"": {}}
 			for _, l := range launchers.Launchers {
 				if len(choices) >= filterMost {
 					break
 				}
-				label := cmp.Or(strings.TrimSpace(l.DisplayName), l.Name)
+				name := strings.TrimSpace(l.Name)
+				if name == "" {
+					continue
+				}
+				if _, dup := seenLaunchers[name]; dup {
+					continue
+				}
+				seenLaunchers[name] = struct{}{}
+				label := cmp.Or(strings.TrimSpace(l.DisplayName), name)
 				if l.DefaultModel != "" {
 					label += " · " + l.DefaultModel
 				}
-				choices = append(choices, wire.Choice{Value: l.Name, Title: clipRunes(label, wire.StringMost)})
+				choices = append(choices, wire.Choice{Value: clipRunes(name, wire.StringMost), Title: clipRunes(label, wire.StringMost)})
 			}
 			modelPlaceholder := "留空用默认模型，或输入模型 ID"
 			if launchers.Default.Model != "" {

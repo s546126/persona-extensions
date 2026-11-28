@@ -146,7 +146,7 @@ func (a *app) view(p pageState, version int, now time.Time, ln *bool) *wire.View
 		}
 	}
 	// Bound each view even when somebody logs hundreds of small drinks in one day.
-	if p.Offset >= len(records) {
+	if p.Offset < 0 || p.Offset >= len(records) {
 		p.Offset = 0
 	}
 	for _, r := range records[p.Offset:min(p.Offset+40, len(records))] {
@@ -280,7 +280,19 @@ func (a *app) action(ctx context.Context, r *ext.UIRequest) (*wire.ActionResult,
 					p.Days = 30
 				}
 			case "older":
-				p.Offset += 40
+				todayCount := 0
+				l := s.location()
+				todayDay := day(now, l)
+				for _, rec := range s.Records {
+					if day(rec.At, l) == todayDay {
+						todayCount++
+					}
+				}
+				if p.Offset < 0 || p.Offset >= todayCount || todayCount-p.Offset <= 40 {
+					p.Offset = 0
+				} else {
+					p.Offset += 40
+				}
 			case "latest":
 				p.Offset = 0
 			default:

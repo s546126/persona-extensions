@@ -9,10 +9,12 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
@@ -37,7 +39,36 @@ const (
 	// characters (view.schema.json CodeComponent) and a view at most wire.CodeMost bytes of code; bytes are never fewer
 	// than characters, so this stays within both.
 	csvMost = 190_000
+
+	filterFieldMost = 256
+	choicesMost     = 50
+	budgetsMost     = 100
+	tableRowsMost   = 100
 )
+
+func clipRunes(s string, most int) string {
+	if most <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(s) <= most {
+		return s
+	}
+	r := []rune(s)
+	if most == 1 {
+		return "…"
+	}
+	return string(r[:most-1]) + "…"
+}
+
+func clampRatio(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
 
 // pageState is what a page remembers between draws.
 type pageState struct {
@@ -73,6 +104,19 @@ func (p pageState) budgetSpan() string {
 	return budget.Daily
 }
 
+func (p *pageState) clean() {
+	p.Tab = p.tab()
+	if p.Days != 0 {
+		p.Days = p.days()
+	}
+	if p.BudgetSpan != "" {
+		p.BudgetSpan = p.budgetSpan()
+	}
+	p.Machine = clipRunes(p.Machine, filterFieldMost)
+	p.Model = clipRunes(p.Model, filterFieldMost)
+	p.Launcher = clipRunes(p.Launcher, filterFieldMost)
+}
+
 // App draws both contributions from one store.
 type App struct {
 	st  *store.Store
@@ -97,7 +141,7 @@ func (a *App) Page(ctx context.Context, r *ext.UIRequest) (*wire.View, error) {
 }
 
 func (a *App) renderState(ctx context.Context, ps pageState) (*wire.View, error) {
-	ps.Tab = ps.tab()
+	ps.clean()
 	var view *wire.View
 	err := a.st.View(func(st *store.State) error {
 		var err error
@@ -309,7 +353,7 @@ func (a *App) pullNotice(st *store.State) []wire.Section {
 	}
 	notice := func(title, detail string) []wire.Section {
 		return []wire.Section{{Items: []wire.Component{{
-			Type: wire.ComponentEmpty, Icon: "warning", Title: title, Detail: detail,
+			Type: wire.ComponentEmpty, Icon: "warning", Title: clipRunes(title, 200), Detail: clipRunes(detail, 1800),
 		}}}}
 	}
 	if r.Err != nil {
@@ -320,7 +364,7 @@ func (a *App) pullNotice(st *store.State) []wire.Section {
 		gone, other := 0, error(nil)
 		for i, f := range r.Failed {
 			if i < namesMost {
-				names = append(names, f.Name)
+				names = append(names, clipRunes(f.Name, 80))
 			}
 			if hub.NotFound(f.Err) {
 				gone++
@@ -426,14 +470,14 @@ func ranking(title, unit string, shares []usage.Share) wire.Section {
 	for _, s := range shown {
 		ratio := 0.0
 		if total > 0 {
-			ratio = float64(s.Total()) / float64(total)
+			ratio = clampRatio(float64(s.Total()) / float64(total))
 		}
 		rows = append(rows, wire.Component{
-			Type: wire.ComponentProgress, Label: s.Name, Detail: formatTokens(s.Total()), Ratio: &ratio,
+			Type: wire.ComponentProgress, Label: clipRunes(s.Name, 200), Detail: formatTokens(s.Total()), Ratio: &ratio,
 		})
 	}
-	if rest > 0 {
-		ratio := float64(rest) / float64(total)
+	if rest > 0 && total > 0 {
+		ratio := clampRatio(float64(rest) / float64(total))
 		rows = append(rows, wire.Component{Type: wire.ComponentProgress, Label: "其他", Detail: formatTokens(rest), Ratio: &ratio})
 	}
 	return wire.Section{Title: title, Footer: fmt.Sprintf("共 %d %s", len(shares), unit), Items: rows}
@@ -489,14 +533,19 @@ func (a *App) detail(st *store.State, ps pageState, now time.Time, loc *time.Loc
 // choice is a drop-down that filters one dimension. The empty value keeps all of them.
 func choice(name, title, value string, options []string) wire.Component {
 	choices := []wire.Choice{{Value: "", Title: "全部" + title}}
+	seen := map[string]bool{"": true}
 	for _, o := range options {
-		if o == "" {
+		if o == "" || seen[o] || utf8.RuneCountInString(o) > wire.StringMost {
 			continue
 		}
-		choices = append(choices, wire.Choice{Value: o, Title: o})
+		if len(choices) >= choicesMost {
+			break
+		}
+		seen[o] = true
+		choices = append(choices, wire.Choice{Value: o, Title: clipRunes(o, 120)})
 	}
 	return wire.Component{
-		Type: wire.ComponentField, Kind: "choice", Name: name, Label: title, Value: value, Choices: choices,
+		Type: wire.ComponentField, Kind: "choice", Name: name, Label: title, Value: clipRunes(value, filterFieldMost), Choices: choices,
 	}
 }
 
@@ -620,20 +669,21 @@ func (a *App) budgets(st *store.State, ps pageState, now time.Time, loc *time.Lo
 		items = append(items, wire.Component{Type: wire.ComponentEmpty, Icon: "money", Title: "还没有设预算",
 			Detail: "在下面选一个模型（或全部模型）和每日或每周，填上 token 上限，再点“保存预算”。用到八成和用满时，会各提醒你一次。"})
 	}
-	for _, s := range statuses {
+	shownStatuses := statuses
+	if len(shownStatuses) > budgetsMost {
+		shownStatuses = statuses[:budgetsMost]
+	}
+	for _, s := range shownStatuses {
 		who := "全部模型"
 		if s.Budget.Model != "" {
-			who = modelName(s.Budget.Model)
+			who = clipRunes(modelName(s.Budget.Model), 200)
 		}
 		span := "每日"
 		if s.Budget.Span == budget.Weekly {
 			span = "每周"
 		}
 		text, tone := formatRatio(s.Used, s.Budget.Limit)
-		ratio := s.Ratio
-		if ratio > 1 {
-			ratio = 1
-		}
+		ratio := clampRatio(s.Ratio)
 		items = append(items, wire.Component{
 			Type: wire.ComponentProgress, Label: span + " · " + who, Tone: tone,
 			Detail: formatTokens(s.Used) + " / " + formatTokens(s.Budget.Limit) + "（" + text + "）", Ratio: &ratio,
@@ -644,11 +694,21 @@ func (a *App) budgets(st *store.State, ps pageState, now time.Time, loc *time.Lo
 				Values: map[string]string{"span": s.Budget.Span, "model": s.Budget.Model}},
 		})
 	}
+	if len(statuses) > budgetsMost {
+		items = append(items, wire.Component{
+			Type:  wire.ComponentText,
+			Style: "secondary",
+			Text:  fmt.Sprintf("只显示前 %d 条预算（共 %d 条）。", budgetsMost, len(statuses)),
+		})
+	}
 	models, _, _ := usage.Names(st)
 	modelChoices := []wire.Choice{{Value: "", Title: "全部模型"}}
 	for _, m := range models {
-		if m != "" {
-			modelChoices = append(modelChoices, wire.Choice{Value: m, Title: m})
+		if m != "" && utf8.RuneCountInString(m) <= wire.StringMost {
+			if len(modelChoices) >= choicesMost {
+				break
+			}
+			modelChoices = append(modelChoices, wire.Choice{Value: m, Title: clipRunes(m, 120)})
 		}
 	}
 	form := []wire.Component{
@@ -680,15 +740,31 @@ func (a *App) setBudget(values map[string]string, fallbackSpan string) error {
 
 // gateways is the account list, shown only when the hub could provide it.
 func gateways(ga hub.GatewayAccounts) wire.Section {
-	rows := make([][]string, 0, len(ga.Accounts))
-	for _, ac := range ga.Accounts {
+	if len(ga.Accounts) == 0 {
+		return wire.Section{
+			Title: "网关账号额度",
+			Items: []wire.Component{{Type: wire.ComponentText, Style: "secondary", Text: "暂无网关账号额度信息。"}},
+		}
+	}
+	shown := ga.Accounts
+	if len(shown) > tableRowsMost {
+		shown = ga.Accounts[:tableRowsMost]
+	}
+	rows := make([][]string, 0, len(shown))
+	for _, ac := range shown {
 		window := "—"
 		if len(ac.Windows) > 0 && ac.Windows[0].UsedRatio != nil {
-			window = fmt.Sprintf("%.0f%%", *ac.Windows[0].UsedRatio*100)
+			if r := *ac.Windows[0].UsedRatio; !math.IsNaN(r) && !math.IsInf(r, 0) {
+				window = fmt.Sprintf("%.0f%%", r*100)
+			}
 		}
-		rows = append(rows, []string{ac.Provider, ac.Name, ac.Status, window})
+		rows = append(rows, []string{clipRunes(ac.Provider, 120), clipRunes(ac.Name, 120), clipRunes(ac.Status, 120), window})
 	}
-	return wire.Section{Title: "网关账号额度", Items: []wire.Component{{
+	footer := ""
+	if len(ga.Accounts) > tableRowsMost {
+		footer = fmt.Sprintf("只显示前 %d 个账号（共 %d 个）。", tableRowsMost, len(ga.Accounts))
+	}
+	return wire.Section{Title: "网关账号额度", Footer: footer, Items: []wire.Component{{
 		Type: wire.ComponentTable,
 		Columns: []wire.TableColumn{
 			{Title: "来源"}, {Title: "账号"}, {Title: "状态"}, {Title: "已用", Align: "end"},

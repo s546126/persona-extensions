@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -27,7 +28,10 @@ var okxBase = "https://www.okx.com"
 var userAgent = "persona-markets/" + version
 
 // cacheKeep bounds the cache: past it, the oldest answers go.
-const cacheKeep = 100
+const (
+	cacheKeep  = 100
+	okxMaxBody = 8 << 20
+)
 
 // okx is the source: the client with its cache.
 type okx struct {
@@ -92,9 +96,12 @@ func (o *okx) fetch(ctx context.Context, path string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("连不上 OKX：%w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, okxMaxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("读 OKX 的回答出错：%w", err)
+	}
+	if len(body) > okxMaxBody {
+		return nil, fmt.Errorf("OKX 的回答太大")
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return nil, fmt.Errorf("OKX 说%w", ErrRateLimited)
@@ -132,13 +139,23 @@ type okxTicker struct {
 	TS        string `json:"ts"`
 }
 
+func finiteFloat(s string) float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return v
+}
+
 // quote is the ticker in the shape every source answers.
 func (t okxTicker) quote() Quote {
-	f := func(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
-	q := Quote{Symbol: t.InstID, Kind: "现货", Currency: quoteCcy(t.InstID), Last: f(t.Last), Base: f(t.Open24h),
-		High: f(t.High24h), Low: f(t.Low24h), Turnover: f(t.VolCcy24h), Period: "24h"}
+	q := Quote{Symbol: t.InstID, Kind: "现货", Currency: quoteCcy(t.InstID), Last: finiteFloat(t.Last), Base: finiteFloat(t.Open24h),
+		High: finiteFloat(t.High24h), Low: finiteFloat(t.Low24h), Turnover: finiteFloat(t.VolCcy24h), Period: "24h"}
 	if instType(t.InstID) == "SWAP" { // a swap's volCcy24h is in the base currency
 		q.Kind, q.Turnover = "永续合约", q.Turnover*q.Last
+	}
+	if math.IsNaN(q.Turnover) || math.IsInf(q.Turnover, 0) {
+		q.Turnover = 0
 	}
 	if ms, err := strconv.ParseInt(t.TS, 10, 64); err == nil {
 		q.At = time.UnixMilli(ms)
@@ -355,7 +372,7 @@ func (o *okx) Candles(ctx context.Context, id, bar string, n int, fresh time.Dur
 		var f [5]float64
 		bad := false
 		for j := range f {
-			if f[j], err = strconv.ParseFloat(r[j+1], 64); err != nil {
+			if f[j], err = strconv.ParseFloat(r[j+1], 64); err != nil || math.IsNaN(f[j]) || math.IsInf(f[j], 0) {
 				bad = true
 			}
 		}
@@ -402,9 +419,15 @@ func (o *okx) URL(id string) string {
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
+	}
+	if n == 1 {
+		return "…"
 	}
 	return string(r[:n-1]) + "…"
 }

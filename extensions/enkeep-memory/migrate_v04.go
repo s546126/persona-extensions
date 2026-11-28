@@ -118,7 +118,13 @@ type MigrateV04Phase1Report struct {
 	SensitiveWorkCleared   int                        `json:"sensitive_work_cleared"`
 	SensitiveClearedByCat  map[string]int             `json:"sensitive_cleared_by_cat,omitempty"`
 	OriginSpaceWorkCleared int                        `json:"origin_space_work_cleared"`
-	DurationMS             int64                      `json:"duration_ms"`
+	// LowConfidencePersonaDemoted counts stable persona entries flagged LOW_CONFIDENCE and seen once (not the user's
+	// own) demoted to candidate, so a misread never stands in the stable pool or the profile.
+	LowConfidencePersonaDemoted int `json:"low_confidence_persona_demoted"`
+	// LegalIDFalsePositiveCleared counts non-work entries whose model-made legal_id label was a known false positive
+	// (a Visa card payment, "告状") and was taken off.
+	LegalIDFalsePositiveCleared int   `json:"legal_id_false_positive_cleared"`
+	DurationMS                  int64 `json:"duration_ms"`
 }
 
 // MigrateV04Phase2Report summarizes lightweight Haiku disambiguation & audit.
@@ -283,10 +289,10 @@ func printMigrateV04Summary(rep *MigrateV04Report) {
 		rep.Before.EntriesStable, rep.After.EntriesStable,
 		rep.Before.EntriesDormant, rep.After.EntriesDormant,
 		rep.Before.EntriesRetired, rep.After.EntriesRetired)
-	fmt.Printf("  Phase 1: s6_downgraded=%d s3_persona_retired=%d s3_persona_demoted=%d cron_retired=%d generic_people=%d ops_tagged=%d sens_work_cleared=%d\n",
+	fmt.Printf("  Phase 1: s6_downgraded=%d s3_persona_retired=%d s3_persona_demoted=%d cron_retired=%d generic_people=%d ops_tagged=%d sens_work_cleared=%d low_conf_persona_demoted=%d legal_id_fp_cleared=%d\n",
 		rep.Phase1.S6Downgraded, rep.Phase1.S3PersonaRetired, rep.Phase1.S3PersonaDemoted,
 		rep.Phase1.CronWorkflowRetired, rep.Phase1.GenericPeopleDemoted, rep.Phase1.OpsRunbookTagged,
-		rep.Phase1.SensitiveWorkCleared)
+		rep.Phase1.SensitiveWorkCleared, rep.Phase1.LowConfidencePersonaDemoted, rep.Phase1.LegalIDFalsePositiveCleared)
 	fmt.Printf("  Decay: ephemeral_tagged=%d demoted=%d dormant=%d ops_demoted=%d ops_dormant=%d\n",
 		rep.Phase1.LifecycleDecay.EphemeralTagged, rep.Phase1.LifecycleDecay.EphemeralDemotedStable,
 		rep.Phase1.LifecycleDecay.EphemeralDormant, rep.Phase1.LifecycleDecay.OpsDemoted,
@@ -709,6 +715,15 @@ func RunMigrateV04Phase1(ctx context.Context, st *store.State, today string) (Mi
 			}
 		}
 
+		// Step 2b: a stable persona entry the extraction flagged LOW_CONFIDENCE from a single sighting is a misread
+		// until seen again (e.g. a vent about a rejected interview read as the user's PhD history): back to candidate.
+		if e.Facet == entry.Persona && !trueUser && e.Status == entry.Stable && e.Count <= 1 &&
+			slices.Contains(e.Flags, entry.FlagLowConfidence) {
+			e.Status = entry.Candidate
+			e.StatusAt = today
+			rep.LowConfidencePersonaDemoted++
+		}
+
 		// Step 3: Cron / scheduled script workflow cleanup.
 		if e.Facet == entry.Workflow && !trueUser && isCronWorkflowEntry(e) {
 			e.Status = entry.Retired
@@ -744,8 +759,8 @@ func RunMigrateV04Phase1(ctx context.Context, st *store.State, today string) (Mi
 			}
 		}
 
-		// Step 6: Payload-First sensitivity re-evaluation on work-methodology facets.
-		if entry.IsWorkMethodFacet(e.Facet) {
+		// Step 6: Payload-First sensitivity re-evaluation on work-methodology facets and ops_runbook entries.
+		if entry.IsWorkMethodFacet(e.Facet) || entry.IsOpsRunbookEntry(e) {
 			clearedCats, spaceCleared := reevalWorkSensitivity(e)
 			if len(clearedCats) > 0 {
 				rep.SensitiveWorkCleared++
@@ -756,6 +771,14 @@ func RunMigrateV04Phase1(ctx context.Context, st *store.State, today string) (Mi
 			if spaceCleared {
 				rep.OriginSpaceWorkCleared++
 			}
+		}
+
+		// Step 6b: known legal_id false positives on non-work facets. Step 6 re-checks the work facets only; an older
+		// model also labelled a Visa card payment or "被告状" on persona/world/people entries as legal_id. A model label
+		// is cleared only when the payload holds such a known false positive and nothing the strict detector accepts
+		// (a real visa, passport, H1B, lawsuit keeps it); user labels are never touched.
+		if !entry.IsWorkMethodFacet(e.Facet) && clearLegalIDFalsePositive(e) {
+			rep.LegalIDFalsePositiveCleared++
 		}
 
 		// Step 7: Ops runbook deterministic pre-tagging (run before ApplyLifecycleDecay so old ops decay immediately).
@@ -848,14 +871,42 @@ func isCronWorkflowEntry(e *entry.Entry) bool {
 	return false
 }
 
-// reevalWorkSensitivity re-evaluates non-user sensitive tags on work-methodology facets strictly via PayloadCategories.
-// User-authored tags (ByUser) are preserved untouched.
+// clearLegalIDFalsePositive takes a model-made legal_id label (and a legacy Sensitive legal_id) off e when its payload
+// is a known false positive (entry.LegalIDFalsePositive). ByUser labels are kept.
+func clearLegalIDFalsePositive(e *entry.Entry) bool {
+	modelTagged := entry.CategoryOf(e.Sensitive) == entry.CatLegalID
+	for _, c := range e.Categories {
+		if entry.CategoryOf(c.Name) != entry.CatLegalID {
+			continue
+		}
+		if c.By == entry.ByUser {
+			return false
+		}
+		modelTagged = true
+	}
+	if !modelTagged || !entry.LegalIDFalsePositive(e.PayloadTexts()...) {
+		return false
+	}
+	e.Categories = slices.DeleteFunc(e.Categories, func(c entry.Category) bool {
+		return entry.CategoryOf(c.Name) == entry.CatLegalID && c.By != entry.ByUser
+	})
+	if entry.CategoryOf(e.Sensitive) == entry.CatLegalID {
+		e.Sensitive = ""
+	}
+	return true
+}
+
+// reevalWorkSensitivity re-evaluates non-user sensitive tags on work-methodology facets strictly via PayloadCategories
+// (and clears all non-user sensitive tags on ops_runbook entries). User-authored tags (ByUser) are preserved untouched.
 func reevalWorkSensitivity(e *entry.Entry) (cleared []string, spaceCleared bool) {
 	beforeCats := e.Cats()
 	if len(beforeCats) == 0 && e.OriginSpace == "" {
 		return nil, false
 	}
-	ownCats := entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
+	var ownCats []string
+	if !entry.IsOpsRunbookEntry(e) {
+		ownCats = entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
+	}
 
 	// Preserve ByUser tags; rebuild non-user tags strictly from ownCats.
 	kept := make([]entry.Category, 0, len(e.Categories))

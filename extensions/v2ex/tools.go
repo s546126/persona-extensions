@@ -119,7 +119,8 @@ func (a *app) toolList(ctx context.Context, source string) (string, listing, err
 		l, err := a.list(ctx, source, false)
 		return "V2EX " + listTitle(source), l, err
 	case "nodes":
-		if len(a.nodes) == 0 {
+		_, nodes, _, _ := a.snapshot()
+		if len(nodes) == 0 {
 			return "", listing{}, errors.New("用户没有设关注的节点：在这个扩展的设置里填，或者直接写节点的英文名")
 		}
 		l, err := a.list(ctx, source, false)
@@ -136,6 +137,7 @@ func (a *app) toolList(ctx context.Context, source string) (string, listing, err
 }
 
 func (a *app) toolHot(ctx context.Context, source string, filtered bool, keywords []string, limit int) (string, error) {
+	cfg, _, _, loc := a.snapshot()
 	title, l, err := a.toolList(ctx, source)
 	if err != nil {
 		return "", err
@@ -143,7 +145,7 @@ func (a *app) toolHot(ctx context.Context, source string, filtered bool, keyword
 	topics := l.topics
 	var conditions []string
 	if filtered {
-		f := a.cfg.filter()
+		f := cfg.filter()
 		topics = f.apply(topics)
 		if d := f.describe(); d != "" {
 			conditions = append(conditions, d)
@@ -164,7 +166,7 @@ func (a *app) toolHot(ctx context.Context, source string, filtered bool, keyword
 	}
 	b.WriteString("\n")
 	if l.stale != nil {
-		fmt.Fprintf(&b, "（这次没读到：%s。这是 %s 读到的）\n", oneLine(l.stale.Error()), l.at.In(a.loc).Format("01-02 15:04"))
+		fmt.Fprintf(&b, "（这次没读到：%s。这是 %s 读到的）\n", oneLine(l.stale.Error()), l.at.In(loc).Format("01-02 15:04"))
 	}
 	if len(l.missed) > 0 {
 		fmt.Fprintf(&b, "（这些节点没读到：%s）\n", strings.Join(l.missed, "、"))
@@ -180,15 +182,16 @@ func (a *app) toolHot(ctx context.Context, source string, filtered bool, keyword
 }
 
 func (a *app) toolTopic(ctx context.Context, id int64, replies int) (string, error) {
+	_, _, _, loc := a.snapshot()
 	th, err := a.thread(ctx, id, replies > 0, false)
 	if err != nil {
 		return "", err
 	}
 	t := th.topic
 	var b strings.Builder
-	fmt.Fprintf(&b, "「%s」 %s\n%s\n", t.title(), topicURL(t.ID), topicMeta(t, a.loc))
+	fmt.Fprintf(&b, "「%s」 %s\n%s\n", t.title(), topicURL(t.ID), topicMeta(t, loc))
 	if th.stale != nil {
-		fmt.Fprintf(&b, "（这次没读到：%s。这是 %s 读到的）\n", oneLine(th.stale.Error()), th.at.In(a.loc).Format("01-02 15:04"))
+		fmt.Fprintf(&b, "（这次没读到：%s。这是 %s 读到的）\n", oneLine(th.stale.Error()), th.at.In(loc).Format("01-02 15:04"))
 	}
 	if s := tidy(t.Content); s != "" {
 		b.WriteString("\n" + clip(s, toolBodyMost) + "\n")
@@ -198,9 +201,9 @@ func (a *app) toolTopic(ctx context.Context, id int64, replies int) (string, err
 	}
 	if floors, rs := latestReplies(th.replies, replies); len(rs) > 0 {
 		fmt.Fprintf(&b, "\n最新 %d 条回复（共 %d 条）：\n", len(rs), len(th.replies))
-		each := min(toolReplyMost, toolRepliesAll/len(rs)-toolReplyHead)
+		each := max(min(toolReplyMost, toolRepliesAll/len(rs)-toolReplyHead), 1)
 		for i, r := range rs {
-			fmt.Fprintf(&b, "#%d %s（%s）：%s\n", floors[i], r.Member.Username, time.Unix(r.Created, 0).In(a.loc).Format("01-02 15:04"), clip(oneLine(r.Content), each))
+			fmt.Fprintf(&b, "#%d %s（%s）：%s\n", floors[i], r.Member.Username, time.Unix(r.Created, 0).In(loc).Format("01-02 15:04"), clip(oneLine(r.Content), each))
 		}
 	}
 	return clip(strings.TrimSpace(b.String()), toolTextMost), nil

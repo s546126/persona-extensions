@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,16 +99,18 @@ type Bot struct {
 	opt     Options
 	secrets Secrets
 
-	mu      sync.Mutex
-	st      state
-	loaded  bool
-	status  wire.ConnectorStatus
-	client  *Client
-	pair    *pendingPair
-	wake    chan struct{}
-	typing  *typingLoop
-	replied map[int64]time.Time
-	sendGen uint64
+	mu         sync.Mutex
+	st         state
+	loaded     bool
+	status     wire.ConnectorStatus
+	client     *Client
+	pair       *pendingPair
+	wake       chan struct{}
+	pollCancel context.CancelFunc
+	sessionGen uint64
+	typing     *typingLoop
+	replied    map[int64]time.Time
+	sendGen    uint64
 }
 
 var errCannotSend = errors.New("nowhere to send to yet")
@@ -196,6 +199,19 @@ func (b *Bot) saveLocked(ctx context.Context) {
 	}
 }
 
+func (b *Bot) cancelPollLocked() {
+	if b.pollCancel != nil {
+		b.pollCancel()
+		b.pollCancel = nil
+	}
+}
+
+func (b *Bot) isCurrentSession(gen uint64, creds *credentials) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sessionGen == gen && b.st.Creds != nil && b.st.Creds.Token == creds.Token && b.st.Creds.ChatID == creds.ChatID && b.st.Creds.OwnerID == creds.OwnerID
+}
+
 // Run polls Telegram updates whenever a bound bot token is present.
 func (b *Bot) Run(ctx context.Context) {
 	if err := b.load(ctx); err != nil {
@@ -214,6 +230,7 @@ func (b *Bot) Run(ctx context.Context) {
 		creds := b.st.Creds
 		offset := b.st.Offset
 		pairing := b.pair != nil
+		gen := b.sessionGen
 		b.mu.Unlock()
 
 		if creds == nil || creds.Token == "" || creds.ChatID == 0 {
@@ -230,37 +247,62 @@ func (b *Bot) Run(ctx context.Context) {
 		}
 		if pairing {
 			// Pause background polling while LoginStep("pair") reads updates.
-			select {
-			case <-ctx.Done():
+			if !sleep(ctx, b.wake, 2*time.Second) {
 				return
-			case <-b.wake:
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
 
 		c, err := b.ensureClient(creds)
 		if err != nil {
-			b.setStatus(wire.ConnectorStatus{
-				State: wire.ConnectorStateError,
-				Error: t(b.lang(), "bot.bad_config", "error", err.Error()),
-			})
+			if b.isCurrentSession(gen, creds) {
+				b.setStatus(wire.ConnectorStatus{
+					State: wire.ConnectorStateError,
+					Error: t(b.lang(), "bot.bad_config", "error", err.Error()),
+				})
+			}
 			if !sleep(ctx, b.wake, 15*time.Second) {
 				return
 			}
 			continue
 		}
 
-		b.setStatus(wire.ConnectorStatus{
-			State:   wire.ConnectorStateOk,
-			Account: accountLabel(b.lang(), creds),
-			Via:     t(b.lang(), "bot.via"),
-		})
+		if b.isCurrentSession(gen, creds) {
+			b.setStatus(wire.ConnectorStatus{
+				State:   wire.ConnectorStateOk,
+				Account: accountLabel(b.lang(), creds),
+				Via:     t(b.lang(), "bot.via"),
+			})
+		}
 
-		updates, err := c.GetUpdates(ctx, offset, 25)
+		pollCtx, pollCancel := context.WithCancel(ctx)
+		b.mu.Lock()
+		if b.sessionGen != gen || b.st.Creds == nil || b.pair != nil {
+			b.mu.Unlock()
+			pollCancel()
+			continue
+		}
+		b.pollCancel = pollCancel
+		b.mu.Unlock()
+
+		updates, err := c.GetUpdates(pollCtx, offset, 25)
+		pollCancel()
+		b.mu.Lock()
+		if b.sessionGen == gen {
+			b.pollCancel = nil
+		}
+		still := b.sessionGen == gen && b.st.Creds != nil && b.st.Creds.Token == creds.Token && b.st.Creds.ChatID == creds.ChatID && b.st.Creds.OwnerID == creds.OwnerID
+		b.mu.Unlock()
+		if !still {
+			continue
+		}
+
 		if err != nil {
 			if ctx.Err() != nil {
 				return
+			}
+			if pollCtx.Err() != nil {
+				continue
 			}
 			var ae *APIError
 			if errors.As(err, &ae) && ae.Unauthorized() {
@@ -291,7 +333,9 @@ func (b *Bot) Run(ctx context.Context) {
 
 		backoff = 2 * time.Second
 		for _, upd := range updates {
-			b.advanceOffset(ctx, upd.UpdateID+1)
+			if !b.advanceOffset(ctx, gen, upd.UpdateID+1) {
+				break
+			}
 			if upd.Message != nil {
 				b.handleMessage(ctx, c, *creds, *upd.Message)
 			}
@@ -303,7 +347,7 @@ func (b *Bot) ensureClient(creds *credentials) (*Client, error) {
 	b.mu.Lock()
 	c := b.client
 	b.mu.Unlock()
-	if c != nil {
+	if c != nil && c.token == creds.Token && c.proxy == strings.TrimSpace(creds.Proxy) {
 		return c, nil
 	}
 	nc, err := b.opt.NewClient(creds.Token, creds.Proxy)
@@ -311,7 +355,7 @@ func (b *Bot) ensureClient(creds *credentials) (*Client, error) {
 		return nil, err
 	}
 	b.mu.Lock()
-	if b.client == nil {
+	if b.client == nil || b.client.token != creds.Token || b.client.proxy != strings.TrimSpace(creds.Proxy) {
 		b.client = nc
 	} else {
 		nc = b.client
@@ -320,30 +364,37 @@ func (b *Bot) ensureClient(creds *credentials) (*Client, error) {
 	return nc, nil
 }
 
-func (b *Bot) advanceOffset(ctx context.Context, next int64) {
+func (b *Bot) advanceOffset(ctx context.Context, gen uint64, next int64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.sessionGen != gen || b.st.Creds == nil {
+		return false
+	}
 	if next > b.st.Offset {
 		b.st.Offset = next
 		b.saveLocked(ctx)
 	}
+	return true
 }
 
 // Logout clears all stored credentials and runtime state.
 func (b *Bot) Logout(ctx context.Context) error {
 	b.stopTyping()
 	b.mu.Lock()
+	b.sessionGen++
+	b.cancelPollLocked()
 	b.st = state{}
 	b.loaded = true
 	b.client = nil
 	b.pair = nil
+	b.replied = map[int64]time.Time{}
 	b.sendGen++
-	b.mu.Unlock()
-	err := b.secrets.Delete(ctx)
-	b.setStatus(wire.ConnectorStatus{
+	b.status = wire.ConnectorStatus{
 		State: wire.ConnectorStateNotSignedIn,
 		Error: t(b.lang(), "bot.not_bound"),
-	})
+	}
+	b.mu.Unlock()
+	err := b.secrets.Delete(ctx)
 	b.kick()
 	return err
 }

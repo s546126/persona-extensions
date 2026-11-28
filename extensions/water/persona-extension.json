@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "water",
   "name": "喝水提醒",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "icon": "assets/icon.png",
   "description": "按时提醒喝水，通知上一点就记，随时看今天的进度和最近每天喝了多少，提醒不用模型。表盘和小组件也能看今天的喝水进度。也能用快捷指令和 Siri 记一杯水。",
   "publisher": "nwverse",

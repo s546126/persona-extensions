@@ -78,6 +78,23 @@ func enumProp(desc string, values []string) map[string]any {
 	return map[string]any{"type": "string", "description": desc, "enum": values}
 }
 
+const maxLineBytes = 8 << 20
+
+// readBoundedLine reads one '\n'-terminated line up to limit bytes so an unbounded stdin stream cannot exhaust memory.
+func readBoundedLine(r *bufio.Reader, limit int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(buf)+len(chunk) > limit {
+			return nil, fmt.Errorf("request line exceeds %d byte limit", limit)
+		}
+		buf = append(buf, chunk...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return buf, err
+		}
+	}
+}
+
 // Serve reads requests from in and writes one answer per request to out, until in ends or ctx is done.
 func Serve(ctx context.Context, in io.Reader, out io.Writer, st *store.Store, bf *budget.File, loc *time.Location, now func() time.Time) error {
 	r := bufio.NewReader(in)
@@ -86,7 +103,7 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, st *store.Store, bf
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line, err := r.ReadBytes('\n')
+		line, err := readBoundedLine(r, maxLineBytes)
 		if len(bytes.TrimSpace(line)) > 0 {
 			if reply := s.handle(line); reply != nil {
 				if _, werr := out.Write(append(reply, '\n')); werr != nil {

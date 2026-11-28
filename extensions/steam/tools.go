@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
@@ -16,9 +18,9 @@ const (
 	pageProperties   = `"offset":{"type":"integer","minimum":0,"maximum":20000,"default":0},"limit":{"type":"integer","minimum":1,"maximum":50,"default":20}`
 )
 
-var tools = []wire.ConnectorTool{
+var tools = append([]wire.ConnectorTool{
 	{
-		Name: "steam_profile", Description: "Read the configured Steam player's profile, online or in-game state, and visible owned game count.",
+		Name: "steam_profile", Description: "Read the signed-in or configured Steam player's profile, online or in-game state, and visible owned game count.",
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 	},
 	{
@@ -30,14 +32,18 @@ var tools = []wire.ConnectorTool{
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` + pageProperties + `,"query":{"type":"string","description":"Title or AppID, up to 100 characters."},"sort":{"type":"string","enum":["playtime","name"],"default":"playtime"}}}`),
 	},
 	{
-		Name: "steam_achievements", Description: "Read unlocked and total Steam achievements for one AppID, subject to the player's Game details privacy settings.",
+		Name: "steam_achievements", Description: "Read unlocked and total Steam achievements for one AppID, when Steam shares them.",
 		InputSchema: json.RawMessage(`{"type":"object","required":["appid"],"properties":{"appid":{"type":"integer","minimum":1,"maximum":4294967295}}}`),
 	},
 	{
 		Name: "steam_wishlist", Description: "Read the visible Steam wishlist with Store price and discount in the configured country. Use next_offset to read more; check prices_checked before interpreting the discount count.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{` + pageProperties + `}}`),
 	},
-}
+	achievementHunterTool,
+	gameNewsTool,
+	wishlistDealsTool,
+	playtimeRecapTool,
+}, backlogTools...)
 
 type listArgs struct {
 	Offset int  `json:"offset"`
@@ -86,7 +92,7 @@ func describeReading[T any](out map[string]any, dataset string, reading reading[
 	}
 }
 
-func setPage[T any](out map[string]any, key string, items []T, p listArgs) {
+func setPage[T any](out map[string]any, key string, items []T, p listArgs) []T {
 	start := min(len(items), p.Offset)
 	end := min(len(items), start+p.limit())
 	out[key] = items[start:end]
@@ -94,6 +100,7 @@ func setPage[T any](out map[string]any, key string, items []T, p listArgs) {
 	if end < len(items) {
 		out["next_offset"] = end
 	}
+	return items[start:end]
 }
 
 func (a *app) connector(ctx context.Context, method string, params json.RawMessage) (any, error) {
@@ -106,32 +113,58 @@ func (a *app) connector(ctx context.Context, method string, params json.RawMessa
 	}
 	switch method {
 	case "status":
-		return a.status(), nil
+		return a.status(ctx), nil
 	case "tools.list":
-		return wire.ConnectorTools{Tools: tools}, nil
+		listed := tools
+		if a.config.AllowsDiscoveryTools() {
+			listed = slices.Concat(listed, discoveryTools(a.config.DiscoveryResultLimit()))
+		}
+		if a.config.FriendsRadarEnabled {
+			listed = slices.Concat(listed, friendsTools)
+		}
+		return wire.ConnectorTools{Tools: listed}, nil
 	case "tools.call":
 		return a.callTool(ctx, call.Name, call.Args)
+	case "inbox.collect":
+		return a.collectWishlistInbox(), nil
 	default:
 		return nil, ext.UnknownMethod("connector")
 	}
 }
 
-func (a *app) status() wire.ConnectorStatus {
+func (a *app) keyStatusIssue() problem {
+	if p := a.lastAccount.Load(); p != nil {
+		// Keep the read tools callable during outages and for private profiles.
+		if p.Issue == problemInvalidID || p.Issue == problemKey {
+			return p.Issue
+		}
+	}
+	return a.setup
+}
+
+func (a *app) status(ctx context.Context) wire.ConnectorStatus {
 	out := wire.ConnectorStatus{State: wire.ConnectorStateOk, Via: extensionID}
-	issue := a.setup
+	if a.qr != nil {
+		st, _ := a.Status(ctx)
+		if st.State != wire.AuthStateSignedIn {
+			out.State, out.Error = wire.ConnectorStateNotSignedIn, st.Message
+			if st.State == wire.AuthStatePending {
+				out.Error = textFor(a.locale).message(problemAuthPending, false)
+			}
+		}
+		out.Account = st.Account
+		return out
+	}
+	issue := a.keyStatusIssue()
 	if p := a.lastAccount.Load(); p != nil {
 		out.LastSync = p.At
 		if p.Data != nil {
 			out.Account = p.Data.Name
 		}
-		// Keep the read tools callable during outages and for private profiles.
-		if p.Issue == problemInvalidID || p.Issue == problemKey {
-			issue = p.Issue
-		}
 	}
 	switch issue {
 	case "":
-	case problemSetup, problemInvalidID, problemCountry:
+	case problemSetup, problemInvalidID, problemCountry, problemMode:
 		out.State = wire.ConnectorStateNotConfigured
 	case problemKey:
 		out.State = wire.ConnectorStateNotSignedIn
@@ -142,8 +175,11 @@ func (a *app) status() wire.ConnectorStatus {
 	return out
 }
 
-func (a *app) toolAccount(ctx context.Context, out map[string]any, t *text) reading[player] {
-	p := a.account(ctx, profileTTL, false)
+func (d *steamData) toolAccount(ctx context.Context, out map[string]any, t *text) reading[player] {
+	if d.session != nil {
+		return reading[player]{}
+	}
+	p := d.account(ctx, profileTTL, false)
 	if p.Stale {
 		describeReading(out, "profile", p, t)
 	}
@@ -152,21 +188,56 @@ func (a *app) toolAccount(ctx context.Context, out map[string]any, t *text) read
 
 func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (wire.ConnectorCallResult, error) {
 	const badPaging = "Use an offset from 0 to 20000 and a limit from 1 to 50."
-	ctx, cancel := context.WithTimeout(ctx, readBudget)
+	switch name {
+	case achievementHunterName:
+		return encodeSteamTool(a.achievementHunter(ctx, raw))
+	case gameNewsName:
+		return encodeSteamTool(a.gameNews(ctx, raw))
+	case wishlistDealsName:
+		return encodeSteamTool(a.wishlistDeals(ctx, raw))
+	case playtimeRecapName:
+		return encodeSteamTool(a.callPlaytimeRecap(ctx, raw))
+	case storeTagsTool, storeSearchTool, gameDetailsTool:
+		if !a.config.AllowsDiscoveryTools() {
+			return wire.ConnectorCallResult{}, &ext.Error{
+				Code: string(problemDiscoveryDisabled), Message: textFor(a.locale).message(problemDiscoveryDisabled, false),
+			}
+		}
+		return a.callDiscoveryTool(ctx, name, raw)
+	}
+	t := textFor(a.locale)
+	if (name == friendsRadarTool || name == coopOverlapTool) && !a.config.FriendsRadarEnabled {
+		return wire.ConnectorCallResult{}, &ext.Error{Code: string(problemFriendsDisabled), Message: t.message(problemFriendsDisabled, false)}
+	}
+	d, ctx, cancel := a.readContext(ctx)
 	defer cancel()
 	out := map[string]any{"available": false}
-	t := textFor(a.locale)
 	switch name {
+	case friendsRadarTool:
+		var args friendsRadarArgs
+		if !decodeArgs(raw, &args) || !args.valid() {
+			return wire.ConnectorCallResult{}, invalid(badPaging)
+		}
+		d.friendsRadar(ctx, out, t, args)
+	case coopOverlapTool:
+		var args coopOverlapArgs
+		if !decodeArgs(raw, &args) || !args.normalizeSelection() {
+			return wire.ConnectorCallResult{}, invalid(t.invalidFriendSelection)
+		}
+		if !args.valid() {
+			return wire.ConnectorCallResult{}, invalid(badPaging)
+		}
+		d.coopOverlap(ctx, out, t, args)
 	case "steam_profile":
 		var args struct{}
 		if !decodeArgs(raw, &args) {
 			return wire.ConnectorCallResult{}, invalid("steam_profile takes no arguments.")
 		}
-		p := a.account(ctx, presenceTTL, false)
+		p := d.account(ctx, presenceTTL, false)
 		describeReading(out, "profile", p, t)
 		if p.Data != nil {
 			out["available"], out["profile"] = true, p.Data
-			games := a.ownedGames(ctx, p, false)
+			games := d.ownedGames(ctx, p, false)
 			describeReading(out, "library", games, t)
 			if games.Data != nil {
 				out["owned_game_count"] = games.Data.Total
@@ -177,8 +248,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (w
 		if !decodeArgs(raw, &args) || !args.valid() {
 			return wire.ConnectorCallResult{}, invalid(badPaging)
 		}
-		p := a.toolAccount(ctx, out, t)
-		r := a.recentGames(ctx, p, false)
+		p := d.toolAccount(ctx, out, t)
+		r := d.recentGames(ctx, p, false)
 		describeReading(out, "recent_games", r, t)
 		if r.Data != nil {
 			out["available"], out["playtime_2weeks"], out["truncated"] = true, r.Data.Playtime2Weeks, r.Data.Truncated
@@ -199,8 +270,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (w
 		if utf8.RuneCountInString(args.Query) > maxQueryRunes || (args.Sort != sortName && args.Sort != sortPlaytime) {
 			return wire.ConnectorCallResult{}, invalid("Use a query of at most 100 characters and sort by playtime or name.")
 		}
-		p := a.toolAccount(ctx, out, t)
-		r := a.ownedGames(ctx, p, false)
+		p := d.toolAccount(ctx, out, t)
+		r := d.ownedGames(ctx, p, false)
 		describeReading(out, "library", r, t)
 		if r.Data != nil {
 			out["available"], out["owned_game_count"], out["truncated"] = true, r.Data.Total, r.Data.Truncated
@@ -213,8 +284,8 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (w
 		if !decodeArgs(raw, &args) || args.AppID == 0 {
 			return wire.ConnectorCallResult{}, invalid("Provide a positive integer Steam AppID.")
 		}
-		p := a.toolAccount(ctx, out, t)
-		r := a.achievements(ctx, p, args.AppID)
+		p := d.toolAccount(ctx, out, t)
+		r := d.achievements(ctx, p, args.AppID, t.storeLanguage)
 		describeReading(out, "achievements", r, t)
 		if r.Data != nil {
 			out["available"], out["progress"] = true, r.Data
@@ -224,18 +295,33 @@ func (a *app) callTool(ctx context.Context, name string, raw json.RawMessage) (w
 		if !decodeArgs(raw, &args) || !args.valid() {
 			return wire.ConnectorCallResult{}, invalid(badPaging)
 		}
-		p := a.toolAccount(ctx, out, t)
-		r := a.wishlist(ctx, p, t.storeLanguage, false)
+		p := d.toolAccount(ctx, out, t)
+		r := d.wishlist(ctx, p, t.storeLanguage, false)
 		describeReading(out, "wishlist", r, t)
-		out["country_code"] = a.config.CountryCode
+		out["country_code"] = d.config.CountryCode
 		if r.Data != nil {
 			out["available"], out["wishlist_count"] = true, r.Data.Total
 			out["discounted_count"], out["prices_checked"] = r.Data.Discounted, r.Data.Checked
 			out["truncated"] = r.Data.Total > len(r.Data.Items)
 			setPage(out, "items", r.Data.Items, args)
 		}
+	case backlogSummaryTool, backlogMarkTool, tonightPickTool:
+		if err := a.callBacklogTool(ctx, d, t, name, raw, out); err != nil {
+			return wire.ConnectorCallResult{}, err
+		}
 	default:
-		return wire.ConnectorCallResult{}, invalid("Unknown Steam read tool.")
+		return wire.ConnectorCallResult{}, invalid("Unknown Steam tool.")
+	}
+	if issue := d.sessionIssue(); issue != "" {
+		out = map[string]any{"available": false}
+		describeReading(out, strings.TrimPrefix(name, "steam_"), reading[player]{Issue: issue}, t)
+	}
+	return encodeSteamTool(out, nil)
+}
+
+func encodeSteamTool(out any, issue error) (wire.ConnectorCallResult, error) {
+	if issue != nil {
+		return wire.ConnectorCallResult{}, issue
 	}
 	payload, err := json.Marshal(out)
 	if err != nil {

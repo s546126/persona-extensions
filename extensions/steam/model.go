@@ -3,19 +3,30 @@ package main
 type problem string
 
 const (
-	problemSetup        problem = "not_configured"
-	problemInvalidID    problem = "invalid_steam_id"
-	problemCountry      problem = "invalid_country_code"
-	problemKey          problem = "api_key_rejected"
-	problemPrivate      problem = "private_profile"
-	problemGameDetails  problem = "game_details_unavailable"
-	problemAchievements problem = "achievements_unavailable"
-	problemWishlist     problem = "wishlist_unavailable"
-	problemRateLimited  problem = "rate_limited"
-	problemTimeout      problem = "timeout"
-	problemNetwork      problem = "steam_unavailable"
-	problemResponse     problem = "unexpected_steam_response"
-	problemCanceled     problem = "canceled"
+	problemSetup              problem = "not_configured"
+	problemInvalidID          problem = "invalid_steam_id"
+	problemCountry            problem = "invalid_country_code"
+	problemMode               problem = "invalid_auth_mode"
+	problemKey                problem = "api_key_rejected"
+	problemPrivate            problem = "private_profile"
+	problemProfileUnavailable problem = "steam_profile_unavailable"
+	problemGameDetails        problem = "game_details_unavailable"
+	problemAchievements       problem = "achievements_unavailable"
+	problemWishlist           problem = "wishlist_unavailable"
+	problemRateLimited        problem = "rate_limited"
+	problemTimeout            problem = "timeout"
+	problemNetwork            problem = "steam_unavailable"
+	problemResponse           problem = "unexpected_steam_response"
+	problemCanceled           problem = "canceled"
+	problemAuthPending        problem = "steam_sign_in_pending"
+	problemAuthRefused        problem = "steam_sign_in_refused"
+	problemAuthExpired        problem = "steam_session_expired"
+	problemAuthRequired       problem = "steam_sign_in_required"
+	problemAuthTimeout        problem = "steam_qr_expired"
+	problemAuthLoad           problem = "steam_session_load_failed"
+	problemAuthSave           problem = "steam_session_save_failed"
+	problemAuthDelete         problem = "steam_session_delete_failed"
+	problemAuthClearing       problem = "steam_sign_out_pending"
 
 	// HTTP outcomes interpreted at the endpoint that knows what they mean.
 	problemDenied  problem = "access_denied"
@@ -82,4 +93,5 @@ type wishList struct {
 	Total      int        `json:"total"`
 	Checked    int        `json:"prices_checked"`
 	Discounted int        `json:"discounted_count"`
+	store      map[uint32]wishlistStoreItem
 }

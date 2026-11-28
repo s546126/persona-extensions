@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"unicode/utf8"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 	"github.com/nwverse/persona/sdk/go/wire"
@@ -25,14 +26,15 @@ func text(s, style string) wire.Component {
 
 // page draws the link, or what to do before there is one.
 func (a *app) page() *wire.View {
-	if a.hubURL == "" {
+	hubURL, defPath := a.snapshot()
+	if hubURL == "" {
 		return &wire.View{Title: "飞书侧边栏", Sections: []wire.Section{{Items: []wire.Component{
 			text("还没有 hub 的对外地址，拼不出链接。", wire.TextStyleBody),
 			text("去「设置 › 扩展 › 飞书侧边栏」填「hub 对外地址」（飞书内置浏览器能访问到的地址）。", wire.TextStyleSecondary),
 		}}}}
 	}
 
-	link, target, err := a.buildLink(a.defaultPath())
+	link, target, err := buildLinkFor(hubURL, defPath)
 	if err != nil {
 		return &wire.View{Title: "飞书侧边栏", Sections: []wire.Section{{Items: []wire.Component{
 			text(clip(err.Error(), 1900), wire.TextStyleSecondary),
@@ -40,14 +42,24 @@ func (a *app) page() *wire.View {
 		}}}}
 	}
 
-	open := wire.Section{Title: "在飞书打开 Persona", Items: []wire.Component{
-		{Type: wire.ComponentLink, Title: "在飞书主导航打开", URL: link},
-		text("把下面的链接复制下来，发到飞书里点开（或直接用上面的入口）。", wire.TextStyleCaption),
-		text(clip(link, 1900), wire.TextStyleBody),
-	}}
-	if len(link) > 1900 {
-		open.Items = append(open.Items, text("链接太长，这里截断了：用上面的入口打开，或让助手拼一条。", wire.TextStyleCaption))
+	linkRunes := utf8.RuneCountInString(link)
+	var openItems []wire.Component
+	if linkRunes <= wire.StringMost {
+		openItems = append(openItems,
+			wire.Component{Type: wire.ComponentLink, Title: "在飞书主导航打开", URL: link},
+			text("把下面的链接复制下来，发到飞书里点开（或直接用上面的入口）。", wire.TextStyleCaption),
+			text(clip(link, 1900), wire.TextStyleBody),
+		)
+		if linkRunes > 1900 {
+			openItems = append(openItems, text("链接太长，这里截断了：用上面的入口打开，或让助手拼一条。", wire.TextStyleCaption))
+		}
+	} else {
+		openItems = append(openItems,
+			text("生成的链接超过 2000 字符上限，无法作为按钮直接打开；请缩短扩展设置里的默认路径，或让助手拼一条。", wire.TextStyleSecondary),
+			text(clip(link, 1900), wire.TextStyleBody),
+		)
 	}
+	open := wire.Section{Title: "在飞书打开 Persona", Items: openItems}
 
 	notes := wire.Section{Title: "说明", Items: []wire.Component{
 		text("打开的是："+clip(target, 1900), wire.TextStyleCaption),

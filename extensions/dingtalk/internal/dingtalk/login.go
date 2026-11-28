@@ -60,7 +60,11 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 		b.mu.Lock()
 		if b.st.ClientID != id {
 			b.st.Seen = nil
+			b.last = time.Time{}
+			clear(b.replied)
+			clear(b.hubErrorTold)
 		}
+		b.sessionGen++
 		b.st.ClientID, b.st.ClientSecret, b.st.Owner = id, secret, nil
 		b.unreadable = false // binding again replaces a stored state that did not read
 		b.problem = ""
@@ -147,7 +151,10 @@ func (b *Bot) Logout(ctx context.Context) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.st, b.pairing, b.problem, b.live, b.unreadable = state{}, nil, "", false, false
+	b.sessionGen++
+	b.st, b.pairing, b.problem, b.live, b.unreadable, b.last = state{}, nil, "", false, false, time.Time{}
+	clear(b.replied)
+	clear(b.hubErrorTold)
 	b.reconnectLocked()
 	return b.secrets.Delete(ctx)
 }

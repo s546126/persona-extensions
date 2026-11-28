@@ -128,11 +128,107 @@ func TestPayloadCategories(t *testing.T) {
 		{"legal_ssn_en", Persona, "Need to renew passport and prepare documents for the lawsuit", CatLegalID},
 		{"relationships_family", Persona, "和伴侣在子女教育与父母同住问题上有分歧", CatRelationships},
 		{"relationships_en", Persona, "Discussing childcare schedule with wife and parents", CatRelationships},
+		{"legal_hukouben", Persona, "需要准备户口本和身份证办理落户手续", CatLegalID},
+		{"relationships_ex_girlfriend", Persona, "提到前女友和前任伴侣的旧事", CatRelationships},
+		{"legal_us_ead_card", Persona, "美国工卡审批通过，实体工卡下周寄出", CatLegalID},
+		{"emotion_anxiety_disorder", Persona, "近期确诊焦虑症并持续接受心理咨询", CatEmotion},
 	}
 	for _, tc := range sensitive {
 		got := PayloadCategories(tc.facet, tc.text)
 		if !slices.Contains(got, tc.want) {
 			t.Errorf("%s: PayloadCategories = %v, want to contain %q", tc.name, got, tc.want)
 		}
+	}
+
+	// Cross-word Chinese false positives & Impact.Action exclusion regressions (v0.4.0 rehearsal round 1).
+	rehearsalFP := []struct {
+		name  string
+		entry *Entry
+	}{
+		{"dictation_summary_no_hukou", &Entry{Facet: Workflow, Text: "用户口述总结后再整理为结构化要点"}},
+		{"current_task_no_ex_partner", &Entry{Facet: World, Text: "同事甲当前任务进展同步到周报"}},
+		{"manual_checkpoint_no_work_card", &Entry{Facet: Judgement, Text: "agent 人工卡点是伪需求，能自动化就不要人工审批"}},
+		{"meeting_impact_action_no_dating", &Entry{
+			Facet:  People,
+			Text:   "同事乙约 15 分钟会议对齐接口细节",
+			Impact: Impact{Moment: "reply_person", Action: "提醒用户记住这项约会承诺", Object: "约会安排"},
+		}},
+		{"pace_impact_action_no_anxiety", &Entry{
+			Facet:  People,
+			Text:   "同事丙自认推进节奏偏慢，希望拆细里程碑",
+			Impact: Impact{Moment: "reply_person", Action: "把他的节奏焦虑当作背景参考", Object: "焦虑情绪"},
+		}},
+	}
+	for _, tc := range rehearsalFP {
+		if got := PayloadCategories(tc.entry.Facet, tc.entry.PayloadTexts()...); len(got) != 0 {
+			t.Errorf("%s: PayloadCategories(PayloadTexts) = %v, want empty", tc.name, got)
+		}
+	}
+
+	// Insomnia maps solely to health (not emotion) so sensitive-v04.md and profile-v04.md stay consistent.
+	if got := PayloadCategories(Persona, "用户这几天失眠，晚上睡不着"); !slices.Equal(got, []string{CatHealth}) {
+		t.Errorf("insomnia PayloadCategories = %v, want [health]", got)
+	}
+
+	// Rehearsal round 2: 6 cross-word / ambiguous false positives + PayloadTexts work-method boundary.
+	rehearsalRound2FP := []struct {
+		name  string
+		entry *Entry
+	}{
+		{"api_diagnosis_endpoint", &Entry{Facet: Workflow, Text: "调用 hub API 或诊断端点排查问题"}},
+		{"auto_diagnose_issue", &Entry{Facet: Interaction, Text: "自动诊断问题并明确诊断边界"}},
+		{"service_side_effect", &Entry{Facet: Judgement, Text: "避免对线上服务产生脏数据或副作用"}},
+		{"decide_investment_priority", &Entry{Facet: Judgement, Text: "在多项工作之间决定投入优先级时先看杠杆"}},
+		{"add_account_auth", &Entry{Facet: Workflow, Text: "先设置 mentor 或加入账号授权再分配权限"}},
+		{"interview_complained_about", &Entry{Facet: World, Text: "候选人因拒绝面试被告状，后续被告知流程取消"}},
+		{"ai_passport_product", &Entry{Facet: World, Text: "排查某 AI Passport 登录回调异常"}},
+		{"domestic_visa_payment", &Entry{Facet: Workflow, Text: "测试国内 visa 付款渠道与个人资料目录 bank、visa 配置"}},
+		{"work_rejected_family_object_health", &Entry{
+			Facet:    Interaction,
+			Text:     "回答问题时直接切入核心结论",
+			Rejected: "反面举例：只讲母亲年龄而不给结论",
+			Object:   "心率回补待办",
+		}},
+	}
+	for _, tc := range rehearsalRound2FP {
+		if got := PayloadCategories(tc.entry.Facet, tc.entry.PayloadTexts()...); len(got) != 0 {
+			t.Errorf("%s: PayloadCategories(PayloadTexts) = %v, want empty", tc.name, got)
+		}
+	}
+
+	// Tightened true positives must still hit accurately.
+	rehearsalRound2TP := []struct {
+		name  string
+		facet Facet
+		text  string
+		want  string
+	}{
+		{"clinical_diagnosis_health", Persona, "医院确诊为轻度脂肪肝，医生建议观察药物副作用", CatHealth},
+		{"fund_dca_finance", Persona, "每月定投指数基金并等工资入账后自动分账", CatFinance},
+		{"lawsuit_defendant_legal", Persona, "因私人纠纷成为被告，正在准备应诉材料", CatLegalID},
+		{"us_visa_renewal_legal", Persona, "Preparing H1B visa renewal and US passport photo", CatLegalID},
+		{"renew_the_passport_legal", Workflow, "renew the passport before the trip", CatLegalID},
+	}
+	for _, tc := range rehearsalRound2TP {
+		if got := PayloadCategories(tc.facet, tc.text); !slices.Contains(got, tc.want) {
+			t.Errorf("%s: PayloadCategories = %v, want to contain %q", tc.name, got, tc.want)
+		}
+	}
+
+	// Ops runbook entries never inherit non-user sensitive tags via TagSpace or MergeCategories.
+	opsEntry := &Entry{Facet: Tools, Text: "在专用节点跑心率回补脚本 run.sh"}
+	opsEntry.TagSpace("health")
+	if opsEntry.IsSensitive() || opsEntry.OriginSpace != "" {
+		t.Fatalf("ops runbook must not inherit space sensitivity: %+v", opsEntry)
+	}
+	sensSrc := &Entry{
+		Facet:       Persona,
+		Text:        "体检静息心率偏高",
+		OriginSpace: "health",
+		Categories:  []Category{{Name: CatHealth, By: ByModel}},
+	}
+	opsEntry.MergeCategories(sensSrc)
+	if opsEntry.IsSensitive() || opsEntry.OriginSpace != "" {
+		t.Fatalf("ops runbook must not inherit non-user sensitivity via MergeCategories: %+v", opsEntry)
 	}
 }

@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "enkeep-memory",
   "name": "enkeep 记忆",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "icon": "assets/icon.png",
   "description": "从你在 Persona 里的对话、Agent 会话、卡片问答和消息来源里，整理你和 AI 怎么打交道、AI 怎么用工具、你的默认判断和做事方式、你的人和事、你自己，以及和你有来往的人；每条都带出处，你可以改、删、点对错。",
   "publisher": "nwverse",
@@ -365,7 +365,7 @@
         "description": "每轮都带上的那几条记忆按这个字节数挑。hub 给扩展的常驻空间变大后再调大",
         "default": 1400,
         "minimum": 800,
-        "maximum": 8192
+        "maximum": 16384
       },
       "fast_minutes": {
         "type": "integer",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,27 @@ const (
 	eventCursorTTL      = 90 * 24 * time.Hour
 )
 
+type steamStores struct {
+	prices   *PriceHistoryStore
+	playtime *PlaytimeSnapshotStore
+	cursors  *EventCursorStore
+}
+
+func newSteamStores(dataDir string) steamStores {
+	return steamStores{
+		prices:   NewPriceHistoryStore(dataDir),
+		playtime: NewPlaytimeSnapshotStore(dataDir),
+		cursors:  NewEventCursorStore(dataDir),
+	}
+}
+
+func (s steamStores) clearMemory() {
+	s.prices.file.clearMemory()
+	s.playtime.file.clearMemory()
+	s.playtime.recaps.clearMemory()
+	s.cursors.file.clearMemory()
+}
+
 // Each dataset has its own file and writer lock. Disk readers see either complete version
 // of an atomic replacement. An empty data directory uses a mutex-protected in-memory map.
 type snapshotFile[T any] struct {
@@ -52,6 +74,12 @@ func newSnapshotFile[T any](dataDir, name string) *snapshotFile[T] {
 		s.path = filepath.Join(dataDir, storeDirectory, name+".json")
 	}
 	return s
+}
+
+func (s *snapshotFile[T]) clearMemory() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mem = nil
 }
 
 func (s *snapshotFile[T]) view(read func(map[string]T)) error {
@@ -245,16 +273,16 @@ func putDaily[T comparable](entries []T, entry T, at func(T) time.Time) ([]T, bo
 	return entries, true
 }
 
-func trimOldest[T any](entries map[string]T, limit int, at func(T) time.Time) {
+func trimOldest[K cmp.Ordered, T any](entries map[K]T, limit int, at func(T) time.Time) {
 	extra := len(entries) - limit
 	if extra <= 0 {
 		return
 	}
-	keys := slices.SortedFunc(maps.Keys(entries), func(a, b string) int {
+	keys := slices.SortedFunc(maps.Keys(entries), func(a, b K) int {
 		if order := at(entries[a]).Compare(at(entries[b])); order != 0 {
 			return order
 		}
-		return strings.Compare(a, b)
+		return cmp.Compare(a, b)
 	})
 	for _, key := range keys[:extra] {
 		delete(entries, key)
@@ -281,6 +309,7 @@ type PriceHistory struct {
 	ObservedLowestFinal    uint32        `json:"observed_lowest_final"`
 	ObservedLowestDiscount int           `json:"observed_lowest_discount"`
 	ObservedLowestAt       time.Time     `json:"observed_lowest_at"`
+	ObservedLowestImproved bool          `json:"observed_lowest_improved,omitempty"`
 }
 
 type PriceHistoryStore struct{ file *snapshotFile[PriceHistory] }
@@ -350,6 +379,7 @@ func (h *PriceHistory) observe(sample PriceSample) bool {
 	}
 	if h.ObservedLowestAt.IsZero() || sample.Final < h.ObservedLowestFinal ||
 		sample.Final == h.ObservedLowestFinal && sample.At.Before(h.ObservedLowestAt) {
+		h.ObservedLowestImproved = !h.ObservedLowestAt.IsZero() && sample.Final < h.ObservedLowestFinal && !sample.At.Before(h.Latest.At)
 		h.ObservedLowestFinal = sample.Final
 		h.ObservedLowestDiscount = sample.DiscountPercent
 		h.ObservedLowestAt = sample.At
@@ -410,11 +440,15 @@ func snapshotPlaytime(list *gameList, at time.Time) PlaytimeSnapshot {
 }
 
 type PlaytimeSnapshotStore struct {
-	file *snapshotFile[[]PlaytimeSnapshot]
+	file   *snapshotFile[[]PlaytimeSnapshot]
+	recaps *snapshotFile[[]recapSnapshot]
 }
 
 func NewPlaytimeSnapshotStore(dataDir string) *PlaytimeSnapshotStore {
-	return &PlaytimeSnapshotStore{newSnapshotFile[[]PlaytimeSnapshot](dataDir, "playtime")}
+	return &PlaytimeSnapshotStore{
+		file:   newSnapshotFile[[]PlaytimeSnapshot](dataDir, "playtime"),
+		recaps: newSnapshotFile[[]recapSnapshot](dataDir, "playtime-recap"),
+	}
 }
 
 // Record keeps one snapshot per UTC day within 400 days of the latest observation.
@@ -453,6 +487,72 @@ func (s *PlaytimeSnapshotStore) History(steamID string) ([]PlaytimeSnapshot, err
 	return out, err
 }
 
+type recapSnapshot struct {
+	At       time.Time                `json:"at"`
+	Minutes  map[uint32]uint32        `json:"minutes"`
+	Statuses map[uint32]BacklogStatus `json:"statuses"`
+}
+
+// All calendar recap periods start at a month boundary. Keep each month's first
+// observed day and the latest observed day, in a separate file so overview reads
+// keep using the small aggregate history. The first recap on a UTC day writes once.
+func (s *PlaytimeSnapshotStore) observeRecap(id string, current recapSnapshot) ([]recapSnapshot, error) {
+	var history []recapSnapshot
+	err := s.recaps.update(func(entries map[string][]recapSnapshot) (bool, error) {
+		prior := entries[id]
+		cutoff := utcDay(current.At).AddDate(0, 0, 1-maxPlaytimeDays)
+		first := slices.IndexFunc(prior, func(p recapSnapshot) bool { return !p.At.Before(cutoff) })
+		if first >= 0 {
+			prior = prior[first:]
+		} else {
+			prior = nil
+		}
+		history = prior
+		n := len(prior)
+		if n > 0 && !utcDay(current.At).After(utcDay(prior[n-1].At)) {
+			return false, nil
+		}
+		if n > 1 && monthStart(prior[n-2].At).Equal(monthStart(prior[n-1].At)) {
+			prior = prior[:n-1]
+		}
+		entries[id] = append(slices.Clone(prior), current)
+		trimRecapHistory(entries)
+		return true, nil
+	})
+	return history, err
+}
+
+func trimRecapHistory(entries map[string][]recapSnapshot) {
+	latest := func(history []recapSnapshot) time.Time {
+		if len(history) == 0 {
+			return time.Time{}
+		}
+		return history[len(history)-1].At
+	}
+	trimOldest(entries, maxPlaytimeAccounts, latest)
+	// Budget the JSON cost at up to 26 bytes for each integer item or status.
+	// This leaves room for the enclosing records within the 16 MiB store limit.
+	const maxItems = 600_000
+	costs := make(map[string]int, len(entries))
+	total := 0
+	for id, history := range entries {
+		for _, p := range history {
+			costs[id] += len(p.Minutes) + len(p.Statuses)
+		}
+		total += costs[id]
+	}
+	for total > maxItems {
+		oldest := slices.MinFunc(slices.Collect(maps.Keys(entries)), func(a, b string) int {
+			if order := latest(entries[a]).Compare(latest(entries[b])); order != 0 {
+				return order
+			}
+			return cmp.Compare(a, b)
+		})
+		total -= costs[oldest]
+		delete(entries, oldest)
+	}
+}
+
 type BacklogStatus string
 
 const (
@@ -463,6 +563,10 @@ const (
 	BacklogCompleted BacklogStatus = "completed"
 	BacklogDropped   BacklogStatus = "dropped"
 )
+
+var backlogStatuses = [...]BacklogStatus{
+	BacklogUnplayed, BacklogPlaying, BacklogQueued, BacklogPaused, BacklogCompleted, BacklogDropped,
+}
 
 type BacklogEntry struct {
 	Status BacklogStatus `json:"status"`
@@ -484,14 +588,8 @@ func backlogKey(steamID string, appID uint32) (string, error) {
 	return steamID + "/" + appIDText(appID), nil
 }
 
-func (s *BacklogStore) Set(steamID string, appID uint32, entry BacklogEntry) error {
-	key, err := backlogKey(steamID, appID)
-	if err != nil {
-		return err
-	}
-	switch entry.Status {
-	case BacklogUnplayed, BacklogPlaying, BacklogQueued, BacklogPaused, BacklogCompleted, BacklogDropped:
-	default:
+func validateBacklogEntry(entry BacklogEntry) error {
+	if !slices.Contains(backlogStatuses[:], entry.Status) {
 		return errors.New("invalid Steam backlog status")
 	}
 	if !utf8.ValidString(entry.Note) || utf8.RuneCountInString(entry.Note) > maxBacklogNoteRunes {
@@ -505,11 +603,41 @@ func (s *BacklogStore) Set(steamID string, appID uint32, entry BacklogEntry) err
 			return fmt.Errorf("backlog tags must be nonblank UTF-8 strings up to %d characters", maxBacklogTagRunes)
 		}
 	}
-	entry.Tags = slices.Clone(entry.Tags)
+	return nil
+}
+
+func (s *BacklogStore) Set(steamID string, appID uint32, entry BacklogEntry) error {
+	if err := validateBacklogEntry(entry); err != nil {
+		return err
+	}
+	return s.edit(steamID, appID, func(BacklogEntry) (*BacklogEntry, error) { return &entry, nil })
+}
+
+// edit applies a partial change against the latest entry under the store's writer lock.
+// Returning a nil entry clears the annotation.
+func (s *BacklogStore) edit(steamID string, appID uint32, change func(BacklogEntry) (*BacklogEntry, error)) error {
+	key, err := backlogKey(steamID, appID)
+	if err != nil {
+		return err
+	}
 	return s.file.update(func(entries map[string]BacklogEntry) (bool, error) {
-		if _, exists := entries[key]; !exists && len(entries) >= maxBacklogEntries {
+		current, exists := entries[key]
+		next, err := change(current)
+		if err != nil {
+			return false, err
+		}
+		if next == nil {
+			delete(entries, key)
+			return exists, nil
+		}
+		if err := validateBacklogEntry(*next); err != nil {
+			return false, err
+		}
+		if !exists && len(entries) >= maxBacklogEntries {
 			return false, errors.New("Steam backlog store is full")
 		}
+		entry := *next
+		entry.Tags = slices.Clone(entry.Tags)
 		entries[key] = entry
 		return true, nil
 	})
@@ -548,15 +676,7 @@ func (s *BacklogStore) List(steamID string) (map[uint32]BacklogEntry, error) {
 }
 
 func (s *BacklogStore) Delete(steamID string, appID uint32) error {
-	key, err := backlogKey(steamID, appID)
-	if err != nil {
-		return err
-	}
-	return s.file.update(func(entries map[string]BacklogEntry) (bool, error) {
-		_, exists := entries[key]
-		delete(entries, key)
-		return exists, nil
-	})
+	return s.edit(steamID, appID, func(BacklogEntry) (*BacklogEntry, error) { return nil, nil })
 }
 
 // EventCursor identifies a successful delivery. Window can be a sale window or an update version.
@@ -565,10 +685,35 @@ type EventCursor struct {
 	SentAt time.Time
 }
 
-type EventCursorStore struct{ file *snapshotFile[time.Time] }
+type eventCursorRecord struct {
+	SentAt   time.Time           `json:"sent_at,omitzero"`
+	SeenAt   time.Time           `json:"seen_at,omitzero"`
+	Delivery *wishlistDelivery   `json:"delivery,omitempty"`
+	Wishlist *wishlistWatchState `json:"wishlist,omitempty"`
+}
+
+func (r *eventCursorRecord) UnmarshalJSON(raw []byte) error {
+	// Slice 4 stored only the delivery timestamp under each cursor key.
+	if len(raw) > 0 && raw[0] == '"' {
+		return json.Unmarshal(raw, &r.SentAt)
+	}
+	type record eventCursorRecord
+	return json.Unmarshal(raw, (*record)(r))
+}
+
+func (r eventCursorRecord) lastSeen() time.Time {
+	if r.SeenAt.After(r.SentAt) {
+		return r.SeenAt
+	}
+	return r.SentAt
+}
+
+type EventCursorStore struct {
+	file *snapshotFile[eventCursorRecord]
+}
 
 func NewEventCursorStore(dataDir string) *EventCursorStore {
-	return &EventCursorStore{newSnapshotFile[time.Time](dataDir, "events")}
+	return &EventCursorStore{newSnapshotFile[eventCursorRecord](dataDir, "events")}
 }
 
 func eventCursorKey(steamID, kind, dedupKey, window string) (string, error) {
@@ -592,9 +737,9 @@ func (s *EventCursorStore) Lookup(steamID, kind, dedupKey, window string, now ti
 	}
 	var cursor EventCursor
 	var seen bool
-	err = s.file.view(func(entries map[string]time.Time) {
-		if sentAt, ok := entries[key]; ok && now.Before(sentAt.Add(eventCursorTTL)) {
-			cursor, seen = EventCursor{Window: window, SentAt: sentAt}, true
+	err = s.file.view(func(entries map[string]eventCursorRecord) {
+		if record, ok := entries[key]; ok && now.Before(record.lastSeen().Add(eventCursorTTL)) {
+			cursor, seen = EventCursor{Window: window, SentAt: record.SentAt}, true
 		}
 	})
 	return cursor, seen, err
@@ -610,29 +755,35 @@ func (s *EventCursorStore) MarkSent(steamID, kind, dedupKey string, cursor Event
 	if !validSnapshotTime(at) {
 		return errors.New("Steam event cursor requires a sent timestamp")
 	}
-	return s.file.update(func(entries map[string]time.Time) (bool, error) {
+	return s.file.update(func(entries map[string]eventCursorRecord) (bool, error) {
 		changed := pruneEventCursors(entries, at)
-		if !at.After(entries[key]) {
+		record := entries[key]
+		if !at.After(record.SentAt) {
 			return changed, nil
 		}
-		entries[key] = at
-		trimOldest(entries, maxEventCursors, func(at time.Time) time.Time { return at })
+		record.SentAt = at
+		entries[key] = record
+		trimOldest(entries, maxEventCursors, eventCursorRecord.lastSeen)
 		return true, nil
 	})
 }
 
 // Prune removes deliveries whose deduplication TTL has elapsed.
 func (s *EventCursorStore) Prune(now time.Time) error {
-	return s.file.update(func(entries map[string]time.Time) (bool, error) {
+	return s.file.update(func(entries map[string]eventCursorRecord) (bool, error) {
 		return pruneEventCursors(entries, now), nil
 	})
 }
 
-func pruneEventCursors(entries map[string]time.Time, now time.Time) bool {
+func pruneEventCursors(entries map[string]eventCursorRecord, now time.Time) bool {
 	changed := false
-	for key, sentAt := range entries {
-		if !now.Before(sentAt.Add(eventCursorTTL)) {
+	for key, record := range entries {
+		if !now.Before(record.lastSeen().Add(eventCursorTTL)) {
 			delete(entries, key)
+			changed = true
+		} else if record.Delivery != nil && !now.Before(record.Delivery.Until) {
+			record.Delivery = nil
+			entries[key] = record
 			changed = true
 		}
 	}

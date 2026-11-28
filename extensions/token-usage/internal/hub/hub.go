@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	stdsync "sync"
 	"time"
@@ -178,6 +179,7 @@ func (c *Client) ReportPull(r PullReport) {
 	if c == nil {
 		return
 	}
+	r.Failed = slices.Clone(r.Failed)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.last = r
@@ -191,7 +193,9 @@ func (c *Client) LastPull() PullReport {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.last
+	out := c.last
+	out.Failed = slices.Clone(out.Failed)
+	return out
 }
 
 // New returns a client for the hub at base, authorised by token. call runs an extension method such as
@@ -207,6 +211,9 @@ func New(base, token string, call func(ctx context.Context, method string, out a
 
 // NewFromHub returns a client on the connection the hub gave the program and the token it granted.
 func NewFromHub(h *ext.Hub, base, token string) *Client {
+	if h == nil {
+		return New(base, token, nil)
+	}
 	return New(base, token, func(ctx context.Context, method string, out any) error {
 		return h.Call(ctx, method, map[string]any{}, out)
 	})
@@ -346,12 +353,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return &Error{Message: msgUnreachable, Detail: err.Error()}
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	const maxBody = 8 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return &Error{Status: resp.StatusCode, Message: msgCutOff, Detail: "read body: " + err.Error()}
 	}
 	if resp.StatusCode >= 300 {
 		return statusError(resp.StatusCode, clipBytes(strings.TrimSpace(string(raw)), 200))
+	}
+	if len(raw) > maxBody {
+		return &Error{Status: resp.StatusCode, Message: msgBadAnswer, Detail: "response too large (>8 MiB)"}
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {

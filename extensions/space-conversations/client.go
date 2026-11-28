@@ -114,6 +114,8 @@ func NewClient(base, token string) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), token: token, http: &http.Client{Timeout: 30 * time.Second}}
 }
 
+const maxResponseBytes = 2 << 20
+
 func (c *Client) call(ctx context.Context, method, path string, in, out any) error {
 	if c == nil || c.base == "" || c.token == "" {
 		return errors.New("空间对话：Hub 尚未提供访问凭据")
@@ -139,9 +141,12 @@ func (c *Client) call(ctx context.Context, method, path string, in, out any) err
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxResponseBytes {
+		return errors.New("空间对话：Hub 返回数据过大")
 	}
 	if resp.StatusCode >= 300 {
 		var e struct {

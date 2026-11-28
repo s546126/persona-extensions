@@ -644,7 +644,7 @@ func PageWith(st *store.State, sum *profile.Summary, extras []Extra, p Params) (
 	limit := min(max(p.Limit, 1), MaxLimit)
 	var all []item
 	var n Counts
-	stand := standingSet(st, extras, p.ResidentBytes)
+	stand := standingSet(st, extras, ClampResidentBytes(p.ResidentBytes))
 	for _, e := range st.Entries {
 		if !Pageable(st, e) || !idRe.MatchString(e.ID) || strings.TrimSpace(recall.Line(e)) == "" {
 			continue

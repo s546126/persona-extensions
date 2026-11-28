@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -54,10 +56,39 @@ const (
 
 // listing is a marketplace listing read so far (all plugins, or one search), for load more.
 type listing struct {
-	items []pluginDetail
-	token string
-	done  bool
-	at    time.Time
+	items      []pluginDetail
+	seenIDs    map[string]bool
+	seenTokens map[string]bool
+	token      string
+	done       bool
+	at         time.Time
+}
+
+const keyMost = 128
+
+func boundedKey(prefix, id string) string {
+	full := prefix + id
+	if id != "" && len(full) <= keyMost {
+		return full
+	}
+	sum := sha256.Sum256([]byte(full))
+	h := hex.EncodeToString(sum[:8])
+	avail := keyMost - len(prefix) - 1 - len(h)
+	if avail <= 0 {
+		return h
+	}
+	trim := id
+	if len(trim) > avail {
+		trim = trim[:avail]
+	}
+	return prefix + trim + ":" + h
+}
+
+func nonEmptyTitle(s, fallback string) string {
+	if l := label(s); l != "" {
+		return l
+	}
+	return fallback
 }
 
 func (a *App) pluginsPage() ext.Page {
@@ -86,7 +117,7 @@ func (a *App) pageAction(ctx context.Context, r *ext.UIRequest) (*wire.ActionRes
 	tx := a.uiText(r)
 	switch r.Action {
 	case "search":
-		st.Q, st.N = strings.TrimSpace(r.Values["q"]), 0
+		st.Q, st.N = short(strings.TrimSpace(r.Values["q"]), 200), 0
 	case "more":
 		st.N = min(max(st.N, pageRows)+pageRows, mostRows)
 	case "retry":
@@ -129,6 +160,7 @@ func (a *App) pageWrite(ctx context.Context, tx uiTexts, what, id string) (strin
 
 // view draws the page st is: signed out, a problem reading ChatGPT, or the page.
 func (a *App) view(ctx context.Context, r *ext.UIRequest, st uiState) *wire.View {
+	st.Q = short(strings.TrimSpace(st.Q), 200)
 	tx := a.uiText(r)
 	if _, err := a.access(ctx); err != nil {
 		return a.problemView(tx, st, err)
@@ -198,8 +230,14 @@ func (a *App) marketView(ctx context.Context, tx uiTexts, st uiState) (*wire.Vie
 	v := &wire.View{Title: tx.title, Search: &wire.Search{Placeholder: tx.search, Value: st.Q, Action: wire.Action{ID: "search"}}}
 	rows := func(ps []pluginDetail, prefix string, badges bool) []wire.Component {
 		out := []wire.Component{}
-		for _, p := range ps {
-			out = append(out, pluginRow(tx, p, badges && ids[p.ID], prefix))
+		seen := map[string]bool{}
+		for i, p := range ps {
+			k := boundedKey(prefix, p.ID)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, pluginRow(tx, p, badges && ids[p.ID], prefix, i))
 		}
 		return out
 	}
@@ -245,12 +283,17 @@ func (a *App) marketView(ctx context.Context, tx uiTexts, st uiState) (*wire.Vie
 			Icon: "link", Title: fmt.Sprintf(tx.appsRow, connected), Subtitle: strings.Join(detail, " · "),
 			Action: &wire.Action{ID: "apps", Push: &wire.Push{State: ext.EncodeState(uiState{Page: pageApps}), Title: tx.appsTitle}}}}})
 	}
-	v.Sections = append(v.Sections, wire.Section{Title: tx.market, Items: rows(list, "m:", true), More: moreRow})
+	marketItems := rows(list, "m:", true)
+	if len(marketItems) == 0 {
+		marketItems = []wire.Component{{Type: wire.ComponentEmpty, Key: "market-empty", Icon: "extension",
+			Title: tx.market, Detail: tx.noResultsDetail}}
+	}
+	v.Sections = append(v.Sections, wire.Section{Title: tx.market, Items: marketItems, More: moreRow})
 	return v, nil
 }
 
 // pluginRow is a plugin in a list: its name, developer and what it does; tapping opens its details.
-func pluginRow(tx uiTexts, p pluginDetail, installed bool, keyPrefix string) wire.Component {
+func pluginRow(tx uiTexts, p pluginDetail, installed bool, keyPrefix string, idx int) wire.Component {
 	sub := []string{}
 	if d := p.Release.Interface.DeveloperName; d != "" {
 		sub = append(sub, label(d))
@@ -258,9 +301,10 @@ func pluginRow(tx uiTexts, p pluginDetail, installed bool, keyPrefix string) wir
 	if d := oneLine(p.Release.Description); d != "" {
 		sub = append(sub, short(d, 120))
 	}
-	row := wire.Component{Type: wire.ComponentRow, Key: keyPrefix + p.ID, Title: label(p.title()), Subtitle: strings.Join(sub, " · "),
-		Avatar: &wire.Avatar{Text: initials(p.title())},
-		Action: &wire.Action{ID: "open", Push: &wire.Push{State: ext.EncodeState(uiState{Page: pagePlugin, ID: p.ID}), Title: label(p.title())}}}
+	title := nonEmptyTitle(p.title(), fmt.Sprintf("Plugin %d", idx+1))
+	row := wire.Component{Type: wire.ComponentRow, Key: boundedKey(keyPrefix, p.ID), Title: title, Subtitle: strings.Join(sub, " · "),
+		Avatar: &wire.Avatar{Text: initials(title)},
+		Action: &wire.Action{ID: "open", Push: &wire.Push{State: ext.EncodeState(uiState{Page: pagePlugin, ID: p.ID}), Title: title}}}
 	if installed {
 		row.Badge = &wire.Badge{Text: tx.installedBadge, Tone: wire.ToneNeutral}
 	}
@@ -284,7 +328,7 @@ func (a *App) market(ctx context.Context, q string, want int) ([]pluginDetail, b
 		if len(a.listings) >= mostListings {
 			clear(a.listings)
 		}
-		l = &listing{at: now}
+		l = &listing{at: now, seenIDs: map[string]bool{}, seenTokens: map[string]bool{}}
 		a.listings[q] = l
 	}
 	a.mu.Unlock()
@@ -307,10 +351,19 @@ func (a *App) market(ctx context.Context, q string, want int) ([]pluginDetail, b
 		}
 		for _, p := range res.Plugins {
 			a.remember(p)
+			if p.ID != "" {
+				if l.seenIDs[p.ID] {
+					continue
+				}
+				l.seenIDs[p.ID] = true
+			}
+			l.items = append(l.items, p)
 		}
-		l.items = append(l.items, res.Plugins...)
 		next := res.Pagination.NextPageToken
-		l.done = next == "" || next == l.token || len(res.Plugins) == 0
+		l.done = next == "" || next == l.token || l.seenTokens[next] || len(res.Plugins) == 0
+		if next != "" {
+			l.seenTokens[next] = true
+		}
 		l.token = next
 	}
 	n := min(want, len(l.items))
@@ -370,8 +423,8 @@ func (a *App) pluginView(ctx context.Context, tx uiTexts, st uiState) (*wire.Vie
 	if err != nil {
 		return nil, err
 	}
-	title := label(p.title())
-	head := wire.Component{Type: wire.ComponentRow, Key: "head", Title: title, Avatar: &wire.Avatar{Text: initials(p.title())},
+	title := nonEmptyTitle(p.title(), "Plugin")
+	head := wire.Component{Type: wire.ComponentRow, Key: "head", Title: title, Avatar: &wire.Avatar{Text: initials(title)},
 		Subtitle: label(p.Release.Interface.DeveloperName)}
 	if in {
 		head.Badge = &wire.Badge{Text: tx.installedBadge, Tone: wire.TonePositive}
@@ -389,15 +442,31 @@ func (a *App) pluginView(ctx context.Context, tx uiTexts, st uiState) (*wire.Vie
 	}
 	v := &wire.View{Title: title, Sections: []wire.Section{about}}
 
-	if len(apps) > 0 {
+	// Budget remaining items across apps and skills so the page stays within wire.ItemsMost (300).
+	// Reserve 1 for the install/uninstall button and 1 for a potential connect link.
+	budget := wire.ItemsMost - len(about.Items) - 2
+	if len(apps) > 0 && budget > 0 {
 		sec := wire.Section{Title: fmt.Sprintf(tx.pluginApps, len(apps))}
 		unconnected := false
-		for _, s := range apps {
+		seenApps := map[string]bool{}
+		appBudget := budget
+		if len(p.Release.Skills) > 0 && appBudget > 100 {
+			appBudget = min(appBudget, 140)
+		}
+		for i, s := range apps {
+			if len(sec.Items) >= appBudget {
+				break
+			}
+			k := boundedKey("app:", s.ID)
+			if seenApps[k] {
+				continue
+			}
+			seenApps[k] = true
 			name := s.Name
 			if name == "" {
 				name = s.ID
 			}
-			row := wire.Component{Type: wire.ComponentRow, Key: "app:" + s.ID, Icon: "link", Title: label(name)}
+			row := wire.Component{Type: wire.ComponentRow, Key: k, Icon: "link", Title: nonEmptyTitle(name, fmt.Sprintf("App %d", i+1))}
 			switch {
 			case s.State == "connected":
 				row.Subtitle = fmt.Sprintf(tx.connectedDetail, len(s.Tools))
@@ -413,15 +482,20 @@ func (a *App) pluginView(ctx context.Context, tx uiTexts, st uiState) (*wire.Vie
 		}
 		if unconnected {
 			sec.Footer = tx.connectFooter
-			sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentLink, Key: "connect", Title: tx.connectLink, URL: p.connectURL()})
+			if u := p.connectURL(); u != "" {
+				sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentLink, Key: "connect", Title: tx.connectLink, URL: u})
+			}
 		}
-		v.Sections = append(v.Sections, sec)
+		if len(sec.Items) > 0 {
+			budget -= len(sec.Items)
+			v.Sections = append(v.Sections, sec)
+		}
 	}
-	if len(p.Release.Skills) > 0 {
+	if len(p.Release.Skills) > 0 && budget > 0 {
 		sec := wire.Section{Title: fmt.Sprintf(tx.pluginSkills, len(p.Release.Skills))}
-		for i, s := range p.Release.Skills {
+		for i, s := range p.Release.Skills[:min(len(p.Release.Skills), budget)] {
 			sec.Items = append(sec.Items, wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("skill:%d", i), Icon: "doc",
-				Title: label(s.Name), Subtitle: short(oneLine(s.Description), 200)})
+				Title: nonEmptyTitle(s.Name, fmt.Sprintf("Skill %d", i+1)), Subtitle: short(oneLine(s.Description), 200)})
 		}
 		v.Sections = append(v.Sections, sec)
 	}
@@ -449,11 +523,16 @@ func (a *App) installedView(ctx context.Context, tx uiTexts, st uiState, uiVersi
 		return v, nil
 	}
 	sec := wire.Section{}
-	for _, p := range installed[:min(len(installed), mostRows)] {
-		row := pluginRow(tx, p, false, "i:")
+	seen := map[string]bool{}
+	for i, p := range installed[:min(len(installed), mostRows)] {
+		row := pluginRow(tx, p, false, "i:", i)
+		if seen[row.Key] {
+			continue
+		}
+		seen[row.Key] = true
 		if uiVersion >= 6 { // a swipe to uninstall: a shortcut for the details' button
 			row.Actions = []wire.RowAction{{Title: tx.uninstall, Role: wire.ButtonRoleDestructive, Swipe: true,
-				Action: wire.Action{ID: "uninstall", Confirm: fmt.Sprintf(tx.uninstallConfirm, label(p.title())), Values: map[string]string{"id": p.ID}}}}
+				Action: wire.Action{ID: "uninstall", Confirm: fmt.Sprintf(tx.uninstallConfirm, nonEmptyTitle(p.title(), "Plugin")), Values: map[string]string{"id": p.ID}}}}
 		}
 		sec.Items = append(sec.Items, row)
 	}
@@ -521,11 +600,18 @@ func (a *App) appsView(ctx context.Context, tx uiTexts, st uiState) (*wire.View,
 		return v, nil
 	}
 	sec := wire.Section{Footer: tx.appsFooter}
-	for _, s := range apps[:min(len(apps), mostRows)] {
-		row := wire.Component{Type: wire.ComponentRow, Key: "app:" + s.id, Avatar: &wire.Avatar{Text: initials(s.name)}, Title: label(s.name),
+	seen := map[string]bool{}
+	for i, s := range apps[:min(len(apps), mostRows)] {
+		k := boundedKey("app:", s.id)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		name := nonEmptyTitle(s.name, fmt.Sprintf("App %d", i+1))
+		row := wire.Component{Type: wire.ComponentRow, Key: k, Avatar: &wire.Avatar{Text: initials(name)}, Title: name,
 			Value:    fmt.Sprintf(tx.appTools, s.tools),
 			Subtitle: fmt.Sprintf(tx.appToolsDetail, s.readOnly, s.tools-s.readOnly),
-			Action:   &wire.Action{ID: "app", Push: &wire.Push{State: ext.EncodeState(uiState{Page: pageApp, ID: s.id}), Title: label(s.name)}}}
+			Action:   &wire.Action{ID: "app", Push: &wire.Push{State: ext.EncodeState(uiState{Page: pageApp, ID: s.id}), Title: name}}}
 		if s.synthetic { // its tools do not run yet: what to do, not a count
 			row.Value, row.Subtitle = "", tx.needsDetail
 			row.Badge = &wire.Badge{Text: tx.needsConnect, Tone: wire.ToneCaution}
@@ -546,7 +632,7 @@ func (a *App) appView(ctx context.Context, tx uiTexts, st uiState) (*wire.View, 
 		return a.appsView(ctx, tx, uiState{Page: pageApps})
 	}
 	s := apps[i]
-	v := &wire.View{Title: label(s.name)}
+	v := &wire.View{Title: nonEmptyTitle(s.name, "App")}
 	if s.synthetic {
 		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{{Type: wire.ComponentText, Key: "not-connected",
 			Style: wire.TextStyleSecondary, Text: tx.notConnectedApp}}})
@@ -560,7 +646,7 @@ func (a *App) appView(ctx context.Context, tx uiTexts, st uiState) (*wire.View, 
 	})
 	sec := wire.Section{Title: fmt.Sprintf(tx.appTools, len(tools)), Footer: tx.appsFooter}
 	for k, t := range tools[:min(len(tools), mostRows)] {
-		row := wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("tool:%d", k), Title: label(t.title()),
+		row := wire.Component{Type: wire.ComponentRow, Key: fmt.Sprintf("tool:%d", k), Title: nonEmptyTitle(t.title(), fmt.Sprintf("Tool %d", k+1)),
 			Subtitle: short(oneLine(t.Description), 160)}
 		if t.readOnly() {
 			row.Badge = &wire.Badge{Text: tx.readOnly, Tone: wire.ToneNeutral}

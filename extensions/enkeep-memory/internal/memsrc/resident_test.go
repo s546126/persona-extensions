@@ -517,3 +517,49 @@ func TestV04BlankUserColdStartThreeSections(t *testing.T) {
 		}
 	}
 }
+
+// Bug 4 regression: standing lines must never contain mid-word "…" truncation and must deduplicate redundant
+// exception suffixes that merely repeat the body.
+func TestFormatResidentLineNoEllipsisAndDedupException(t *testing.T) {
+	// 1. Long Chinese contract exceeding ContractTextMost trims at a complete sentence boundary without "…".
+	longBody := "在多步骤协作任务中，先对齐核心目标与边界条件，再按既定计划自主连续推进全部子任务。" +
+		"执行期间如果遇到非阻塞的小决策，直接按最优工程实践落地并记录依据，不在中途停下来反复请示。" +
+		"每完成一个阶段后用两句话汇报已验证的结果和下一步安排，附上真实命令输出或文件链接作为证据。" +
+		"若发现前置假设不成立或存在不可逆风险，立即停下说明现状和可选方案，等待用户拍板后再继续执行。"
+	suffix := "（例外：涉及线上变更或删数据时必须停下确认）"
+	line := FormatResidentLine(longBody, suffix, ContractTextMost)
+	if line == "" || len(line) > ContractTextMost {
+		t.Fatalf("expected non-empty line <= %dB, got len=%d: %q", ContractTextMost, len(line), line)
+	}
+	if strings.Contains(line, "…") {
+		t.Fatalf("standing line must never contain mid-word ellipsis truncation: %q", line)
+	}
+	if !strings.HasSuffix(line, suffix) {
+		t.Fatalf("expected exception suffix preserved after sentence-boundary trim: %q", line)
+	}
+
+	// 2. Redundant exception suffix overlapping body (Jaccard >= 0.45 or core phrase repeat) is omitted.
+	dupBody := "在需求或技术分析尚未完备时，助手只做现状梳理和问题拆解，不直接给出最终拍板结论。"
+	dupSuffix := "（例外：分析尚未完备时只做现状梳理，不直接给结论）"
+	dedup := FormatResidentLine(dupBody, dupSuffix, ContractTextMost)
+	if strings.Contains(dedup, "例外") {
+		t.Fatalf("redundant exception suffix should be omitted, got %q", dedup)
+	}
+
+	// 3. Unpunctuated over-budget line returns "" (skipped) rather than emitting "…".
+	unpunct := strings.Repeat("无标点超长连续中文契约内容测试", 20)
+	if got := FormatResidentLine(unpunct, "", ContractTextMost); got != "" {
+		t.Fatalf("unpunctuated over-budget line should be skipped cleanly, got %q", got)
+	}
+
+	// 4. End-to-end ResidentWithin produces 0 lines containing "…".
+	got := ResidentWithin([]Candidate{
+		{ID: "c1", Kind: entry.KindRules, Bucket: BucketContract, L1: true, Score: 100, Text: line},
+		{ID: "c2", Kind: entry.KindRules, Bucket: BucketContract, L1: true, Score: 90, Text: dedup},
+	}, 4096, 20)
+	for _, c := range got {
+		if strings.Contains(c.Text, "…") {
+			t.Fatalf("ResidentWithin emitted truncated line with ellipsis: %q", c.Text)
+		}
+	}
+}

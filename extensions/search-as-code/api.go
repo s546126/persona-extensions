@@ -322,6 +322,8 @@ type hubClient struct {
 	client      *http.Client
 }
 
+const maxHubMachinesBody = 4 << 20
+
 func (c *hubClient) Machines(ctx context.Context) ([]hubMachine, error) {
 	if c.base == "" || c.token == "" {
 		return nil, errors.New("no hub API")
@@ -336,7 +338,13 @@ func (c *hubClient) Machines(ctx context.Context) ([]hubMachine, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxHubMachinesBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("GET /api/v1/machines: read body: %w", err)
+	}
+	if len(raw) > maxHubMachinesBody {
+		return nil, fmt.Errorf("GET /api/v1/machines: response too large (>%d bytes)", maxHubMachinesBody)
+	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("GET /api/v1/machines: http %d", resp.StatusCode)
 	}

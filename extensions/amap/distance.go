@@ -122,7 +122,7 @@ func (a *app) toolDistance(ctx context.Context, in args) (string, error) {
 	case "straight":
 		ttl = geoFor
 	}
-	body, err := a.client.get(ctx, groupLBS, "/v3/distance", q, ttl)
+	body, err := a.currentClient().get(ctx, groupLBS, "/v3/distance", q, ttl)
 	if err != nil {
 		return "", err
 	}

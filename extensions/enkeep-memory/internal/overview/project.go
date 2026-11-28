@@ -480,72 +480,63 @@ func apply(p *Pattern, t tally) {
 
 // tags are the categories and the source space a pattern carries (v0.4.0 §1.6 Payload-First):
 //   - A pattern's own payload (Text/Situation/Choice/Exception) is checked via entry.PayloadCategories.
-//   - Work-methodology facets (interaction, tools, workflow, judgement) do NOT inherit OriginSpace confinement or
-//     conversation-topic sensitivity unless the pattern's own payload discloses personal privacy, OR >=50% of its
-//     top-level evidence entries carry explicit ByUser categories or payload-supported sensitivity.
-//   - Non-work facets (persona, world) preserve strict OriginSpace confinement and >=50% member sensitivity.
+//   - Only top-level evidence ids are inspected (never recursively walking 2 levels of e.Members), preventing a single
+//     sensitive child action under a broad Class from contaminating a universal L1 principle or profile_core.
+//   - Work-methodology facets (interaction, tools, workflow, judgement) and ops_runbook patterns inherit a category ONLY
+//     when >=50% of valid top-level ids carry an explicit ByUser label for that category, and NEVER inherit OriginSpace.
+//   - Non-work facets (persona, world) inherit a category ONLY when >=50% of valid top-level ids carry a ByUser label or
+//     their own PayloadCategories match for that category; OriginSpace is inherited ONLY when 100% of valid top-level
+//     ids share the same non-empty OriginSpace.
 func tags(st *store.State, p *Pattern, ids []string) (cats []string, space string) {
+	if p != nil && p.IsOpsRunbook() {
+		return nil, ""
+	}
 	addCat := func(c string) {
 		if c != "" && !slices.Contains(cats, c) {
 			cats = append(cats, c)
 		}
 	}
 	facet := entry.Facet("")
+	isOps := false
 	if p != nil {
 		facet = entry.Facet(p.Facet)
+		isOps = p.IsOpsRunbook()
 		for _, c := range entry.PayloadCategories(facet, p.Text, p.Situation, p.Choice, p.Exception) {
 			addCat(c)
 		}
 	}
-	workMethod := entry.IsWorkMethodFacet(facet)
+	workMethod := entry.IsWorkMethodFacet(facet) || isOps
 	catCounts := map[string]int{}
 	totalTop := 0
+	allSameSpace := true
+	commonSpace := ""
 	for _, rootID := range ids {
-		if st.Entries[rootID] == nil {
+		e := st.Entries[rootID]
+		if e == nil {
 			continue
 		}
 		totalTop++
-		var all []string
-		var walk func(id string, depth int)
-		walk = func(id string, depth int) {
-			e := st.Entries[id]
-			if e == nil || slices.Contains(all, id) {
-				return
+		if e.OriginSpace == "" {
+			allSameSpace = false
+		} else if commonSpace == "" {
+			commonSpace = e.OriginSpace
+		} else if e.OriginSpace != commonSpace {
+			allSameSpace = false
+		}
+		topCats := map[string]bool{}
+		for _, c := range e.Categories {
+			cn := entry.CategoryOf(c.Name)
+			if cn == "" || slices.Contains(e.CatsRemoved, cn) {
+				continue
 			}
-			all = append(all, id)
-			if depth < 2 {
-				for _, m := range e.Members {
-					if x := st.Entries[m]; x != nil && x.Live() {
-						walk(m, depth+1)
-					}
-				}
+			if c.By == entry.ByUser {
+				topCats[cn] = true
 			}
 		}
-		walk(rootID, 0)
-		topCats := map[string]bool{}
-		for _, id := range all {
-			e := st.Entries[id]
-			if !workMethod && space == "" && e.OriginSpace != "" {
-				space = e.OriginSpace
-			}
-			ownPayload := entry.PayloadCategories(e.Facet, e.PayloadTexts()...)
-			for _, c := range ownPayload {
+		if !workMethod {
+			for _, c := range entry.PayloadCategories(e.Facet, e.PayloadTexts()...) {
 				if !slices.Contains(e.CatsRemoved, c) {
 					topCats[c] = true
-				}
-			}
-			for _, c := range e.Categories {
-				cn := entry.CategoryOf(c.Name)
-				if cn == "" || slices.Contains(e.CatsRemoved, cn) {
-					continue
-				}
-				if c.By == entry.ByUser || !workMethod {
-					topCats[cn] = true
-				}
-			}
-			if !workMethod {
-				if cn := entry.CategoryOf(e.Sensitive); cn != "" && !slices.Contains(e.CatsRemoved, cn) {
-					topCats[cn] = true
 				}
 			}
 		}
@@ -559,14 +550,47 @@ func tags(st *store.State, p *Pattern, ids []string) (cats []string, space strin
 				addCat(c)
 			}
 		}
-	}
-	if !workMethod {
-		for _, c := range entry.SpaceDefaults(space) {
-			addCat(c)
+		if !workMethod && allSameSpace && commonSpace != "" {
+			space = commonSpace
+			for _, c := range entry.SpaceDefaults(space) {
+				addCat(c)
+			}
 		}
 	}
 	sort.Strings(cats)
 	return cats, space
+}
+
+// effectiveCategories are the categories a pattern still carries under today's Payload-First rules: a
+// work-methodology pattern (interaction, tools, workflow, judgement) or a contract keeps a stored category only while
+// tags still finds it on the pattern's own payload or its user-labelled evidence, so a label an older detector put on
+// a general working rule (bookkeeping by the user's own conventions read as personal finance) is not carried into the
+// profile's sensitive sections. Never adds a category; a persona or world pattern keeps what it has.
+func effectiveCategories(st *store.State, p *Pattern) []string {
+	if p == nil || len(p.Categories) == 0 {
+		return nil
+	}
+	if st == nil || (!entry.IsWorkMethodFacet(entry.Facet(p.Facet)) && !p.IsContract()) {
+		return slices.Clone(p.Categories)
+	}
+	ids := followMerges(st, p.EvidenceIDs)
+	live := liveIDs(st, ids)
+	if p.IsProfileCore() || p.IsOpsRunbook() || p.IsContract() {
+		// As recount: live user-owned evidence counts even when the pool filters it out.
+		for _, id := range ids {
+			if e := st.Entries[id]; e != nil && e.Live() && isUserOwned(e) && !slices.Contains(live, id) {
+				live = append(live, id)
+			}
+		}
+	}
+	now, _ := tags(st, p, append(live, liveIDs(st, followMerges(st, p.CounterIDs))...))
+	var out []string
+	for _, c := range p.Categories {
+		if slices.Contains(now, c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // subjects are the names that bring a pattern in: its evidence's (memsrc.Subjects), at most MaxSubjects.

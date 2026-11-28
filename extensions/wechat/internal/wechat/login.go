@@ -6,6 +6,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nwverse/persona-extensions/extensions/wechat/internal/wechat/ilink"
@@ -17,11 +18,30 @@ import (
 
 // pendingQR is the authorization under way; only in memory (a restart starts over with a new code).
 type pendingQR struct {
+	mu      sync.Mutex
 	qr      ilink.QR
 	base    string // where to poll: iLink may redirect a scanned code to another origin
 	started time.Time
 	renewed int
 	scanned bool
+}
+
+func (p *pendingQR) snapshot() (base string, started time.Time, renewed int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.base, p.started, p.renewed
+}
+
+func (p *pendingQR) setScanned() {
+	p.mu.Lock()
+	p.scanned = true
+	p.mu.Unlock()
+}
+
+func (p *pendingQR) setBase(base string) {
+	p.mu.Lock()
+	p.base = base
+	p.mu.Unlock()
 }
 
 const (
@@ -45,7 +65,13 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 	b.mu.Lock()
 	p := b.qr
 	b.mu.Unlock()
-	if step == "" || p == nil || b.opt.Now().Sub(p.started) > qrMaxAge {
+	var base string
+	var started time.Time
+	var renewed int
+	if p != nil {
+		base, started, renewed = p.snapshot()
+	}
+	if step == "" || p == nil || b.opt.Now().Sub(started) > qrMaxAge {
 		return b.beginQR(ctx)
 	}
 	code := ""
@@ -59,7 +85,7 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 	if err != nil {
 		return wire.ConnectorPrompt{}, err
 	}
-	st, err := c.PollQR(ctx, p.qr.Code, code, p.base, qrWait)
+	st, err := c.PollQR(ctx, p.qr.Code, code, base, qrWait)
 	if err != nil {
 		if ilink.Retryable(err) {
 			return p.prompt(b.lang()), nil // asked again in a moment
@@ -72,14 +98,10 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 	case ilink.QRWaiting:
 		return p.prompt(b.lang()), nil
 	case ilink.QRScanned:
-		b.mu.Lock()
-		p.scanned = true
-		b.mu.Unlock()
+		p.setScanned()
 		return p.prompt(b.lang()), nil
 	case ilink.QRRedirect:
-		b.mu.Lock()
-		p.base = st.RedirectBase
-		b.mu.Unlock()
+		p.setBase(st.RedirectBase)
 		return p.prompt(b.lang()), nil
 	case ilink.QRNeedCode:
 		if step == stepCode {
@@ -87,7 +109,7 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 		}
 		return codePrompt(b.lang(), ""), nil
 	case ilink.QRExpired:
-		if p.renewed >= 3 {
+		if renewed >= 3 {
 			b.forgetQR(p)
 			return wire.ConnectorPrompt{}, errors.New(t(b.lang(), "login.qr_expired_too_often"))
 		}
@@ -106,8 +128,11 @@ func (b *Bot) LoginStep(ctx context.Context, step string, values map[string]stri
 }
 
 func (p *pendingQR) prompt(l string) wire.ConnectorPrompt {
+	p.mu.Lock()
+	scanned := p.scanned
+	p.mu.Unlock()
 	hint := t(l, "login.scan_hint")
-	if p.scanned {
+	if scanned {
 		hint = t(l, "login.scanned_hint")
 	}
 	return wire.ConnectorPrompt{Step: stepQR, Kind: wire.ConnectorPromptKindQr, URL: p.qr.Content, Interval: qrInterval, Hint: hint}
@@ -119,6 +144,10 @@ func codePrompt(l string, errText string) wire.ConnectorPrompt {
 }
 
 func (b *Bot) beginQR(ctx context.Context) (wire.ConnectorPrompt, error) {
+	return b.beginQRWith(ctx, 0, b.opt.Now())
+}
+
+func (b *Bot) beginQRWith(ctx context.Context, renewed int, started time.Time) (wire.ConnectorPrompt, error) {
 	c, err := b.authClient()
 	if err != nil {
 		return wire.ConnectorPrompt{}, err
@@ -133,7 +162,7 @@ func (b *Bot) beginQR(ctx context.Context) (wire.ConnectorPrompt, error) {
 	if err != nil {
 		return wire.ConnectorPrompt{}, err
 	}
-	p := &pendingQR{qr: q, started: b.opt.Now()}
+	p := &pendingQR{qr: q, started: started, renewed: renewed}
 	b.mu.Lock()
 	b.qr = p
 	b.mu.Unlock()
@@ -141,17 +170,8 @@ func (b *Bot) beginQR(ctx context.Context) (wire.ConnectorPrompt, error) {
 }
 
 func (b *Bot) renewQR(ctx context.Context, old *pendingQR) (wire.ConnectorPrompt, error) {
-	pr, err := b.beginQR(ctx)
-	if err != nil {
-		return pr, err
-	}
-	b.mu.Lock()
-	if b.qr != nil {
-		b.qr.renewed = old.renewed + 1
-		b.qr.started = old.started
-	}
-	b.mu.Unlock()
-	return pr, nil
+	_, oldStarted, oldRenewed := old.snapshot()
+	return b.beginQRWith(ctx, oldRenewed+1, oldStarted)
 }
 
 func (b *Bot) forgetQR(p *pendingQR) {
@@ -176,6 +196,7 @@ func (b *Bot) bound(ctx context.Context, creds ilink.Credentials) wire.Connector
 		}
 	}
 	b.st.Creds = &creds
+	b.cancelPollLocked()
 	b.saveLocked(ctx)
 	b.status = wire.ConnectorStatus{State: wire.ConnectorStateOk, Account: account(b.lang(), &creds), Via: t(b.lang(), "wechat.via"), LastEvent: b.status.LastEvent}
 	b.mu.Unlock()
@@ -195,6 +216,7 @@ func (b *Bot) Logout(ctx context.Context) error {
 	b.mu.Lock()
 	c := b.client
 	b.qr = nil
+	b.cancelPollLocked()
 	b.mu.Unlock()
 	if c != nil {
 		stop, cancel := context.WithTimeout(ctx, 5*time.Second)

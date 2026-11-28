@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"os"
+	stdsync "sync"
 	"sync/atomic"
 	"time"
 
@@ -108,7 +109,11 @@ func (x *extension) current() (*ui.App, error) {
 func program() ext.Program {
 	var m struct{ ID, Version string }
 	_ = json.Unmarshal(manifest, &m)
-	var x extension
+	var (
+		x        extension
+		initMu   stdsync.Mutex
+		stopPrev context.CancelFunc
+	)
 	return ext.Program{
 		ID: m.ID, Version: m.Version, Manifest: manifest,
 		Init: func(ctx context.Context, in *ext.Init, h *ext.Hub) (map[string]any, error) {
@@ -121,8 +126,15 @@ func program() ext.Program {
 			env := ext.Env()
 			c := hub.NewFromHub(h, env.HubURL, env.HubToken)
 			a := ui.New(st, bf, c, time.Now, func() *time.Location { return loc })
+			runCtx, runCancel := context.WithCancel(ctx)
+			initMu.Lock()
+			if stopPrev != nil {
+				stopPrev()
+			}
+			stopPrev = runCancel
 			x.app.Store(a)
-			go sync.Loop(ctx, c, st, bf, loc, sync.Every)
+			initMu.Unlock()
+			go sync.Loop(runCtx, c, st, bf, loc, sync.Every)
 			return nil, nil
 		},
 		UI: map[string]ext.Page{

@@ -6,6 +6,8 @@ package page
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
@@ -87,7 +89,7 @@ func (p *Page) Action(_ context.Context, r *ext.UIRequest) (*wire.ActionResult, 
 // linkable says whether u can be a link component: the hub's view check (wire.CheckView) takes only an https URL
 // with a host and no user info, and refuses the whole page over one that is not.
 func linkable(u string) bool {
-	if len(u) > wire.StringMost {
+	if u == "" || utf8.RuneCountInString(u) > wire.StringMost || strings.ContainsAny(u, "\x00\r\n") {
 		return false
 	}
 	p, err := url.Parse(u)
@@ -167,7 +169,11 @@ func (p *Page) view(r *ext.UIRequest, s state) *wire.View {
 
 	act := wire.Section{Title: t.active}
 	for _, a := range d.Active {
-		row := wire.Component{Type: wire.ComponentRow, Key: "active:" + a.ID, Title: clip(name(a.Name, a.Username), 300), Value: fmt.Sprintf(t.postsN, a.Posts)}
+		key, ok := b.uniqueKey("active", a.ID)
+		if !ok {
+			continue
+		}
+		row := wire.Component{Type: wire.ComponentRow, Key: key, Title: clip(name(a.Name, a.Username), 300), Value: fmt.Sprintf(t.postsN, a.Posts)}
 		if validUsername(a.Username) {
 			row.Action = &wire.Action{ID: "profile:" + a.Username}
 		}
@@ -183,10 +189,33 @@ func (p *Page) view(r *ext.UIRequest, s state) *wire.View {
 }
 
 // builder keeps a view within componentsMost: what does not fit is left out (each section ends with what fits).
-type builder struct{ left int }
+type builder struct {
+	left     int
+	seenKeys map[string]bool
+}
 
 // reserve is what the sections after the digest's need (empty notes, the totals, the refresh button).
-const reserve = 8
+const (
+	reserve       = 8
+	maxGuideItems = 8
+)
+
+// uniqueKey returns a bounded (<= 100 bytes), deduplicated component key prefix for raw.
+func (b *builder) uniqueKey(prefix, raw string) (string, bool) {
+	key := prefix + ":" + raw
+	if len(key) > 100 || raw == "" {
+		sum := sha256.Sum256([]byte(raw))
+		key = prefix + ":" + hex.EncodeToString(sum[:8])
+	}
+	if b.seenKeys == nil {
+		b.seenKeys = map[string]bool{}
+	}
+	if b.seenKeys[key] {
+		return "", false
+	}
+	b.seenKeys[key] = true
+	return key, true
+}
 
 func (b *builder) add(items []wire.Component, c ...wire.Component) []wire.Component {
 	if b.left-len(c) < reserve {
@@ -198,12 +227,15 @@ func (b *builder) add(items []wire.Component, c ...wire.Component) []wire.Compon
 
 // post is one post as X asks it to be shown: "Name @username", the full text, its counts and when, the permalink.
 func (b *builder) post(section string, p x.Post, extra string, t text, loc *time.Location) []wire.Component {
+	key, ok := b.uniqueKey(section, p.ID)
+	if !ok {
+		return nil
+	}
 	sub := []string{fmt.Sprintf(t.counts, p.Likes, p.Reposts, p.Replies, p.Quotes), p.CreatedAt.In(loc).Format("01-02 15:04")}
 	if extra != "" {
 		sub = append(sub, extra)
 	}
-	key := section + ":" + p.ID
-	out := []wire.Component{{Type: wire.ComponentRow, Key: key, Title: clip(name(p.Name, p.Username), 300), Subtitle: strings.Join(sub, " · ")}}
+	out := []wire.Component{{Type: wire.ComponentRow, Key: key, Title: clip(name(p.Name, p.Username), 300), Subtitle: clip(strings.Join(sub, " · "), 600)}}
 	cs := chunks(p.Text, chunkMost)
 	cut := false
 	room := min(postChunksMost, b.left-reserve-len(out)-2) // the row, the link, maybe a note
@@ -216,7 +248,9 @@ func (b *builder) post(section string, p x.Post, extra string, t text, loc *time
 	if cut {
 		out = append(out, wire.Component{Type: wire.ComponentText, Key: key + ":more", Text: t.moreOnX, Style: wire.TextStyleCaption})
 	}
-	out = append(out, wire.Component{Type: wire.ComponentLink, Key: key + ":link", Title: t.openOnX, URL: p.Permalink()})
+	if link := p.Permalink(); linkable(link) {
+		out = append(out, wire.Component{Type: wire.ComponentLink, Key: key + ":link", Title: t.openOnX, URL: link})
+	}
 	if b.left-len(out) < reserve {
 		return nil
 	}
@@ -253,14 +287,19 @@ func (p *Page) header(r *ext.UIRequest, t text, o x.Overview, loc *time.Location
 	if o.FeedSource == x.FeedOff {
 		budget += " · " + t.feedOff
 	}
+	account := strings.TrimSpace(o.Status.Account)
+	if account == "" {
+		account = "-"
+	}
+	account = clip(account, 300)
 	var items []wire.Component
 	if r.UIVersion >= 2 {
 		items = []wire.Component{{Type: wire.ComponentStatGrid, Key: "header", Stats: []wire.Stat{
-			{Label: t.account, Value: o.Status.Account}, {Label: t.budget, Value: budget}, {Label: t.lastSync, Value: last},
+			{Label: t.account, Value: account}, {Label: t.budget, Value: budget}, {Label: t.lastSync, Value: last},
 			{Label: t.state, Value: state, Tone: tone}}}}
 	} else {
 		items = []wire.Component{
-			{Type: wire.ComponentRow, Key: "account", Title: t.account, Value: o.Status.Account},
+			{Type: wire.ComponentRow, Key: "account", Title: t.account, Value: account},
 			{Type: wire.ComponentRow, Key: "budget", Title: t.budget, Value: budget},
 			{Type: wire.ComponentRow, Key: "last", Title: t.lastSync, Value: last},
 			{Type: wire.ComponentRow, Key: "state", Title: t.state, Badge: &wire.Badge{Text: state, Tone: tone}},
@@ -269,6 +308,9 @@ func (p *Page) header(r *ext.UIRequest, t text, o x.Overview, loc *time.Location
 	if o.Status.Error != "" && o.Status.State != connector.StateOK {
 		items = append(items, wire.Component{Type: wire.ComponentText, Key: "error", Text: clip(o.Status.Error, chunkMost), Style: wire.TextStyleSecondary})
 		for i, g := range o.Status.Guide {
+			if i >= maxGuideItems {
+				break
+			}
 			items = append(items, wire.Component{Type: wire.ComponentText, Key: fmt.Sprintf("guide:%d", i), Text: clip(fmt.Sprintf("%d. %s", i+1, g), chunkMost), Style: wire.TextStyleCaption})
 		}
 	}
@@ -344,6 +386,9 @@ func chunks(s string, n int) []string {
 }
 
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}

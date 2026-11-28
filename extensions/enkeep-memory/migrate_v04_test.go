@@ -157,6 +157,13 @@ func TestMigrateV04Phase1DeterministicAndIdempotent(t *testing.T) {
 				ID: "i-ops-old", Facet: entry.Interaction, Grain: entry.Action,
 				Text: "在 sj-wsl 上运行 scripts/ci/fast.sh 跑门禁，不要在 Mac 上跑 go test", Origin: entry.Behavior, Status: entry.Stable, Last: "2026-09-01",
 			},
+			// 7b. Ops runbook carrying a non-user health tag -> cleared by Phase 1
+			"t-ops-sens": {
+				ID: "t-ops-sens", Facet: entry.Tools, Grain: entry.Action,
+				Text: "通过 run.sh 回补心率数据配额", Origin: entry.Behavior, Status: entry.Stable, Last: today,
+				OriginSpace: "health",
+				Categories:  []entry.Category{{Name: entry.CatHealth, By: entry.ByModel}},
+			},
 		},
 		Graph: &store.Graph{
 			Nodes: map[string]*store.Node{
@@ -210,6 +217,9 @@ func TestMigrateV04Phase1DeterministicAndIdempotent(t *testing.T) {
 	}
 	if st.Entries["i-ops-old"].MemoryClass != entry.ClassOpsRunbook || st.Entries["i-ops-old"].Status != entry.Dormant {
 		t.Fatalf("i-ops-old expected ops_runbook+dormant, got class=%s status=%s", st.Entries["i-ops-old"].MemoryClass, st.Entries["i-ops-old"].Status)
+	}
+	if st.Entries["t-ops-sens"].IsSensitive() || st.Entries["t-ops-sens"].OriginSpace != "" {
+		t.Fatalf("t-ops-sens ops_runbook must have non-user sensitivity cleared, cats=%v space=%q", st.Entries["t-ops-sens"].Cats(), st.Entries["t-ops-sens"].OriginSpace)
 	}
 	if rep1.Graph == nil || rep1.Graph.ArchivedTasks != 1 || rep1.Graph.ArchivedAbout != 1 || rep1.Graph.TotalMerged < 2 || rep1.Graph.DedupedCollabEdges != 1 {
 		t.Fatalf("unexpected graph report: %+v", rep1.Graph)
@@ -398,6 +408,19 @@ func TestReviewBundleGeneratesAll6ArtifactsAndColdstart(t *testing.T) {
 				Kinds:      []string{entry.SrcAssistant, entry.SrcAsk},
 				Evidence:   []entry.Evidence{{Source: entry.SrcAssistant, Ref: "chat/1", Day: today, Who: entry.WhoSelf, Quote: "先查原始证据再说"}},
 			},
+			"p-t1-prof": {
+				ID: "p-t1-prof", Facet: entry.Persona, Grain: entry.Action,
+				Text: "用户经常不在电脑前，交付物需要直接给出可读摘要", Origin: entry.Behavior, Status: entry.Stable,
+				First: "2026-11-01", Last: today, Count: 4,
+				Evidence: []entry.Evidence{{Source: entry.SrcAssistant, Ref: "chat/2", Day: today, Who: entry.WhoSelf, Quote: "我经常不在电脑前"}},
+			},
+			"j-t1-princ": {
+				ID: "j-t1-princ", Facet: entry.Judgement, Grain: entry.Class,
+				Text: "新方案先做小样本实证验证，再决定是否放大投入", Situation: "方案评估", Choice: "先小样本验证",
+				Origin: entry.Behavior, Status: entry.Stable, First: "2026-11-01", Last: today, Count: 5,
+				Leverage: &entry.Leverage{Reach: entry.ReachCrossProject, Horizon: entry.HorizonLasting, Principle: "先小样本实证再放大"},
+				Evidence: []entry.Evidence{{Source: entry.SrcAsk, Ref: "ask/1", Day: today, Who: entry.WhoSelf, Quote: "先小样本试试"}},
+			},
 			"s6-note": {
 				ID: "s6-note", Facet: entry.Interaction, Grain: entry.Action,
 				Text: "主助手反思笔记不应决定冷启动", Origin: entry.OriginAssistantNote, Status: entry.Stable,
@@ -468,6 +491,17 @@ func TestReviewBundleGeneratesAll6ArtifactsAndColdstart(t *testing.T) {
 			UniqueQuotes: 5,
 			ActiveWeeks:  []string{"2026-W46", "2026-W47"},
 		}
+		// A contract reclassified from judgement facet must still be classified into BucketContract via ov.Patterns["ov:"+hex].
+		s.Patterns["ov:c2"] = &overview.Pattern{
+			ID: "ov:c2", Facet: string(entry.Judgement), Kind: overview.KindContract,
+			Lifecycle: overview.Core, Polarity: overview.PolarityCommunicate,
+			Text:         "遇到不理解的问题时直接用大白话给建议，不抛选择题",
+			EvidenceIDs:  []string{"i-t1-1"},
+			ScenesCount:  3,
+			SourcesCount: 5,
+			UniqueQuotes: 4,
+			ActiveWeeks:  []string{"2026-W46", "2026-W47"},
+		}
 		s.Patterns["ov:ops1"] = &overview.Pattern{
 			ID: "ov:ops1", Facet: string(entry.Tools), Kind: overview.KindOpsRunbook,
 			Lifecycle:    overview.Core,
@@ -502,14 +536,14 @@ func TestReviewBundleGeneratesAll6ArtifactsAndColdstart(t *testing.T) {
 			t.Fatalf("missing or empty artifact %s: err=%v len=%d", f, err, len(b))
 		}
 	}
-	if sum.ResidentLines == 0 || sum.ResidentSensitiveHits != 0 || sum.ResidentOpsHits != 0 || sum.ResidentS6Hits != 0 {
+	if sum.ResidentLines == 0 || sum.ResidentSensitiveHits != 0 || sum.ResidentOpsHits != 0 || sum.ResidentS6Hits != 0 || sum.ResidentTruncatedLines != 0 {
 		t.Fatalf("unexpected resident summary: %+v", sum)
 	}
-	if sum.ResidentProfileLines == 0 || sum.ResidentPrincipleLines == 0 || sum.ResidentContractLines == 0 {
-		t.Fatalf("expected all three resident sections non-empty: profile=%d principle=%d contract=%d",
+	if sum.ResidentProfileLines != 1 || sum.ResidentPrincipleLines != 1 || sum.ResidentContractLines != 2 {
+		t.Fatalf("expected section classification profile=1 principle=1 contract=2 (including reclassified judgement->contract): profile=%d principle=%d contract=%d",
 			sum.ResidentProfileLines, sum.ResidentPrincipleLines, sum.ResidentContractLines)
 	}
-	if sum.ProfileCoreUsed != 1 || sum.PrinciplesUsed != 1 || sum.PrinciplesWithPoles != 1 || sum.ContractsUsed != 1 || sum.OpsRunbooksUsed != 1 {
+	if sum.ProfileCoreUsed != 1 || sum.PrinciplesUsed != 1 || sum.PrinciplesWithPoles != 1 || sum.ContractsUsed != 2 || sum.OpsRunbooksUsed != 1 {
 		t.Fatalf("unexpected L1 kind counts: %+v", sum)
 	}
 	if sum.GraphMerges != 1 || sum.GraphTasksArchived != 1 || sum.GraphAboutArchived != 1 {
@@ -522,8 +556,26 @@ func TestReviewBundleGeneratesAll6ArtifactsAndColdstart(t *testing.T) {
 		t.Fatalf("expected non-empty 3-section coldstart standing output, got %+v", sum)
 	}
 	coldRaw, _ := os.ReadFile(filepath.Join(outDir, "coldstart-v04.md"))
-	if !strings.Contains(string(coldRaw), "剔除全部 S6 笔记（共移除 1 条）") {
-		t.Fatalf("coldstart report missing S6 strip evidence:\n%s", coldRaw)
+	coldStr := string(coldRaw)
+	if !strings.Contains(coldStr, "0 S6 + 0 L1 纯行为冷启动仿真") || !strings.Contains(coldStr, "剔除全部 S6 笔记（共移除 1 条）") {
+		t.Fatalf("coldstart report missing 0-S6 + 0-L1 evidence:\n%s", coldStr)
+	}
+	if strings.Contains(coldStr, "`[ov:") {
+		t.Fatalf("0-L1 coldstart must not include any ov:* L1 pattern:\n%s", coldStr)
+	}
+
+	// Verify honest sensitive-section leak audit catches ops_runbook and work-method patterns across all 5 categories.
+	leakSum := &ReviewBundleSummary{}
+	leakProf := &profile.Summary{
+		Sensitive: []profile.SensitiveSection{
+			{Category: entry.CatHealth, Points: []profile.Point{{ID: "ov:runbook:rb1", Text: "在专用机上跑门禁"}}},
+			{Category: entry.CatEmotion, Points: []profile.Point{{ID: "ov:pattern:p1", Text: "执行语境直接推进到底"}}},
+			{Category: entry.CatFinance, Points: []profile.Point{{ID: "p-health-real", Text: "近期体检提示静息心率偏高"}}},
+		},
+	}
+	renderProfileV04(st, ovH.Snapshot(), leakProf, leakSum)
+	if leakSum.ProfileSensitiveWorkHits != 2 || leakSum.ProfileHealthWorkHits != 1 || leakSum.ProfileEmoWorkHits != 1 {
+		t.Fatalf("expected honest sensitive leak audit (total=2, health=1, emotion=1), got %+v", leakSum)
 	}
 }
 

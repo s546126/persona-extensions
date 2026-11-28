@@ -50,6 +50,7 @@ func (c *Connector) UseMachine(ctx context.Context, id, name string, fetch Token
 	c.scopes, c.scopesKnown = nil, false
 	c.status = statusWaiting("正在读取 " + name + " 上的 gh 登录…")
 	c.mu.Unlock()
+	c.resetAuthState()
 	c.kickCheck()
 }
 
@@ -63,6 +64,9 @@ func (c *Connector) UseDevice() {
 		c.status = statusWaiting(notSignedIn)
 	}
 	c.mu.Unlock()
+	if changed {
+		c.resetAuthState()
+	}
 	c.kickCheck()
 }
 

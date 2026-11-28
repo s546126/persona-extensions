@@ -162,11 +162,16 @@ func (c *Connector) startDevice(ctx context.Context) (connector.Prompt, error) {
 func (c *Connector) pollDevice(ctx context.Context) (connector.Prompt, error) {
 	c.mu.Lock()
 	p := c.pending
+	gen := c.authGen
+	var snap devicePending
+	if p != nil {
+		snap = *p
+	}
 	c.mu.Unlock()
 	if p == nil {
 		return c.startDevice(ctx)
 	}
-	if time.Now().After(p.expires) {
+	if time.Now().After(snap.expires) {
 		return c.restartDevice(ctx, "验证码过期了，换了一个新的")
 	}
 	var r struct {
@@ -174,7 +179,7 @@ func (c *Connector) pollDevice(ctx context.Context) (connector.Prompt, error) {
 		Error       string `json:"error"`
 		Interval    int    `json:"interval"`
 	}
-	err := c.postForm(ctx, "/login/oauth/access_token", url.Values{"client_id": {ghCLIClientID}, "device_code": {p.code},
+	err := c.postForm(ctx, "/login/oauth/access_token", url.Values{"client_id": {ghCLIClientID}, "device_code": {snap.code},
 		"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}}, &r)
 	if err != nil {
 		return connector.Prompt{}, err
@@ -182,12 +187,17 @@ func (c *Connector) pollDevice(ctx context.Context) (connector.Prompt, error) {
 	switch {
 	case r.AccessToken != "":
 	case r.Error == "authorization_pending":
-		return p.prompt(""), nil
+		return snap.prompt(""), nil
 	case r.Error == "slow_down":
 		c.mu.Lock()
-		p.interval = max(r.Interval, p.interval+5)
+		if c.pending == p && c.authGen == gen {
+			p.interval = max(r.Interval, p.interval+5)
+			snap = *p
+		} else {
+			snap.interval = max(r.Interval, snap.interval+5)
+		}
 		c.mu.Unlock()
-		return p.prompt(""), nil
+		return snap.prompt(""), nil
 	case r.Error == "expired_token":
 		return c.restartDevice(ctx, "验证码过期了，换了一个新的")
 	case r.Error == "access_denied":
@@ -195,10 +205,21 @@ func (c *Connector) pollDevice(ctx context.Context) (connector.Prompt, error) {
 	default:
 		return c.restartDevice(ctx, "GitHub 没有授权（"+r.Error+"）")
 	}
+	c.mu.Lock()
+	stillValid := c.pending == p && c.authGen == gen && c.source == SourceDevice
+	c.mu.Unlock()
+	if !stillValid {
+		return connector.Prompt{Step: "device", Error: "登录已取消"}, nil
+	}
 	if err := c.saveDevice(ctx, func(d *deviceLogin) { d.Token = r.AccessToken }); err != nil {
 		return connector.Prompt{}, err
 	}
 	c.mu.Lock()
+	if c.pending != p || c.authGen != gen || c.source != SourceDevice {
+		c.mu.Unlock()
+		_ = c.saveDevice(ctx, func(d *deviceLogin) { d.Token = "" })
+		return connector.Prompt{Step: "device", Error: "登录已取消"}, nil
+	}
 	c.token, c.pending = r.AccessToken, nil
 	c.mu.Unlock()
 	c.check(ctx)
@@ -223,6 +244,7 @@ func (c *Connector) Logout(ctx context.Context) error {
 	if err := c.forgetDevice(ctx); err != nil {
 		return err
 	}
+	c.resetAuthState()
 	c.check(ctx)
 	return nil
 }
@@ -254,7 +276,10 @@ func (c *Connector) postForm(ctx context.Context, path string, form url.Values, 
 		return errors.New(Scrub(err.Error()))
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return errors.New(Scrub(err.Error()))
+	}
 	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnauthorized {
 		return fmt.Errorf("GitHub %s: %d", path, resp.StatusCode)
 	}

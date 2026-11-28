@@ -156,9 +156,15 @@ func (a *App) postAuth(ctx context.Context, path, contentType string, body []byt
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+	if rerr != nil {
+		return rerr
+	}
 	if resp.StatusCode/100 != 2 {
 		return &httpError{Status: resp.StatusCode, Body: short(string(raw), 300)}
+	}
+	if len(raw) > 1<<20 {
+		return errors.New("the sign-in answer is too large")
 	}
 	return json.Unmarshal(raw, out)
 }
@@ -449,8 +455,10 @@ func (a *App) poll(ctx context.Context, l *deviceLogin) {
 		a.changed()
 	}
 	for {
+		timer := time.NewTimer(l.interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			a.mu.Lock()
 			current := a.login == l && !l.done
 			text := a.text
@@ -459,7 +467,7 @@ func (a *App) poll(ctx context.Context, l *deviceLogin) {
 				fail(text.authCodeExpired)
 			}
 			return
-		case <-time.After(l.interval):
+		case <-timer.C:
 		}
 		var got struct {
 			AuthorizationCode string `json:"authorization_code"`
@@ -570,9 +578,16 @@ func statusOnly(err error) string {
 }
 
 func short(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	s = strings.TrimSpace(s)
-	if len([]rune(s)) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return string([]rune(s)[:n]) + "…"
+	if n == 1 {
+		return "…"
+	}
+	return strings.TrimSpace(string(r[:n-1])) + "…"
 }

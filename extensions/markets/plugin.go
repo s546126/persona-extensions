@@ -49,16 +49,18 @@ const (
 // plugin is the running extension: the sources, the settings, the watchlist and how the last read went.
 type plugin struct {
 	logf func(string, ...any)
-	cfg  Config
-	loc  *time.Location // the configured time zone; nil: the app's
 	srcs sources
+
+	cfgMu sync.RWMutex
+	cfg   Config
+	loc   *time.Location // the configured time zone; nil: the app's
+	rules string         // the user's triage rules for the inbox (triage_rules)
 
 	wmu       sync.Mutex
 	watchPath string // "" before initialize, or when the hub gave no data directory: kept in memory only
 	watch     []Ref
 
 	alerts alerts
-	rules  string // the user's triage rules for the inbox (triage_rules)
 
 	mu        sync.Mutex
 	lastOK    time.Time
@@ -70,11 +72,18 @@ func newPlugin(logf func(string, ...any)) *plugin {
 	return &plugin{logf: logf, srcs: newSources()}
 }
 
+func (p *plugin) configSnap() (Config, *time.Location, string) {
+	p.cfgMu.RLock()
+	defer p.cfgMu.RUnlock()
+	return p.cfg, p.loc, p.rules
+}
+
 // tone is a change's tone: with 红涨绿跌 (the default) a rise is "danger" (red) and a fall "positive" (green); with
 // green_up the other way round.
 func (p *plugin) tone(c float64) string {
+	cfg, _, _ := p.configSnap()
 	up, down := "danger", "positive"
-	if p.cfg.Colors == "green_up" {
+	if cfg.Colors == "green_up" {
 		up, down = down, up
 	}
 	switch {
@@ -88,8 +97,9 @@ func (p *plugin) tone(c float64) string {
 
 // bar is the configured default bar when src has it, else src's nearest to 1H, else its first.
 func (p *plugin) bar(src Source) string {
+	cfg, _, _ := p.configSnap()
 	bs := src.Bars()
-	for _, b := range []string{p.cfg.Bar, "1H", "1D"} {
+	for _, b := range []string{cfg.Bar, "1H", "1D"} {
 		if slices.Contains(bs, b) {
 			return b
 		}
@@ -108,16 +118,20 @@ func (p *plugin) configure(ip pluginkit.InitParams) error {
 			return fmt.Errorf("config: %w", err)
 		}
 	}
-	p.loc = nil
+	var loc *time.Location
 	if cfg.TZ != "" {
 		l, err := time.LoadLocation(cfg.TZ)
 		if err != nil {
 			return fmt.Errorf("时区 %q 不认识", cfg.TZ)
 		}
-		p.loc = l
+		loc = l
 	}
+	rules := pluginkit.TriageRules(ip.Config)
+	p.cfgMu.Lock()
+	p.loc = loc
 	p.cfg = cfg
-	p.rules = pluginkit.TriageRules(ip.Config)
+	p.rules = rules
+	p.cfgMu.Unlock()
 	p.alerts.load(ip.Plugin.DataDir, p.logf)
 
 	seed := cfg.Watchlist
@@ -170,12 +184,11 @@ func (p *plugin) setWatch(fn func([]Ref) ([]Ref, string, error)) (string, error)
 		for i, r := range next {
 			refs[i] = r.String()
 		}
-		raw, _ := json.Marshal(refs)
-		tmp := p.watchPath + ".tmp"
-		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		raw, err := json.Marshal(refs)
+		if err != nil {
 			return "", fmt.Errorf("自选存不下：%w", err)
 		}
-		if err := os.Rename(tmp, p.watchPath); err != nil {
+		if err := writeAtomic(p.watchPath, raw); err != nil {
 			return "", fmt.Errorf("自选存不下：%w", err)
 		}
 	}
@@ -426,6 +439,18 @@ func (p *plugin) handlers() map[string]pluginkit.Handler {
 		}
 	}
 	return h
+}
+
+func writeAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }

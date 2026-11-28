@@ -4,7 +4,7 @@
 
 This extension (id `onepassword`) connects Persona to your 1Password vaults, either those you grant to a 1Password [service account](https://developer.1password.com/docs/service-accounts/) or those of the account the [1Password CLI](https://developer.1password.com/docs/cli/) (`op`) is signed in to on one of your computers. The assistant gets three read-only tools: the vaults it can read, item search by title, tag or website, and one item's fields with each field's `op://` [secret reference](https://developer.1password.com/docs/cli/secret-reference-syntax/). No tool returns a secret value, and the query tools never change your vaults. Phone-approved storage is a separate manager-owned flow, described below. It is also Persona's secret provider for `op://` references: when one of Persona's settings holds a reference, or you approve handing one to an Agent run, Persona's manager asks this extension for the value.
 
-This page describes version 0.4.1. When the manifest shown in the install preview disagrees with this page, the manifest wins.
+This page describes version 0.4.4. When the manifest shown in the install preview disagrees with this page, the manifest wins.
 
 | Extension point | Contribution | Behavior |
 | --- | --- | --- |
@@ -126,9 +126,9 @@ The page is drawn in English, Japanese and Simplified Chinese, following the app
 
 Since 0.3.1 the extension keeps 1Password's metadata in its own memory, for both connections (the service account and `op` on a computer):
 
-- **What**: the vault list, each vault's item overviews and each item's field structure, as the extension keeps them anyway: names, IDs, categories, tags, cleaned websites, field names, types, sections and `op://` references. Never a value, a note or a one-time code: those are dropped before anything is kept (on the computer, for `op`). A field or section name that held a value is kept scrubbed, beside a keyed hash of the original (the key is random and lives only in the process), so a reference that spells it out still finds it and its description never shows the value. Nothing is written to disk.
+- **What**: the vault list, each vault's item overviews and each item's field structure, as the extension keeps them anyway: names, IDs, categories, tags, cleaned websites, field names, types, sections and `op://` references. Never a value, a note or a one-time code: those are dropped before anything is kept (on the computer, for `op`). A field or section name that held a value is kept scrubbed, beside a keyed hash of the original (the key is random and kept with the metadata in the Hub-sealed record), so a reference that spells it out still finds it and its description never shows the value. Since 0.4.5 a bounded metadata snapshot (at most 512 KiB, up to 128 item lists and 128 item structures) is kept through the existing Hub-encrypted connector secret store; no plaintext metadata file is written. Oldest item entries are evicted first when the byte limit is reached; the vault list is retained if it fits. The record contains no field values, service-account token, CLI session or errors.
 - **For how long**: 5 minutes from when it was asked for. Within them, a describe, a search, a vault list or an item look answers from memory: describing a reference again, or another field of an item already read, makes no request. A vault, item or field named that a kept answer lacks is looked up again once when that answer is older than 30 seconds (it may have just been made). The connection page asks for the vault list afresh each time it is drawn.
-- **Emptied**: when the program starts, which the hub does whenever the token, the computer or a setting changes, or the extension is upgraded or switched on again; and by **Check again** on the connection page (except while the rate limit holds). A read that was under way when it was emptied keeps nothing it got.
+- **Restored and cleared**: a program or Hub restart restores the same source's sealed metadata and its original acquisition times before ordinary reads can run. Changing the selected computer or service-account token, **Check again** on the connection page (except while the rate limit holds), and a successful phone-approved write clear it. Corrupt or unsupported records are discarded. Reads already under way cannot refill a cleared cache; saves and clears are serialized. A Hub storage failure is reported without prompting the provider or replacing an unread record.
 - **Under the rate limit** (the 10 minutes after 1Password refused for it, ended early only by a request that succeeds, such as a resolve): reads answer from what is kept, however old, and ask 1Password nothing; one that finds nothing kept answers the limit at once. A refresh or a second look that 1Password refuses for the limit answers with what was kept, which stays. The connection page then shows the limit above the vaults it kept, never **Connected**.
 - **Never for values**: `secrets.resolve` asks 1Password every time. Persona's manager keeps a resolved model provider key for 10 minutes on its own side (Persona's `docs/extensions/secret-providers.md`, "Launcher keys"); the extension keeps none.
 
@@ -160,7 +160,8 @@ metadata and local field-file paths:
 For an update use `operation: "edit"`, stable vault/item IDs and fields, omitting category/title. Create categories:
 `LOGIN`, `PASSWORD`, `SECURE_NOTE`, `API_CREDENTIAL`, `SERVER`, `DATABASE`. Types: `STRING`, `CONCEALED` (default),
 `OTP` (one-time password: accepts a raw base32 secret, wrapped into `otpauth://totp/...`, or an `otpauth://` URI, and
-writes a native 1Password OTP field). On `LOGIN` items, `username` and `password` write to 1Password's built-in
+writes a native 1Password OTP field with a `TOTP_` field ID; converting a field to `OTP` gives it a new ID, so use
+the returned reference, and the write fails unless the saved field reads back as `OTP` with a live code). On `LOGIN` items, `username` and `password` write to 1Password's built-in
 `USERNAME`/`PASSWORD` fields instead of creating duplicate custom fields. On `edit`, a field may set `"delete": true`
 (without `type` or `file`) to remove an existing field, or omit `file` with an explicit `type` (such as `"OTP"`) to
 convert an existing field's type in place inside the resident node.
@@ -191,6 +192,24 @@ with `op whoami` after five minutes of inactivity and discards all output. It st
 its observed 12-hour window; it never changes lock settings or approves prompts. The App locking, a process restart,
 or an already older authorization can still require a new desktop approval. A lock may make one background refresh
 ask for authorization; failed refreshes are not retried until a foreground call succeeds.
+
+### Authorized once, never prompted on everyday asks
+
+Because the authorization lapses (above), an everyday ask that has an earlier answer to fall back on never runs an `op`
+command that could prompt (nwverse/persona#17636). Such an ask is *quiet*: the program on the computer first runs
+`op whoami`, which never prompts and answers the account only while the authorization holds, and when it does not it
+answers `locked` at once instead of showing a prompt nobody answers.
+
+- **Values**: Persona keeps a launcher's key and an extension's secret sealed once resolved and never asks again for
+  them; when it asks again for a value it may have changed (after a phone-approved write) it sends `quiet: true`, and
+  the extension answers `not_signed_in` at once while `op` is not authorized, so Persona keeps using the value it has.
+- **Words** (`secrets.describe`) are always quiet: they never prompt. While `op` is not authorized and nothing about the
+  item is kept here, the answer is `not_signed_in`, so Persona keeps no words made from the reference alone and shows
+  the reference; Persona keeps the words it got, sealed, so this happens at most until the first authorized look.
+- **Vault tools** (`onepassword_vaults`, search, item): with something kept, however old and also after a Hub restart, they ask quietly and answer
+  what was kept at once when `op` is not authorized, instead of waiting for a prompt until the tool times out.
+- Only an ask with nothing to fall back on (a first reference resolved, a vault or item never listed, the connection
+  page's Check again) may have the user authorize `op`: once, when something new is connected or a secret is rotated.
 
 The Mac setting is **1Password › Settings › Security › Auto-lock**, including **Lock after the device is idle for**;
 lock-on-sleep/screensaver/user-switch and administrator policies can also apply. These are distinct from CLI idle

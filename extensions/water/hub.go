@@ -116,7 +116,15 @@ func (h *hubClient) call(ctx context.Context, method, path string, in, out any) 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return statusError(resp.StatusCode)
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
+	const maxBody = 1 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > maxBody {
+		return errors.New("提醒服务返回内容过大 (response too large)")
+	}
+	return json.Unmarshal(raw, out)
 }
 func (h *hubClient) notify(ctx context.Context, n notice) (delivery, error) {
 	var d delivery

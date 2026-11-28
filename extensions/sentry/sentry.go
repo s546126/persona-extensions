@@ -27,7 +27,11 @@ type DSN struct {
 // trusted network): over plain http the public key and the reports travel unencrypted.
 func ParseDSN(s string, allowHTTP bool) (DSN, error) {
 	u, err := url.Parse(strings.TrimSpace(s))
-	if err != nil || u.Host == "" || u.User == nil || u.User.Username() == "" {
+	if err != nil || u.Host == "" || u.User == nil || u.User.Username() == "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return DSN{}, errors.New("the DSN is https://<public key>@<host>/<project id>")
+	}
+	pub := u.User.Username()
+	if hasInvalidKeyChars(pub) || hasControlChars(u.Host) || hasControlChars(u.Path) {
 		return DSN{}, errors.New("the DSN is https://<public key>@<host>/<project id>")
 	}
 	switch {
@@ -40,12 +44,35 @@ func ParseDSN(s string, allowHTTP bool) (DSN, error) {
 	}
 	path := strings.TrimSuffix(u.Path, "/")
 	i := strings.LastIndexByte(path, '/')
-	project := path[i+1:]
-	if _, err := strconv.ParseUint(project, 10, 64); err != nil {
+	if i < 0 {
 		return DSN{}, errors.New("the DSN ends with the project's number")
 	}
-	return DSN{Scheme: u.Scheme, Host: u.Host, Path: path[:i], PublicKey: u.User.Username(), Project: project}, nil
+	project := path[i+1:]
+	if id, err := strconv.ParseUint(project, 10, 64); err != nil || id == 0 {
+		return DSN{}, errors.New("the DSN ends with the project's number")
+	}
+	return DSN{Scheme: u.Scheme, Host: u.Host, Path: path[:i], PublicKey: pub, Project: project}, nil
 }
+
+func hasInvalidKeyChars(s string) bool {
+	for _, r := range s {
+		if r <= 0x20 || r == 0x7f || r == ',' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // EnvelopeURL is where events go.
 func (d DSN) EnvelopeURL() string {
@@ -198,6 +225,13 @@ func (e errLimited) Error() string { return "rate limited until " + e.until.Form
 
 // Send posts one envelope.
 func Send(ctx context.Context, c *http.Client, d DSN, client string, envelope []byte, now time.Time) error {
+	if c == nil {
+		c = &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirects}
+	} else if c.CheckRedirect == nil {
+		cl := *c
+		cl.CheckRedirect = noRedirects
+		c = &cl
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.EnvelopeURL(), bytes.NewReader(envelope))
 	if err != nil {
 		return err
@@ -219,6 +253,8 @@ func Send(ctx context.Context, c *http.Client, d DSN, client string, envelope []
 	return nil
 }
 
+const maxRetryAfterSecs = 24 * 60 * 60
+
 // limitedUntil reads Sentry's rate limits: X-Sentry-Rate-Limits ("60:error;transaction:key, …": the longest that
 // covers errors or every category), else Retry-After on a 429.
 func limitedUntil(resp *http.Response, now time.Time) (time.Time, bool) {
@@ -226,15 +262,16 @@ func limitedUntil(resp *http.Response, now time.Time) (time.Time, bool) {
 	if h := resp.Header.Get("X-Sentry-Rate-Limits"); h != "" {
 		for _, part := range strings.Split(h, ",") {
 			fields := strings.Split(strings.TrimSpace(part), ":")
-			secs, err := strconv.Atoi(fields[0])
-			if err != nil {
+			secs, err := strconv.Atoi(strings.TrimSpace(fields[0]))
+			if err != nil || secs <= 0 {
 				continue
 			}
+			secs = min(secs, maxRetryAfterSecs)
 			cats := ""
 			if len(fields) > 1 {
-				cats = fields[1]
+				cats = strings.TrimSpace(fields[1])
 			}
-			if cats == "" || strings.Contains(";"+cats+";", ";error;") || strings.Contains(";"+cats+";", ";default;") {
+			if rateLimitCoversErrors(cats) {
 				if t := now.Add(time.Duration(secs) * time.Second); t.After(until) {
 					until = t
 				}
@@ -245,11 +282,30 @@ func limitedUntil(resp *http.Response, now time.Time) (time.Time, bool) {
 		}
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		secs, err := strconv.Atoi(resp.Header.Get("Retry-After"))
-		if err != nil || secs <= 0 {
-			secs = 60
+		ra := strings.TrimSpace(resp.Header.Get("Retry-After"))
+		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+			return now.Add(time.Duration(min(secs, maxRetryAfterSecs)) * time.Second), true
 		}
-		return now.Add(time.Duration(secs) * time.Second), true
+		if t, err := http.ParseTime(ra); err == nil && t.After(now) {
+			if maxUntil := now.Add(maxRetryAfterSecs * time.Second); t.After(maxUntil) {
+				t = maxUntil
+			}
+			return t, true
+		}
+		return now.Add(60 * time.Second), true
 	}
 	return time.Time{}, false
+}
+
+func rateLimitCoversErrors(cats string) bool {
+	if cats == "" {
+		return true
+	}
+	for _, c := range strings.Split(cats, ";") {
+		switch strings.ToLower(strings.TrimSpace(c)) {
+		case "error", "default":
+			return true
+		}
+	}
+	return false
 }

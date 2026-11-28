@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -74,6 +75,21 @@ type Bot struct {
 	hubErrorTold map[string]bool
 	// unreadable: the sealed state did not read; nothing is saved over it until the user binds again or signs out.
 	unreadable bool
+	// sessionGen increments whenever credentials change or logout runs so stale Stream frames and in-flight handlers
+	// cannot resurrect deleted state or leak into a new binding.
+	sessionGen uint64
+}
+
+// sendScope identifies the current credential generation and paired owner so sentRefs dedup does not leak across
+// logout or re-pairing.
+func (b *Bot) sendScope() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	staff := ""
+	if b.st.Owner != nil {
+		staff = b.st.Owner.StaffID
+	}
+	return fmt.Sprintf("%d:%s", b.sessionGen, staff)
 }
 
 // state is what is kept in the hub (sealed): never logged.
@@ -95,6 +111,7 @@ type owner struct {
 // queued is a message the Stream took, waiting for its turn.
 type queued struct {
 	c    *api.Client
+	gen  uint64
 	m    api.Message
 	done func() // answers its Stream frame
 }
@@ -234,7 +251,7 @@ func (b *Bot) Run(ctx context.Context) {
 	go b.work(ctx)
 	for ctx.Err() == nil {
 		b.mu.Lock()
-		id, secret := b.st.ClientID, b.st.ClientSecret
+		id, secret, gen := b.st.ClientID, b.st.ClientSecret, b.sessionGen
 		b.mu.Unlock()
 		if id == "" {
 			select {
@@ -244,19 +261,19 @@ func (b *Bot) Run(ctx context.Context) {
 			}
 			continue
 		}
-		b.serve(ctx, id, secret)
+		b.serve(ctx, id, secret, gen)
 	}
 }
 
 var backoff = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute}
 
 // serve keeps a Stream connection for the credentials until they change or ctx ends.
-func (b *Bot) serve(parent context.Context, id, secret string) {
+func (b *Bot) serve(parent context.Context, id, secret string, gen uint64) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	c, err := b.opt.NewClient(id, secret)
 	b.mu.Lock()
-	if b.st.ClientID != id || b.st.ClientSecret != secret {
+	if b.sessionGen != gen || b.st.ClientID != id || b.st.ClientSecret != secret {
 		b.mu.Unlock()
 		b.kick() // the credentials changed under it: Run starts over with the new ones
 		return
@@ -273,6 +290,9 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 		if b.client == c {
 			b.client, b.live = nil, false
 		}
+		if b.sessionGen == gen {
+			b.restart = nil
+		}
 		b.mu.Unlock()
 	}()
 	if err != nil {
@@ -283,12 +303,16 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 	for ctx.Err() == nil {
 		err := c.Stream(ctx, []string{api.BotTopic}, func() {
 			b.mu.Lock()
-			b.live, b.problem = true, ""
+			if b.sessionGen == gen {
+				b.live, b.problem = true, ""
+			}
 			b.mu.Unlock()
 			failures = 0
-		}, func(_ context.Context, f api.Frame, done func()) { b.take(c, f, done) })
+		}, func(_ context.Context, f api.Frame, done func()) { b.take(c, gen, f, done) })
 		b.mu.Lock()
-		b.live = false
+		if b.sessionGen == gen {
+			b.live = false
+		}
 		b.mu.Unlock()
 		if ctx.Err() != nil {
 			return
@@ -301,7 +325,9 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 			key = "dingtalk.refused"
 		}
 		b.mu.Lock()
-		b.problem = t(b.lang(), key, "error", err.Error())
+		if b.sessionGen == gen {
+			b.problem = t(b.lang(), key, "error", err.Error())
+		}
 		b.mu.Unlock()
 		wait := backoff[min(failures, len(backoff)-1)]
 		failures++
@@ -313,14 +339,14 @@ func (b *Bot) serve(parent context.Context, id, secret string) {
 
 // take queues a message the Stream brought; one that does not fit in the queue is left unanswered, so DingTalk
 // delivers it again.
-func (b *Bot) take(c *api.Client, f api.Frame, done func()) {
+func (b *Bot) take(c *api.Client, gen uint64, f api.Frame, done func()) {
 	var m api.Message
 	if err := json.Unmarshal([]byte(f.Data), &m); err != nil || m.ID == "" {
 		done() // nothing it can read: answered, so it is not delivered again
 		return
 	}
 	select {
-	case b.queue <- queued{c: c, m: m, done: done}:
+	case b.queue <- queued{c: c, gen: gen, m: m, done: done}:
 	default:
 	}
 }
@@ -333,7 +359,7 @@ func (b *Bot) work(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case q := <-b.queue:
-			if b.handle(ctx, q.c, q.m) {
+			if b.handle(ctx, q.c, q.gen, q.m) {
 				q.done()
 			}
 		}

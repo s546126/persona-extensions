@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/nwverse/persona/sdk/go/ext"
 )
@@ -18,6 +19,7 @@ type Config struct {
 
 // app is the running extension: the settings, and the hub address they resolve to.
 type app struct {
+	mu     sync.RWMutex
 	cfg    Config
 	hubURL string // the hub's public address ("" until the user sets it)
 }
@@ -30,26 +32,38 @@ func (a *app) init(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any,
 	if err := in.Config(&cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
+	a.mu.Lock()
 	a.cfg = cfg
 	a.hubURL = strings.TrimSpace(cfg.HubURL)
+	a.mu.Unlock()
 	return nil, nil
+}
+
+func (a *app) snapshot() (hubURL, defaultPath string) {
+	a.mu.RLock()
+	hubURL = a.hubURL
+	p := strings.TrimSpace(a.cfg.Path)
+	a.mu.RUnlock()
+	if p == "" {
+		p = "/"
+	}
+	return hubURL, p
 }
 
 // defaultPath is the path the page opens with: the setting, or the site root.
 func (a *app) defaultPath() string {
-	if p := strings.TrimSpace(a.cfg.Path); p != "" {
-		return p
-	}
-	return "/"
+	_, p := a.snapshot()
+	return p
 }
 
 // status answers connector.status from memory: the address is set or not, and whether it can be one.
 func (a *app) status() map[string]any {
-	if a.hubURL == "" {
+	hubURL, _ := a.snapshot()
+	if hubURL == "" {
 		return map[string]any{"state": "not_configured", "error": "还没有 hub 的对外地址",
 			"guide": []string{"在这个扩展的设置里填「hub 对外地址」（飞书内置浏览器能访问到的地址）"}}
 	}
-	if _, err := normalizeBase(a.hubURL); err != nil {
+	if _, err := normalizeBase(hubURL); err != nil {
 		return map[string]any{"state": "error", "error": err.Error(),
 			"guide": []string{"在扩展设置里把「hub 对外地址」改成 http(s) 地址"}}
 	}

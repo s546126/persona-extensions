@@ -349,3 +349,208 @@ func TestReconcileTensionMergeAndOpsDiversion(t *testing.T) {
 		t.Fatalf("unexpected reconcile counts: %+v", run.Counts)
 	}
 }
+
+// Bug 2 regression: tags() never recursively walks child Members and never lets a single OriginSpace entry
+// contaminate a 10-scene universal principle (judgement or persona); ops_runbook never carries Categories into
+// profile:cat:* sensitive sections.
+func TestTagsNoChildOrSingleSpaceContagionAndOpsNotSensitive(t *testing.T) {
+	healthChild := &entry.Entry{
+		ID: "child-health", Facet: entry.Persona, Grain: entry.Action,
+		Text: "体检血糖偏高需要复查", Status: entry.Stable, Origin: entry.Behavior,
+		OriginSpace: "health",
+		Categories:  []entry.Category{{Name: entry.CatHealth, By: entry.BySpaceDefault}},
+	}
+	entries := []*entry.Entry{healthChild}
+	var ids []string
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("cls-%02d", i)
+		e := &entry.Entry{
+			ID: id, Facet: entry.Judgement, Grain: entry.Class,
+			Text:   fmt.Sprintf("跨场景原则样本 %02d：先抽小样本实证再决定放大投入", i),
+			Status: entry.Stable, Origin: entry.Behavior,
+			First: "2026-10-01", Last: "2026-11-20", Count: 3,
+		}
+		if i == 0 {
+			e.Members = []string{"child-health"}
+		}
+		if i == 1 {
+			e.OriginSpace = "health"
+			e.Categories = []entry.Category{{Name: entry.CatHealth, By: entry.BySpaceDefault}}
+		}
+		entries = append(entries, e)
+		ids = append(ids, id)
+	}
+	st := state(entries...)
+
+	// 10-scene judgement principle must remain completely clean.
+	pj := &Pattern{ID: "ov:j10", Facet: string(entry.Judgement), Kind: KindPrinciple, Text: "先抽小样本实证再决定是否放大投入", EvidenceIDs: ids}
+	if cats, space := tags(st, pj, ids); len(cats) != 0 || space != "" {
+		t.Fatalf("judgement 10-scene principle contaminated: cats=%v space=%q", cats, space)
+	}
+
+	// 10-scene persona principle with 1 health child + 1 health-space top entry (1/10 < 100%, < 50%) must remain clean.
+	pp := &Pattern{ID: "ov:p10", Facet: string(entry.Persona), Kind: KindPrinciple, Text: "长程系统习惯自己搭底座再逐步演进", EvidenceIDs: ids}
+	if cats, space := tags(st, pp, ids); len(cats) != 0 || space != "" {
+		t.Fatalf("persona 10-scene principle contaminated: cats=%v space=%q", cats, space)
+	}
+
+	// KindOpsRunbook must always return cats=nil, space="" from tags() regardless of text or member tags.
+	pOps := &Pattern{ID: "ov:ops-clean", Facet: string(entry.Tools), Kind: KindOpsRunbook, Text: "运行心率回补脚本 run.sh", EvidenceIDs: ids}
+	if cats, space := tags(st, pOps, ids); len(cats) != 0 || space != "" {
+		t.Fatalf("ops_runbook tags() must return nil, \"\", got cats=%v space=%q", cats, space)
+	}
+
+	// OverviewBackedProvider.Items must strip Categories/OriginSpace from KindOpsRunbook so it never enters profile:cat:*.
+	s := newState()
+	s.Patterns["ov:rb1"] = &Pattern{
+		ID: "ov:rb1", Facet: string(entry.Tools), Kind: KindOpsRunbook, Lifecycle: Core,
+		Text: "在专用门禁机上运行 fast 测试", Categories: []string{entry.CatHealth}, OriginSpace: "health",
+		ScenesCount: 2, SourcesCount: 3, ActiveWeeks: []string{"2026-W46", "2026-W47"},
+	}
+	items := OverviewBackedProvider{Snapshot: func() *State { return s }}.Items(st)
+	found := false
+	for _, it := range items {
+		if it.ID == "ov:rb1" {
+			found = true
+			if len(it.Categories) != 0 || it.OriginSpace != "" {
+				t.Fatalf("ops_runbook must not carry Categories/OriginSpace into profile: %+v", it)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected ov:rb1 in OverviewBackedProvider.Items")
+	}
+}
+
+// Bug 3 regression: 6 profile_core proposals (2 identity, 2 constraint, 2 boundary) must hash to 6 distinct IDs and all survive.
+func TestSyncProfileCoreSixDistinctIDs(t *testing.T) {
+	var all []*entry.Entry
+	for i := 0; i < 6; i++ {
+		all = append(all, &entry.Entry{
+			ID: fmt.Sprintf("pc-src-%d", i), Facet: entry.Persona, Grain: entry.Action, Type: "self",
+			Text:   fmt.Sprintf("用户画像事实来源条目 %d", i),
+			Status: entry.Stable, Origin: entry.SelfReport, Tagged: true,
+			First: "2026-11-01", Last: "2026-11-20", Updated: "2026-11-20T00:00:00Z", Count: 2,
+			Evidence: []entry.Evidence{{Source: entry.SrcAbout, Ref: fmt.Sprintf("about/%d", i), Day: "2026-11-10", Who: entry.WhoSelf, Quote: fmt.Sprintf("原话 %d", i)}},
+		})
+	}
+	st := state(all...)
+	m := &funcModel{fn: func(r model.Request) (any, error) {
+		var in profileCoreInput
+		_ = json.Unmarshal([]byte(r.User), &in)
+		return profileCoreOutput{Items: []profileCoreProposal{
+			{Kind: "identity", Text: "用户目前主导跨团队技术产品演进与系统架构落地。", Members: []string{in.Items[0].ID}, Reason: "id1"},
+			{Kind: "identity", Text: "用户长期在多时区协作环境下推进核心研发项目。", Members: []string{in.Items[1].ID}, Reason: "id2"},
+			{Kind: "constraint", Text: "用户经常不在电脑前，交付物需要直接给出可读摘要。", Members: []string{in.Items[2].ID}, Reason: "c1"},
+			{Kind: "constraint", Text: "用户注意力与决策容量宝贵，沟通必须先结论后细节。", Members: []string{in.Items[3].ID}, Reason: "c2"},
+			{Kind: "boundary", Text: "不要把用户关注组织管理方法论等同于已经是全职管理者。", Members: []string{in.Items[4].ID}, Reason: "b1"},
+			{Kind: "boundary", Text: "不要把用户的理性拆解风格等同于冷漠或否定合作关系。", Members: []string{in.Items[5].ID}, Reason: "b2"},
+		}}, nil
+	}}
+
+	s := newState()
+	run := &Run{Counts: map[string]int{}}
+	ids, err := runner(m).SyncProfileCore(context.Background(), st, s, run, "", stamp(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 6 {
+		t.Fatalf("expected 6 distinct profile_core IDs, got %d: %v", len(ids), ids)
+	}
+	stored := 0
+	for _, p := range s.Patterns {
+		if p.IsProfileCore() && p.Used() {
+			stored++
+		}
+	}
+	if stored != 6 {
+		t.Fatalf("expected 6 stored profile_core patterns without hash collision, got %d", stored)
+	}
+}
+
+// Bug 5 regression: Reconcile supports upgrading a single principle with built-in tension into Poles (empty merge)
+// and resolving cross-kind principle + contract tensions.
+func TestReconcileSinglePrincipleUpgradeAndCrossKindTension(t *testing.T) {
+	e1 := action("t1", entry.Judgement, "alpha", entry.SrcAssistant, "2026-11-02", "single tension quote 1")
+	e2 := action("t2", entry.Judgement, "beta", entry.SrcAsk, "2026-11-12", "single tension quote 2")
+	e3 := action("t3", entry.Judgement, "gamma", entry.SrcChat, "2026-11-19", "single tension quote 3")
+	e4 := action("t4", entry.Judgement, "alpha", entry.SrcAssistant, "2026-11-03", "cross principle quote 1")
+	e5 := action("t5", entry.Judgement, "beta", entry.SrcAsk, "2026-11-14", "cross principle quote 2")
+	e6 := action("t6", entry.Judgement, "gamma", entry.SrcChat, "2026-11-21", "cross principle quote 3")
+	e7 := action("t7", entry.Interaction, "delta", entry.SrcAssistant, "2026-11-15", "cross contract quote")
+	st := state(e1, e2, e3, e4, e5, e6, e7)
+
+	s := newState()
+	s.Patterns["ov:single"] = &Pattern{
+		ID: "ov:single", Facet: string(entry.Judgement), Kind: KindPrinciple, Lifecycle: Core,
+		Text:            "单次交付优先收窄核心范围，除非根因分散必须整体设计",
+		Exception:       "反复偏离或散点根因时推倒重做整体设计",
+		DefaultContrast: "每次都全量重构",
+		EvidenceIDs:     []string{"t1", "t2", "t3"}, ScenesCount: 3, SourcesCount: 3, UniqueQuotes: 3, ActiveWeeks: []string{"2026-W45", "2026-W46", "2026-W47"},
+	}
+	s.Patterns["ov:princ"] = &Pattern{
+		ID: "ov:princ", Facet: string(entry.Judgement), Kind: KindPrinciple, Lifecycle: Core,
+		Text:            "方向已定时自主连续推进到底",
+		DefaultContrast: "每步请示",
+		EvidenceIDs:     []string{"t4", "t5", "t6"}, ScenesCount: 3, SourcesCount: 3, UniqueQuotes: 3, ActiveWeeks: []string{"2026-W45", "2026-W46", "2026-W47"},
+	}
+	s.Patterns["ov:cont"] = &Pattern{
+		ID: "ov:cont", Facet: string(entry.Interaction), Kind: KindContract, Lifecycle: Core, Polarity: PolarityCheck,
+		Text:        "方案未定前先出大纲与用户对齐再动手",
+		EvidenceIDs: []string{"t7"}, ScenesCount: 2, SourcesCount: 2, UniqueQuotes: 2, ActiveWeeks: []string{"2026-W46", "2026-W47"},
+	}
+
+	m := &funcModel{fn: func(r model.Request) (any, error) {
+		var in reconcileInput
+		_ = json.Unmarshal([]byte(r.User), &in)
+		idBySub := func(sub string) string {
+			for _, p := range in.Patterns {
+				if strings.Contains(p.Text, sub) {
+					return p.ID
+				}
+			}
+			return ""
+		}
+		return reconcileOutput{
+			Tensions: []reconcileTension{
+				{
+					Keep:  idBySub("收窄核心范围"),
+					Merge: []string{},
+					Text:  "按问题性质切换交付尺度：单次局部任务收窄核心，散点根因整体设计。",
+					Poles: []Pole{
+						{When: "单次局部交付时", Choice: "收窄到最小核心闭环"},
+						{When: "反复偏离或根因分散时", Choice: "从底座整体重新设计"},
+					},
+					Reason: "upgrade single principle into structured poles",
+				},
+				{
+					Keep:  idBySub("自主连续推进到底"),
+					Merge: []string{idBySub("先出大纲与用户对齐")},
+					Text:  "按方案确定度分流推进方式：未定先对齐，已定自主推进到底。",
+					Poles: []Pole{
+						{When: "方案或方向未定时", Choice: "先出方案大纲对齐再动手"},
+						{When: "方向已定且授权明确时", Choice: "自主连续推进直到交付"},
+					},
+					Reason: "cross-kind principle+contract tension",
+				},
+			},
+		}, nil
+	}}
+
+	run := &Run{Counts: map[string]int{}}
+	if _, err := runner(m).Reconcile(context.Background(), st, s, run, "", stamp(now)); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Patterns["ov:single"].Poles) != 2 || s.Patterns["ov:single"].Exception != "" || s.Patterns["ov:single"].Lifecycle != Scoped {
+		t.Fatalf("single principle upgrade failed: %+v", s.Patterns["ov:single"])
+	}
+	if s.Patterns["ov:cont"].Lifecycle != Retired {
+		t.Fatalf("absorbed cross-kind contract must be Retired: %+v", s.Patterns["ov:cont"])
+	}
+	if !s.Patterns["ov:princ"].IsPrinciple() || len(s.Patterns["ov:princ"].Poles) != 2 || s.Patterns["ov:princ"].Lifecycle != Scoped {
+		t.Fatalf("cross-kind tension keep principle failed: %+v", s.Patterns["ov:princ"])
+	}
+	if run.Counts["reconcile_tensions"] != 2 {
+		t.Fatalf("reconcile_tensions = %d, want 2", run.Counts["reconcile_tensions"])
+	}
+}

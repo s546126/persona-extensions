@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -99,6 +100,11 @@ func (t *tencent) get(ctx context.Context, u string, fresh time.Duration) ([]byt
 	return body, nil
 }
 
+const (
+	tencentMaxBody = 4 << 20
+	usCodeKeep     = 500
+)
+
 func (t *tencent) fetch(ctx context.Context, u string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -113,9 +119,12 @@ func (t *tencent) fetch(ctx context.Context, u string) ([]byte, error) {
 		return nil, fmt.Errorf("连不上腾讯行情：%w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, tencentMaxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("读腾讯行情的回答出错：%w", err)
+	}
+	if len(body) > tencentMaxBody {
+		return nil, fmt.Errorf("腾讯行情的回答太大")
 	}
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
@@ -335,7 +344,7 @@ func (s *txMarket) parseQuote(sym string, f []string) (Quote, bool) {
 		}
 		return ""
 	}
-	num := func(i int) float64 { v, _ := strconv.ParseFloat(at(i), 64); return v }
+	num := func(i int) float64 { return finiteFloat(at(i)) }
 	if len(f) < 50 || num(3) == 0 {
 		return Quote{}, false
 	}
@@ -345,7 +354,7 @@ func (s *txMarket) parseQuote(sym string, f []string) (Quote, bool) {
 	case mCN: // 35 "last/volume/turnover in yuan", 61 type (GP-A, ETF, ZS…), 82 currency
 		layout, kind, q.Currency = "20060102150405", at(61), at(82)
 		if parts := strings.Split(at(35), "/"); len(parts) == 3 {
-			q.Turnover, _ = strconv.ParseFloat(parts[2], 64)
+			q.Turnover = finiteFloat(parts[2])
 		}
 	case mHK: // 37 turnover, 63 type, 75 currency
 		layout, kind, q.Currency, q.Turnover = "2006/01/02 15:04:05", at(63), at(75), num(37)
@@ -353,6 +362,9 @@ func (s *txMarket) parseQuote(sym string, f []string) (Quote, bool) {
 		layout, kind, q.Currency, q.Turnover = "2006-01-02 15:04:05", at(56), at(35), num(37)
 		if c := at(2); c != "" {
 			s.t.mu.Lock()
+			if len(s.t.usCode) >= usCodeKeep {
+				clear(s.t.usCode)
+			}
 			s.t.usCode[sym] = c
 			s.t.mu.Unlock()
 		}
@@ -644,7 +656,7 @@ func (s *txMarket) Candles(ctx context.Context, sym, bar string, n int, fresh ti
 		}
 		var v [5]float64
 		for j := range v {
-			if v[j], err = strconv.ParseFloat(f[j+1], 64); err != nil {
+			if v[j], err = strconv.ParseFloat(f[j+1], 64); err != nil || math.IsNaN(v[j]) || math.IsInf(v[j], 0) {
 				bad = true
 			}
 		}
@@ -721,7 +733,8 @@ func (s *txMarket) minutes(ctx context.Context, code string, fresh time.Duration
 		mm, err2 := strconv.Atoi(f[0][2:])
 		price, err3 := strconv.ParseFloat(f[1], 64)
 		cum, err4 := strconv.ParseFloat(f[2], 64)
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil || price == 0 {
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil ||
+			math.IsNaN(price) || math.IsInf(price, 0) || math.IsNaN(cum) || math.IsInf(cum, 0) || price == 0 {
 			continue
 		}
 		ms = append(ms, minute{day.Add(time.Duration(hh)*time.Hour + time.Duration(mm)*time.Minute), price, cum})

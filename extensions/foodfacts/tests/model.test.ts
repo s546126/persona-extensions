@@ -76,3 +76,14 @@ test("clip stays within the code-point bound and preserves surrogate pairs", () 
   assert.equal(clip("hello", 0), "");
   assert.equal(clip("hello", Number.NaN), "");
 });
+
+test("overlong upstream product URLs fall back to canonical link within 2000-char CheckView bound", () => {
+  const original = searchResponse.products[0];
+  const longSlug = "a".repeat(2500);
+  const parsed = parseProduct({
+    ...productResponse,
+    product: { ...original, url: `https://world.openfoodfacts.org/product/${original.code}/${longSlug}` },
+  }, original.code, 0);
+  assert.equal(parsed.url, `https://world.openfoodfacts.org/product/${original.code}`);
+  assert.ok(Array.from(parsed.url).length <= 2000);
+});

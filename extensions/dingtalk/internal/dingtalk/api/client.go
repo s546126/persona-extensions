@@ -29,7 +29,9 @@ const (
 	requestTimeout  = 15 * time.Second
 	downloadTimeout = 2 * time.Minute
 	// tokenEarly renews the access token this long before DingTalk says it expires.
-	tokenEarly = 5 * time.Minute
+	tokenEarly       = 5 * time.Minute
+	maxAPIResponse   = 1 << 20
+	maxTokenExpireIn = 24 * 60 * 60
 )
 
 // Options configure a Client. BaseURL and HTTP are what tests replace.
@@ -63,12 +65,16 @@ func New(opt Options) (*Client, error) {
 		opt.BaseURL = Origin
 	}
 	u, err := url.Parse(opt.BaseURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return nil, fmt.Errorf("dingtalk: the open platform address must be https: %q", opt.BaseURL)
 	}
 	opt.BaseURL = strings.TrimRight(opt.BaseURL, "/")
 	if opt.HTTP == nil {
-		opt.HTTP = &http.Client{}
+		opt.HTTP = &http.Client{CheckRedirect: noRedirects}
+	} else {
+		cl := *opt.HTTP
+		cl.CheckRedirect = noRedirects
+		opt.HTTP = &cl
 	}
 	if opt.Now == nil {
 		opt.Now = time.Now
@@ -200,9 +206,12 @@ func (c *Client) callOnce(ctx context.Context, path string, token bool, body, ou
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponse+1))
 	if err != nil {
 		return err
+	}
+	if len(data) > maxAPIResponse {
+		return errors.New("DingTalk response body too large")
 	}
 	if resp.StatusCode != http.StatusOK {
 		e := &Error{Status: resp.StatusCode}
@@ -245,7 +254,8 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 	if out.AccessToken == "" {
 		return "", errors.New("DingTalk gave no access token")
 	}
-	life := time.Duration(out.ExpireIn) * time.Second
+	expireIn := min(out.ExpireIn, int64(maxTokenExpireIn))
+	life := time.Duration(expireIn) * time.Second
 	if life <= tokenEarly {
 		life = 2 * tokenEarly
 	}
@@ -332,12 +342,12 @@ func (c *Client) Download(ctx context.Context, downloadCode string, most int64) 
 // OSS serves the same object on both, and the bytes are someone's private message.
 func (c *Client) downloadURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.Scheme != "https" && u.Scheme != "http" {
+	if err != nil || u.Host == "" || u.User != nil || u.Scheme != "https" && u.Scheme != "http" {
 		return nil, errors.New("DingTalk gave no download address")
 	}
-	host := u.Hostname()
+	host := normalizeHost(u.Hostname())
 	if !c.webhookHost(host) && host != "aliyuncs.com" && !strings.HasSuffix(host, ".aliyuncs.com") {
-		return nil, fmt.Errorf("DingTalk's download address is on an unexpected host %q", host)
+		return nil, fmt.Errorf("DingTalk's download address is on an unexpected host %q", u.Hostname())
 	}
 	u.Scheme = "https"
 	return u, nil
@@ -367,7 +377,7 @@ var ErrTooLarge = errors.New("too large")
 // works before anyone is paired, for anyone who wrote to the robot). Text is sent as plain text.
 func (c *Client) Reply(ctx context.Context, webhook, text string) error {
 	u, err := url.Parse(webhook)
-	if err != nil || u.Scheme != "https" || !c.webhookHost(u.Hostname()) {
+	if err != nil || u.Scheme != "https" || u.User != nil || !c.webhookHost(u.Hostname()) {
 		return errors.New("not a DingTalk session webhook")
 	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
@@ -399,13 +409,23 @@ func (c *Client) Reply(ctx context.Context, webhook, text string) error {
 
 // webhookHost says a session webhook may be posted to host: DingTalk's own (or, in tests, the base URL's host).
 func (c *Client) webhookHost(host string) bool {
-	if base, err := url.Parse(c.opt.BaseURL); err == nil && base.Hostname() == host {
+	host = normalizeHost(host)
+	if base, err := url.Parse(c.opt.BaseURL); err == nil && normalizeHost(base.Hostname()) == host {
 		return true
 	}
 	return host == "dingtalk.com" || strings.HasSuffix(host, ".dingtalk.com")
 }
 
+func normalizeHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+}
+
+func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if r := []rune(s); len(r) > n {
 		return string(r[:n]) + "…"
 	}

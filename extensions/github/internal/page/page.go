@@ -584,10 +584,12 @@ func (p *Page) setBadge(n int) {
 func (p *Page) KeepBadge(ctx context.Context, hub *ext.Hub, interval time.Duration) {
 	p.keepHub(hub)
 	for {
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 		if _, off := p.unavailable(ctx); off || p.c.RatesLow() {
 			continue
@@ -649,6 +651,9 @@ func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // clip keeps s to n characters, with an ellipsis when it cut.
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/nwverse/persona-extensions/extensions/token-usage/internal/store"
@@ -58,6 +60,7 @@ type State struct {
 
 // File is the budgets file in dir, or memory when dir is "".
 type File struct {
+	mu  sync.Mutex
 	dir string
 	mem *State
 }
@@ -73,7 +76,9 @@ func (f *File) Set(b Budget) error {
 	if b.Limit <= 0 {
 		return errors.New("预算上限必须大于 0")
 	}
-	return f.update(func(st *State) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.updateLocked(func(st *State) {
 		for i := range st.Budgets {
 			if st.Budgets[i].ID() == b.ID() {
 				st.Budgets[i] = b
@@ -86,7 +91,9 @@ func (f *File) Set(b Budget) error {
 
 // Delete removes the budget for a model and span. Model "" is the global one.
 func (f *File) Delete(span, model string) error {
-	return f.update(func(st *State) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.updateLocked(func(st *State) {
 		out := st.Budgets[:0]
 		for _, b := range st.Budgets {
 			if b.Span != span || b.Model != model {
@@ -99,7 +106,9 @@ func (f *File) Delete(span, model string) error {
 
 // List returns the budgets.
 func (f *File) List() ([]Budget, error) {
-	st, err := f.load()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, err := f.loadLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +132,11 @@ func (f *File) Statuses(st *store.State, today time.Time, loc *time.Location) ([
 	out := make([]Status, len(budgets))
 	for i, b := range budgets {
 		used := usedOf(st, b, today, loc)
-		out[i] = Status{Budget: b, Used: used, Ratio: float64(used) / float64(b.Limit)}
+		ratio := 0.0
+		if b.Limit > 0 {
+			ratio = float64(used) / float64(b.Limit)
+		}
+		out[i] = Status{Budget: b, Used: used, Ratio: ratio}
 	}
 	return out, nil
 }
@@ -139,7 +152,9 @@ type Notice struct {
 // them. A budget alerts at 80% and at 100%, each once a day. A model whose current hour is over five times its mean
 // for that hour across the past seven days alerts once.
 func (f *File) Alerts(st *store.State, now time.Time, loc *time.Location) ([]Notice, error) {
-	stt, err := f.load()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stt, err := f.loadLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +167,9 @@ func (f *File) Alerts(st *store.State, now time.Time, loc *time.Location) ([]Not
 	}
 	var fresh []Notice
 	for _, b := range stt.Budgets {
+		if b.Limit <= 0 {
+			continue
+		}
 		used := usedOf(st, b, now, loc)
 		ratio := float64(used) / float64(b.Limit)
 		for _, at := range []struct {
@@ -173,7 +191,7 @@ func (f *File) Alerts(st *store.State, now time.Time, loc *time.Location) ([]Not
 	if len(fresh) == 0 {
 		return nil, nil
 	}
-	err = f.update(func(s *State) {
+	err = f.updateLocked(func(s *State) {
 		kept := s.Sent[:0]
 		for _, a := range s.Sent {
 			if a.Date == today {
@@ -303,11 +321,18 @@ func modelName(model string) string {
 
 // comma groups a number in thousands, for the notification text.
 func comma(n int64) string {
-	if n < 0 {
-		return "-" + comma(-n)
+	neg := n < 0
+	var mag uint64
+	if neg {
+		mag = uint64(-(n + 1)) + 1
+	} else {
+		mag = uint64(n)
 	}
-	s := fmt.Sprintf("%d", n)
-	out := make([]byte, 0, len(s)+len(s)/3)
+	s := strconv.FormatUint(mag, 10)
+	out := make([]byte, 0, len(s)+len(s)/3+1)
+	if neg {
+		out = append(out, '-')
+	}
 	for i, c := range s {
 		if i > 0 && (len(s)-i)%3 == 0 {
 			out = append(out, ',')
@@ -317,22 +342,27 @@ func comma(n int64) string {
 	return string(out)
 }
 
-// update reads the state, changes it and writes it back.
-func (f *File) update(fn func(*State)) error {
-	st, err := f.load()
+// updateLocked reads the state, changes it and writes it back. Caller holds f.mu.
+func (f *File) updateLocked(fn func(*State)) error {
+	st, err := f.loadLocked()
 	if err != nil {
 		return err
 	}
 	fn(st)
-	return f.save(st)
+	return f.saveLocked(st)
 }
 
-func (f *File) load() (*State, error) {
+func (f *File) loadLocked() (*State, error) {
 	if f.dir == "" {
 		if f.mem == nil {
 			return &State{Format: format}, nil
 		}
-		return f.mem, nil
+		cp := &State{
+			Format:  f.mem.Format,
+			Budgets: append([]Budget{}, f.mem.Budgets...),
+			Sent:    append([]Alert{}, f.mem.Sent...),
+		}
+		return cp, nil
 	}
 	raw, err := os.ReadFile(f.path())
 	if errors.Is(err, os.ErrNotExist) {
@@ -351,7 +381,7 @@ func (f *File) load() (*State, error) {
 	return &st, nil
 }
 
-func (f *File) save(st *State) error {
+func (f *File) saveLocked(st *State) error {
 	st.Format = format
 	if st.Budgets == nil {
 		st.Budgets = []Budget{}
@@ -360,17 +390,39 @@ func (f *File) save(st *State) error {
 		st.Sent = []Alert{}
 	}
 	if f.dir == "" {
-		f.mem = st
+		f.mem = &State{
+			Format:  st.Format,
+			Budgets: append([]Budget{}, st.Budgets...),
+			Sent:    append([]Alert{}, st.Sent...),
+		}
 		return nil
 	}
 	out, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
+	out = append(out, '\n')
 	if err := os.MkdirAll(f.dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(f.path(), append(out, '\n'), 0o600)
+	tmp, err := os.CreateTemp(f.dir, fileName+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, f.path())
 }
 
 func (f *File) path() string { return filepath.Join(f.dir, fileName) }

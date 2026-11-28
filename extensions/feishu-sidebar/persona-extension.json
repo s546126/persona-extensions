@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "feishu-sidebar",
   "name": "飞书侧边栏",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "icon": "assets/icon.png",
   "description": "在桌面端飞书的左侧主导航打开 Persona 网页版：在飞书里点开本扩展生成的链接，就会打开一个标签页。不用建飞书网页应用、不向飞书发请求、不存任何凭证；助手也能用工具拼出链接。",
   "publisher": "nwverse",

@@ -12,6 +12,7 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -30,6 +31,7 @@ const (
 	// typingEvery is how often "typing…" is shown again while the hub keeps asking for it.
 	typingEvery = 5 * time.Second
 	maxSeen     = 200
+	maxReplied  = 1024
 	strangerGap = 10 * time.Minute
 	// typingFor: "typing…" is let go when the hub has not asked for it again in this long (it asks every 5 s while a
 	// turn goes on): a hub that went away does not leave it on.
@@ -40,7 +42,18 @@ const (
 // hub, which knows what it is (a command, an answer to what was asked, a message for the conversation).
 func (b *Bot) handle(ctx context.Context, c *ilink.Client, creds ilink.Credentials, m ilink.Message) {
 	owner := m.From == creds.UserID
+	if !owner {
+		if !b.isBound(creds.Token) {
+			return
+		}
+		b.stranger(ctx, c, m)
+		return
+	}
 	b.mu.Lock()
+	if b.st.Creds == nil || b.st.Creds.Token != creds.Token {
+		b.mu.Unlock()
+		return
+	}
 	if slices.Contains(b.st.Seen, m.ID) {
 		b.mu.Unlock()
 		return
@@ -50,15 +63,9 @@ func (b *Bot) handle(ctx context.Context, c *ilink.Client, creds ilink.Credentia
 		b.st.Seen = b.st.Seen[len(b.st.Seen)-maxSeen:]
 	}
 	b.status.LastEvent = b.opt.Now()
-	if owner {
-		b.st.Context = m.ContextToken
-	}
+	b.st.Context = m.ContextToken
 	b.saveLocked(ctx)
 	b.mu.Unlock()
-	if !owner {
-		b.stranger(ctx, c, m)
-		return
-	}
 	msg := b.compose(ctx, c, creds.UserID, m)
 	if empty(msg) {
 		return
@@ -82,12 +89,24 @@ func (b *Bot) stranger(ctx context.Context, c *ilink.Client, m ilink.Message) {
 		b.mu.Unlock()
 		return
 	}
-	b.replied[m.From] = now
 	for who, at := range b.replied {
 		if now.Sub(at) >= strangerGap {
 			delete(b.replied, who)
 		}
 	}
+	if len(b.replied) >= maxReplied {
+		var oldestKey string
+		var oldestAt time.Time
+		for who, at := range b.replied {
+			if oldestKey == "" || at.Before(oldestAt) {
+				oldestKey, oldestAt = who, at
+			}
+		}
+		if oldestKey != "" {
+			delete(b.replied, oldestKey)
+		}
+	}
+	b.replied[m.From] = now
 	b.mu.Unlock()
 	b.send(ctx, c, m.From, m.ContextToken, m.ID, "", t(b.lang(), "chat.stranger"))
 }
@@ -570,7 +589,7 @@ func (b *Bot) compose(ctx context.Context, c *ilink.Client, account string, m il
 	if b.quotes != nil {
 		media := make([]quoteMedia, 0, len(m.Media))
 		for _, md := range m.Media {
-			media = append(media, quoteMedia{Kind: string(md.Kind), Name: md.FileName, Size: md.Size})
+			media = append(media, quoteMedia{Kind: string(md.Kind), Name: sanitizeFileName(md.FileName), Size: md.Size})
 		}
 		b.quotes.put(quoteCacheID(account, m.SvrID), out.Text, media)
 		restored := b.quotes.lookup(quoteCacheID(account, m.QuoteID))
@@ -619,7 +638,7 @@ func (b *Bot) compose(ctx context.Context, c *ilink.Client, account string, m il
 			total += n
 			voiceFiles++
 		case ilink.MediaFile, ilink.MediaVideo:
-			name, unsupported := md.FileName, "一段视频" // i18n-ignore: what the assistant reads
+			name, unsupported := sanitizeFileName(md.FileName), "一段视频" // i18n-ignore: what the assistant reads
 			if md.Kind == ilink.MediaVideo {
 				name = "video.mp4"
 			} else if name == "" {
@@ -641,12 +660,35 @@ func (b *Bot) compose(ctx context.Context, c *ilink.Client, account string, m il
 				out.Unsupported = append(out.Unsupported, unsupported)
 				continue
 			}
-			out.Files = append(out.Files, wire.ChannelBlob{Name: name, Mime: fileMIME(md, data), Data: base64.StdEncoding.EncodeToString(data)})
+			out.Files = append(out.Files, wire.ChannelBlob{Name: name, Mime: fileMIME(md.Kind, name, data), Data: base64.StdEncoding.EncodeToString(data)})
 			total += len(data)
 		}
 	}
 	out.Unsupported = slices.Compact(out.Unsupported)
 	return out
+}
+
+func sanitizeFileName(raw string) string {
+	s := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	if s == "" {
+		return ""
+	}
+	s = path.Base(s)
+	if s == "." || s == ".." || s == "/" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == '/' || r == '\\' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s = strings.TrimSpace(b.String())
+	if s == "." || s == ".." {
+		return ""
+	}
+	return s
 }
 
 func quoteCacheID(account, serverID string) string {
@@ -671,11 +713,11 @@ func joinQuote(inline, restored string) string {
 }
 
 // fileMIME keeps the filename's document type; unknown extensions use the decrypted bytes. iLink videos are MP4.
-func fileMIME(md ilink.Media, data []byte) string {
-	if md.Kind == ilink.MediaVideo {
+func fileMIME(kind ilink.MediaKind, fileName string, data []byte) string {
+	if kind == ilink.MediaVideo {
 		return "video/mp4"
 	}
-	switch strings.ToLower(filepath.Ext(md.FileName)) {
+	switch strings.ToLower(filepath.Ext(fileName)) {
 	case ".pdf":
 		return "application/pdf"
 	case ".doc":
@@ -701,28 +743,32 @@ func (b *Bot) Typing(ctx context.Context, on bool) error {
 	now := b.opt.Now()
 	if !on {
 		b.typing = nil
+		var ticket string
+		if t != nil {
+			ticket = t.ticket
+		}
+		b.mu.Unlock()
+		if c == nil || creds == nil || contextToken == "" || ticket == "" {
+			return nil // presence is best effort
+		}
+		return c.SetTyping(ctx, creds.UserID, ticket, false)
 	}
-	b.mu.Unlock()
 	if c == nil || creds == nil || contextToken == "" {
+		b.mu.Unlock()
 		return nil // presence is best effort
 	}
-	switch {
-	case !on && t != nil:
-		return c.SetTyping(ctx, creds.UserID, t.ticket, false)
-	case !on:
-		return nil
-	case t != nil && now.Sub(t.at) < typingFor:
-		b.mu.Lock()
+	if t != nil && now.Sub(t.at) < typingFor {
 		t.at = now
-		b.mu.Unlock()
 		if now.Sub(t.shown) < typingEvery {
+			b.mu.Unlock()
 			return nil
 		}
-		b.mu.Lock()
 		t.shown = now
+		ticket := t.ticket
 		b.mu.Unlock()
-		return c.SetTyping(ctx, creds.UserID, t.ticket, true) // WeChat clears it on its own
+		return c.SetTyping(ctx, creds.UserID, ticket, true) // WeChat clears it on its own
 	}
+	b.mu.Unlock()
 	ticket, err := c.TypingTicket(ctx, creds.UserID, contextToken)
 	if err != nil {
 		return nil
@@ -731,7 +777,9 @@ func (b *Bot) Typing(ctx context.Context, on bool) error {
 		return nil
 	}
 	b.mu.Lock()
-	b.typing = &typing{ticket: ticket, at: now, shown: now}
+	if b.client == c && b.st.Creds != nil && b.st.Creds.Token == creds.Token {
+		b.typing = &typing{ticket: ticket, at: now, shown: now}
+	}
 	b.mu.Unlock()
 	return nil
 }

@@ -201,8 +201,30 @@ func (a *App) Act(_ context.Context, r *ext.UIRequest) (*wire.ActionResult, erro
 	return res, nil
 }
 
+// maxStateToken caps the opaque string fields carried in page state so View.State always fits wire.StateMost.
+const maxStateToken = 64
+
+func (st *state) clean() {
+	st.S = cut(strings.TrimSpace(st.S), maxStateToken)
+	st.T = cut(strings.TrimSpace(st.T), maxStateToken)
+	st.E = cut(strings.TrimSpace(st.E), maxStateToken)
+	st.D = cut(strings.TrimSpace(st.D), maxStateToken)
+	st.F = cut(strings.TrimSpace(st.F), maxStateToken)
+	st.C = cut(strings.TrimSpace(st.C), maxStateToken)
+	st.Q = cut(strings.TrimSpace(st.Q), maxSearch)
+	if st.V < 0 {
+		st.V = 0
+	}
+	if st.N < 0 {
+		st.N = 0
+	} else if st.N > maxMore {
+		st.N = maxMore
+	}
+}
+
 // render draws the nav page for the state of c and returns it with that state.
 func (a *App) render(c *ctx) (*wire.View, error) {
+	c.st.clean()
 	var v *wire.View
 	err := a.st.View(func(b *kernel.Base) error {
 		c.b = b
@@ -213,6 +235,7 @@ func (a *App) render(c *ctx) (*wire.View, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.st.clean()
 	v.State = ext.EncodeState(c.st)
 	return lower(v, c.r.UIVersion), nil
 }
@@ -221,6 +244,7 @@ func newCtx(a *App, r *ext.UIRequest) *ctx {
 	c := &ctx{app: a, r: r, now: a.clock(), loc: location(r.TZ)}
 	var st state
 	if r.DecodeState(&st) == nil {
+		st.clean()
 		c.st = st
 	}
 	return c
@@ -381,6 +405,10 @@ func actMore(c *ctx, _ string) (*wire.ActionResult, error) {
 
 // actFold opens the fold named by the argument, or closes it when that fold is already open.
 func actFold(c *ctx, arg string) (*wire.ActionResult, error) {
+	arg = strings.TrimSpace(arg)
+	if len([]rune(arg)) > maxStateToken {
+		arg = ""
+	}
 	if arg == c.st.F {
 		arg = ""
 	}

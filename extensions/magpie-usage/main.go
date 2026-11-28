@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -33,6 +34,14 @@ import (
 var authorManifest []byte
 
 var manifest = pluginkit.PackagedManifest(authorManifest)
+
+var version = func() string {
+	var m struct {
+		Version string `json:"version"`
+	}
+	_ = json.Unmarshal(manifest, &m)
+	return m.Version
+}()
 
 const (
 	defaultMagpieURL = "http://127.0.0.1:3425"
@@ -99,6 +108,7 @@ func main() {
 }
 
 func program() ext.Program {
+	var mu sync.RWMutex
 	var base, quotaKey string
 	var remote bool
 	var opts mapOptions
@@ -108,7 +118,7 @@ func program() ext.Program {
 	}
 	var secret []byte
 	return ext.Program{
-		ID: "magpie-usage", Version: "0.1.0", Manifest: manifest,
+		ID: "magpie-usage", Version: version, Manifest: manifest,
 		Init: func(_ context.Context, in *ext.Init, _ *ext.Hub) (map[string]any, error) {
 			cfg := struct {
 				Local            string   `json:"local_address"`
@@ -120,22 +130,28 @@ func program() ext.Program {
 			if err := in.Config(&cfg); err != nil {
 				return nil, errors.New("invalid Magpie configuration")
 			}
-			base, remote, quotaKey = cfg.Local, false, ""
-			if strings.TrimSpace(cfg.Remote) != "" {
-				base, remote = cfg.Remote, true
-				quotaKey = strings.TrimSpace(in.Secrets["magpie_quota_key"])
+			localAddr := strings.TrimSpace(cfg.Local)
+			if localAddr == "" {
+				localAddr = defaultMagpieURL
 			}
-			opts = buildMapOptions(cfg.IncludeProviders, cfg.ExcludeProviders, cfg.AnonymousNames)
-			var err error
+			nextBase, nextRemote, nextQuotaKey := localAddr, false, ""
+			if strings.TrimSpace(cfg.Remote) != "" {
+				nextBase, nextRemote = cfg.Remote, true
+				nextQuotaKey = strings.TrimSpace(in.Secrets["magpie_quota_key"])
+			}
+			nextOpts := buildMapOptions(cfg.IncludeProviders, cfg.ExcludeProviders, cfg.AnonymousNames)
 			dir := in.Info().DataDir
 			if dir == "" {
 				// The standalone Persona conformance runner provides the directory through the environment.
 				dir = os.Getenv("PERSONA_EXTENSION_DATA")
 			}
-			secret, err = accountSecret(dir)
+			nextSecret, err := accountSecret(dir)
 			if err != nil {
 				return nil, errors.New("cannot initialize Magpie account aliases")
 			}
+			mu.Lock()
+			base, remote, quotaKey, opts, secret = nextBase, nextRemote, nextQuotaKey, nextOpts, nextSecret
+			mu.Unlock()
 			return nil, nil
 		},
 		Namespaces: map[string]ext.Handler{"usage": func(ctx context.Context, method string, raw json.RawMessage) (any, error) {
@@ -149,11 +165,14 @@ func program() ext.Program {
 			if json.Unmarshal(raw, &p) != nil || p.Contribution != "magpie" {
 				return nil, errors.New("invalid Magpie usage query")
 			}
-			body, scope, err := fetchQuotas(ctx, client, base, remote, quotaKey)
+			mu.RLock()
+			curBase, curRemote, curKey, curOpts, curSecret := base, remote, quotaKey, opts, secret
+			mu.RUnlock()
+			body, scope, err := fetchQuotas(ctx, client, curBase, curRemote, curKey)
 			if err != nil {
 				return nil, err
 			}
-			accounts, err := mapQuotas(body, secret, scope, p.Lang, opts)
+			accounts, err := mapQuotas(body, curSecret, scope, p.Lang, curOpts)
 			if err != nil {
 				return nil, err
 			}
@@ -200,12 +219,14 @@ func fetchQuotas(ctx context.Context, client *http.Client, base string, remote b
 	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", "", errors.New("invalid Magpie address")
 	}
-	host := strings.ToLower(u.Hostname())
-	local := host == "host.persona.internal" || host == "localhost" || net.ParseIP(host).IsLoopback()
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	ip := net.ParseIP(host)
+	loopback := host == "host.persona.internal" || host == "localhost" || strings.HasSuffix(host, ".localhost") || (ip != nil && ip.IsLoopback())
+	unspecified := ip != nil && ip.IsUnspecified()
 	switch {
-	case !remote && local && (u.Scheme == "http" || u.Scheme == "https"):
+	case !remote && loopback && (u.Scheme == "http" || u.Scheme == "https"):
 		key = "" // an optional remote key must never go to the host's local service
-	case remote && !local && u.Scheme == "https" && key != "":
+	case remote && !loopback && !unspecified && u.Scheme == "https" && key != "" && !strings.ContainsAny(key, "\r\n"):
 	case remote:
 		return "", "", errors.New("remote Magpie requires HTTPS and a dedicated quota key")
 	default:
@@ -307,7 +328,7 @@ func mapQuotas(body string, secret []byte, scope, lang string, opts mapOptions) 
 		switch {
 		case len(a.Windows) == 0:
 			a.Notice = localized(lang, "Subscription usage unavailable", "暂无订阅额度读数", "サブスクリプションの使用量を取得できません")
-		case src.Error != "" || src.ReadError != "":
+		case strings.TrimSpace(src.Error) != "" || strings.TrimSpace(src.ReadError) != "":
 			a.Notice = localized(lang, "Magpie is showing a saved reading", "Magpie 显示的是上次读数", "Magpie の保存済みの値を表示しています")
 		}
 		out = append(out, a)
@@ -551,7 +572,7 @@ func parseMagpieWindow(w magpieWindow) (parsedWindow, bool) {
 	}
 
 	minutes := 0
-	if w.Period > 0 {
+	if w.Period > 0 && w.Period <= int64(maxWindowMinutes)*60+30 {
 		m := int(math.Round(float64(w.Period) / 60))
 		if m > 0 && m <= maxWindowMinutes {
 			minutes = normalizeMonthMinutes(m)
@@ -749,7 +770,7 @@ func cleanLine(s string) string {
 }
 
 func parseTime(s string) *time.Time {
-	t, err := time.Parse(time.RFC3339Nano, s)
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(s))
 	if err != nil || t.IsZero() {
 		return nil
 	}
@@ -758,10 +779,11 @@ func parseTime(s string) *time.Time {
 }
 
 func localized(lang, en, zh, ja string) string {
-	switch lang {
-	case "zh-Hans":
+	l := strings.ToLower(strings.TrimSpace(lang))
+	switch {
+	case l == "zh" || strings.HasPrefix(l, "zh-"):
 		return zh
-	case "ja":
+	case l == "ja" || strings.HasPrefix(l, "ja-"):
 		return ja
 	default:
 		return en
@@ -770,6 +792,7 @@ func localized(lang, en, zh, ja string) string {
 
 // Store a per-installation secret so account IDs persist across reads and cannot be guessed from usernames.
 func accountSecret(dir string) ([]byte, error) {
+	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return nil, errors.New("missing extension data directory")
 	}
@@ -783,6 +806,9 @@ func accountSecret(dir string) ([]byte, error) {
 	}
 	if secret, err := read(); !os.IsNotExist(err) {
 		return secret, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {

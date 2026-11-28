@@ -768,7 +768,7 @@ function withExactParams(handler) {
 }
 
 // persona-extension.json
-var persona_extension_default = { manifest_version: 1, id: "foodfacts", name: "\u98DF\u54C1\u5546\u54C1\u67E5\u8BE2", version: "0.1.6", icon: "assets/icon.png", description: "\u6309\u5546\u54C1\u540D\u79F0\u6216\u6761\u7801\u67E5\u8BE2 Open Food Facts\uFF0C\u67E5\u770B\u54C1\u724C\u3001\u914D\u6599\u3001\u6807\u79F0\u8FC7\u654F\u539F\u3001\u8425\u517B\u7B49\u7EA7\u548C\u539F\u59CB\u5546\u54C1\u94FE\u63A5\u3002\u4F17\u5305\u4FE1\u606F\u53EF\u80FD\u4E0D\u5B8C\u6574\uFF0C\u8FC7\u654F\u548C\u996E\u98DF\u51B3\u7B56\u8BF7\u4EE5\u5B9E\u9645\u5305\u88C5\u4E3A\u51C6\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/foodfacts/README.md", tags: ["\u98DF\u54C1", "\u914D\u6599", "Open Food Facts"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/foodfacts.mjs", sha256: "" } }, contributes: { connectors: [{ id: "foodfacts", name: "Open Food Facts", capabilities: ["status", "tools"], hosts: ["world.openfoodfacts.org"], agent_tools: ["foodfacts_*"] }], ui: [{ id: "products", title: "\u98DF\u54C1\u5546\u54C1\u67E5\u8BE2", placement: "nav_page", icon: "search" }] }, permissions: { network: ["world.openfoodfacts.org"] } };
+var persona_extension_default = { manifest_version: 1, id: "foodfacts", name: "\u98DF\u54C1\u5546\u54C1\u67E5\u8BE2", version: "0.1.7", icon: "assets/icon.png", description: "\u6309\u5546\u54C1\u540D\u79F0\u6216\u6761\u7801\u67E5\u8BE2 Open Food Facts\uFF0C\u67E5\u770B\u54C1\u724C\u3001\u914D\u6599\u3001\u6807\u79F0\u8FC7\u654F\u539F\u3001\u8425\u517B\u7B49\u7EA7\u548C\u539F\u59CB\u5546\u54C1\u94FE\u63A5\u3002\u4F17\u5305\u4FE1\u606F\u53EF\u80FD\u4E0D\u5B8C\u6574\uFF0C\u8FC7\u654F\u548C\u996E\u98DF\u51B3\u7B56\u8BF7\u4EE5\u5B9E\u9645\u5305\u88C5\u4E3A\u51C6\u3002", publisher: "nwverse", homepage: "https://github.com/nwverse/persona-extensions/blob/main/extensions/foodfacts/README.md", tags: ["\u98DF\u54C1", "\u914D\u6599", "Open Food Facts"], engines: { plugin_protocol: 1 }, runtime: { mode: "deno", source: { entry: "src/index.ts", bundle: "build/foodfacts.mjs", sha256: "" } }, contributes: { connectors: [{ id: "foodfacts", name: "Open Food Facts", capabilities: ["status", "tools"], hosts: ["world.openfoodfacts.org"], agent_tools: ["foodfacts_*"] }], ui: [{ id: "products", title: "\u98DF\u54C1\u5546\u54C1\u67E5\u8BE2", placement: "nav_page", icon: "search" }] }, permissions: { network: ["world.openfoodfacts.org"] } };
 
 // src/model.ts
 var limits = Object.freeze({ request: 12e3, page: 15e3, tool: 15e3, response: 1 << 20, fresh: 24 * 60 * 6e4, cache: 24, cacheBytes: 1 << 20, gap: 1200 });
@@ -835,7 +835,7 @@ function productURL(value, code) {
     throw new ReadError("bad_answer");
   }
   if (url.protocol !== "https:" || url.hostname !== "world.openfoodfacts.org" || url.username || url.password || url.port || url.pathname !== `/product/${code}` && !url.pathname.startsWith(`/product/${code}/`)) throw new ReadError("bad_answer");
-  return url.href;
+  return Array.from(url.href).length <= 2e3 ? url.href : canonical;
 }
 function parseProduct(raw, expectedCode, at) {
   const root2 = object(raw);
@@ -1033,7 +1033,12 @@ var FoodFacts = class {
   lastError;
   cached(path, fresh) {
     const item = this.cache.get(path);
-    return item && this.monotonic() - item.used < fresh ? { raw: item.raw, at: item.at } : void 0;
+    if (!item || this.monotonic() - item.savedAt >= fresh) return void 0;
+    if (fresh !== Infinity) {
+      this.cache.delete(path);
+      this.cache.set(path, item);
+    }
+    return { raw: item.raw, at: item.at };
   }
   save(path, raw, at) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
@@ -1043,7 +1048,7 @@ var FoodFacts = class {
       this.bytes -= old.bytes;
       this.cache.delete(path);
     }
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes });
+    this.cache.set(path, { raw, at, savedAt: this.monotonic(), bytes });
     this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       const oldest = this.cache.keys().next().value;
@@ -1064,6 +1069,21 @@ var FoodFacts = class {
     } catch (error) {
       checkSignal(signal);
       throw error instanceof ReadError ? error : new ReadError("network");
+    }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {
+      });
+      throw new ReadError("http", response.status);
     }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks = [];
@@ -1102,9 +1122,6 @@ var FoodFacts = class {
     } catch {
       throw new ReadError("bad_answer");
     }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try {
       return JSON.parse(text);
     } catch {
@@ -1421,7 +1438,10 @@ function Root(options) {
       }
       return callback((values) => {
         if (id === "refresh") setRefresh((previous) => previous + 1);
-        else setState((previous) => transition(previous, id, values));
+        else {
+          setRefresh(0);
+          setState((previous) => transition(previous, id, values));
+        }
       }, { submit: true });
     }
   });

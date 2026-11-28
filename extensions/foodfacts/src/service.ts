@@ -20,7 +20,7 @@ export class FoodFacts {
   readonly now: () => number;
   readonly monotonic: () => number;
   readonly limits: { [K in keyof typeof limits]: number };
-  private readonly cache = new Map<string, { raw: unknown; at: number; used: number; bytes: number }>();
+  private readonly cache = new Map<string, { raw: unknown; at: number; savedAt: number; bytes: number }>();
   private bytes = 0;
   private lastRequest = -Infinity;
   private queue: Promise<void> = Promise.resolve();
@@ -32,13 +32,18 @@ export class FoodFacts {
   }
   private cached(path: string, fresh: number): { raw: unknown; at: number } | undefined {
     const item = this.cache.get(path);
-    return item && this.monotonic() - item.used < fresh ? { raw: item.raw, at: item.at } : undefined;
+    if (!item || this.monotonic() - item.savedAt >= fresh) return undefined;
+    if (fresh !== Infinity) {
+      this.cache.delete(path);
+      this.cache.set(path, item);
+    }
+    return { raw: item.raw, at: item.at };
   }
   private save(path: string, raw: unknown, at: number) {
     const bytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
     if (bytes > this.limits.cacheBytes) return;
     const old = this.cache.get(path); if (old) { this.bytes -= old.bytes; this.cache.delete(path); }
-    this.cache.set(path, { raw, at, used: this.monotonic(), bytes }); this.bytes += bytes;
+    this.cache.set(path, { raw, at, savedAt: this.monotonic(), bytes }); this.bytes += bytes;
     while (this.cache.size > this.limits.cache || this.bytes > this.limits.cacheBytes) {
       const oldest = this.cache.keys().next().value as string | undefined;
       if (oldest === undefined) break;
@@ -52,6 +57,18 @@ export class FoodFacts {
         method: "GET", headers: { Accept: "application/json", "User-Agent": "persona-foodfacts/0.1.0" }, signal, redirect: "error",
       });
     } catch (error) { checkSignal(signal); throw error instanceof ReadError ? error : new ReadError("network"); }
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      void response.body?.cancel().catch(() => {});
+      throw new ReadError("rate_limited");
+    }
+    if (response.status === 404) {
+      void response.body?.cancel().catch(() => {});
+      throw new ReadError("not_found");
+    }
+    if (response.status !== 200) {
+      void response.body?.cancel().catch(() => {});
+      throw new ReadError("http", response.status);
+    }
     if (!response.body) throw new ReadError("bad_answer");
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];
     let length = 0;
@@ -71,9 +88,6 @@ export class FoodFacts {
     for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
     let text: string;
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(data); } catch { throw new ReadError("bad_answer"); }
-    if (response.status === 401 || response.status === 403 || response.status === 429) throw new ReadError("rate_limited");
-    if (response.status === 404) throw new ReadError("not_found");
-    if (response.status !== 200) throw new ReadError("http", response.status);
     try { return JSON.parse(text); } catch { throw new ReadError("bad_answer"); }
   }
   private async read(path: string, fresh: number, signal: AbortSignal | undefined, validate: (raw: unknown, at: number) => void): Promise<{ raw: unknown; at: number; stale?: ReadError }> {

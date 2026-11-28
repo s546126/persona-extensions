@@ -1268,6 +1268,20 @@
       "height": 1024,
       "trademark_owner": "Persona / nwverse",
       "usage": "Official Persona app branding for this Persona-native tool or pack, not the logo of an external data provider."
+    },
+    "volc": {
+      "path": "assets/icon.png",
+      "source_id": "dify-official-plugins",
+      "source_url": "https://raw.githubusercontent.com/langgenius/dify-official-plugins/60804e30f6fa41fbe890c02c9849b0bdbe28d13a/models/volcengine/_assets/icon.svg",
+      "sha256": "3ec3c3e916c3c4f7fa6887c784ba72310e597516ef053447a8274b11877c8716",
+      "format": "png",
+      "width": 512,
+      "height": 512,
+      "trademark_owner": "Beijing Volcano Engine Technology Co., Ltd. (Volcengine)",
+      "usage": "Official Volcengine service mark, used solely to identify the corresponding public speech service. The official Volcengine mark SVG (identical in Dify's volcengine and volcengine_maas model plugins) rasterized with Google Chrome 147.0.7727.137 at 512x512, preserving its artwork, white background and aspect ratio; no paths or colors were changed.",
+      "source_path": "assets/icon-source.svg",
+      "source_sha256": "f15c977e1bfade978a95c318c803d4741ff790fe194c2f839ac767da7f7dd564",
+      "transformation": "The official Volcengine mark SVG (identical in Dify's volcengine and volcengine_maas model plugins) rasterized with Google Chrome 147.0.7727.137 at 512x512, preserving its artwork, white background and aspect ratio; no paths or colors were changed."
     }
   }
 }

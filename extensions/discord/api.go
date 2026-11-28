@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,9 +29,21 @@ type api struct {
 }
 
 const (
-	retryMost = 5 * time.Second // a 429 asking to wait longer is answered, not waited out
-	bodyMost  = 16 << 20
+	retryMost     = 5 * time.Second // a 429 asking to wait longer is answered, not waited out
+	rateLimitMost = time.Hour       // cap upstream Retry-After / X-RateLimit-Reset-After to prevent int64 overflow or lockout
+	bodyMost      = 16 << 20
+	guildsPages   = 100
 )
+
+func boundDelay(secs float64) (time.Duration, bool) {
+	if math.IsNaN(secs) || math.IsInf(secs, 0) || secs <= 0 {
+		return 0, false
+	}
+	if maxSecs := rateLimitMost.Seconds(); secs >= maxSecs {
+		return rateLimitMost, true
+	}
+	return time.Duration(secs * float64(time.Second)), true
+}
 
 func newAPI(base, token, version string, hc *http.Client) *api {
 	return &api{base: base, token: token, hc: hc, until: map[string]time.Time{},
@@ -128,8 +141,11 @@ func (a *api) get(ctx context.Context, path string, q url.Values, out any) (int,
 		if resp.StatusCode == http.StatusTooManyRequests {
 			e := rateLimited(resp.Header, body)
 			if e.Global {
+				until := time.Now().Add(e.RetryAfter)
 				a.mu.Lock()
-				a.global = time.Now().Add(e.RetryAfter)
+				if until.After(a.global) {
+					a.global = until
+				}
 				a.mu.Unlock()
 			}
 			if try == 0 && e.RetryAfter <= retryMost && sleep(ctx, e.RetryAfter) {
@@ -184,7 +200,11 @@ func (a *api) note(route string, h http.Header) {
 		return
 	}
 	after, err := strconv.ParseFloat(h.Get("X-RateLimit-Reset-After"), 64)
-	if err != nil || after <= 0 {
+	if err != nil {
+		return
+	}
+	wait, ok := boundDelay(after)
+	if !ok {
 		return
 	}
 	a.mu.Lock()
@@ -197,7 +217,7 @@ func (a *api) note(route string, h http.Header) {
 			}
 		}
 	}
-	a.until[route] = now.Add(time.Duration(after * float64(time.Second)))
+	a.until[route] = now.Add(wait)
 }
 
 // rateLimited is a 429 as an error.
@@ -208,10 +228,13 @@ func rateLimited(h http.Header, body []byte) *apiError {
 		Message    string  `json:"message"`
 	}
 	_ = json.Unmarshal(body, &b)
-	if b.RetryAfter <= 0 {
-		b.RetryAfter, _ = strconv.ParseFloat(h.Get("Retry-After"), 64)
+	wait, ok := boundDelay(b.RetryAfter)
+	if !ok {
+		if hdr, err := strconv.ParseFloat(h.Get("Retry-After"), 64); err == nil {
+			wait, _ = boundDelay(hdr)
+		}
 	}
-	return &apiError{Status: http.StatusTooManyRequests, Message: b.Message, RetryAfter: max(time.Duration(b.RetryAfter*float64(time.Second)), time.Second),
+	return &apiError{Status: http.StatusTooManyRequests, Message: b.Message, RetryAfter: max(wait, time.Second),
 		Global: b.Global || h.Get("X-RateLimit-Global") == "true"}
 }
 
@@ -241,8 +264,9 @@ func (a *api) application(ctx context.Context) (application, error) {
 // guilds are the servers the bot is in, all of them (200 a page).
 func (a *api) guilds(ctx context.Context) ([]guild, error) {
 	var out []guild
+	seen := map[snowflake]bool{}
 	var after snowflake
-	for {
+	for range guildsPages {
 		q := url.Values{"limit": {"200"}}
 		if after != 0 {
 			q.Set("after", after.String())
@@ -251,12 +275,25 @@ func (a *api) guilds(ctx context.Context) ([]guild, error) {
 		if _, err := a.get(ctx, "/users/@me/guilds", q, &page); err != nil {
 			return nil, err
 		}
-		out = append(out, page...)
-		if len(page) < 200 {
+		added := 0
+		for _, g := range page {
+			if g.ID == 0 || seen[g.ID] {
+				continue
+			}
+			seen[g.ID] = true
+			out = append(out, g)
+			added++
+		}
+		if len(page) < 200 || added == 0 {
 			return out, nil
 		}
-		after = page[len(page)-1].ID
+		next := page[len(page)-1].ID
+		if next <= after {
+			return out, nil
+		}
+		after = next
 	}
+	return out, nil
 }
 
 // inAnyGuild says whether the bot is in any server, with one small request.
@@ -370,8 +407,15 @@ type snowflake uint64
 const discordEpoch = 1420070400000 // ms
 
 func (s *snowflake) UnmarshalJSON(b []byte) error {
-	str := strings.Trim(string(b), `"`)
-	if str == "null" || str == "" {
+	str := strings.TrimSpace(string(b))
+	if str == "null" {
+		*s = 0
+		return nil
+	}
+	if len(str) >= 2 && str[0] == '"' && str[len(str)-1] == '"' {
+		str = str[1 : len(str)-1]
+	}
+	if str == "" {
 		*s = 0
 		return nil
 	}

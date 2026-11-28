@@ -89,7 +89,16 @@ func parseTopics(raw []byte) ([]topic, error) {
 	if err := json.Unmarshal(raw, &ts); err != nil {
 		return nil, fmt.Errorf("%w：%v", errBadAnswer, err)
 	}
-	return slices.DeleteFunc(ts, topic.deleted), nil
+	seen := make(map[int64]bool, len(ts))
+	out := make([]topic, 0, len(ts))
+	for _, t := range ts {
+		if t.deleted() || t.ID <= 0 || seen[t.ID] {
+			continue
+		}
+		seen[t.ID] = true
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 // listing is a list as read.
@@ -112,7 +121,8 @@ func freshness(refresh bool, usual time.Duration) time.Duration {
 func (a *app) list(ctx context.Context, id string, refresh bool) (listing, error) {
 	fresh := freshness(refresh, listFor)
 	if id == "nodes" {
-		return a.merged(ctx, a.nodes, fresh), nil
+		_, nodes, _, _ := a.snapshot()
+		return a.merged(ctx, nodes, fresh), nil
 	}
 	for _, l := range lists {
 		if l.id == id {
@@ -240,6 +250,9 @@ func oneLine(s string) string { return strings.TrimSpace(spaceRE.ReplaceAllStrin
 
 // clip cuts s to at most n characters, marking the cut.
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}

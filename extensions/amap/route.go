@@ -325,7 +325,7 @@ func (a *app) planRoute(ctx context.Context, in args) (plannedRoute, error) {
 			q.Set("time", clock)
 		}
 	}
-	body, err := a.client.get(ctx, groupLBS, modePaths[mode], q, ttl)
+	body, err := a.currentClient().get(ctx, groupLBS, modePaths[mode], q, ttl)
 	if err != nil {
 		return plannedRoute{}, err
 	}

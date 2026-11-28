@@ -70,17 +70,20 @@ var table = []Tool{
 // Tools returns the tools in the order the server lists them.
 func Tools() []Tool { return slices.Clone(table) }
 
+// maxLineBytes caps one incoming JSON-RPC line so a malformed stream without newlines cannot grow unboundedly.
+const maxLineBytes = 8 << 20
+
 // Serve reads requests from in, one JSON object per line, and writes one answer per request to out, until in ends or
 // ctx is done. A message without an id is a notification and is never answered. Each tool call runs on st: a read
 // through View, a write through Update, so a failed write saves nothing. now gives the time of a read.
 func Serve(ctx context.Context, in io.Reader, out io.Writer, st kernel.Storage, now func() time.Time) error {
-	r := bufio.NewReader(in)
+	r := bufio.NewReaderSize(in, 64<<10)
 	s := &server{st: st, now: now}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line, err := r.ReadBytes('\n')
+		line, err := readBoundedLine(r, maxLineBytes)
 		if len(bytes.TrimSpace(line)) > 0 {
 			if reply := s.handle(line); reply != nil {
 				if _, werr := out.Write(append(reply, '\n')); werr != nil {
@@ -93,6 +96,20 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, st kernel.Storage, 
 		}
 		if err != nil {
 			return err
+		}
+	}
+}
+
+func readBoundedLine(r *bufio.Reader, limit int) ([]byte, error) {
+	var buf []byte
+	for {
+		frag, err := r.ReadSlice('\n')
+		if len(buf)+len(frag) > limit {
+			return nil, fmt.Errorf("JSON-RPC message exceeds %d bytes", limit)
+		}
+		buf = append(buf, frag...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return buf, err
 		}
 	}
 }

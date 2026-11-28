@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -64,7 +63,7 @@ func (a Alert) what(q Quote) string {
 
 // meets says whether q meets the alert.
 func (a Alert) meets(q Quote) bool {
-	if q.Last == 0 {
+	if q.Last == 0 || math.IsNaN(q.Last) || math.IsInf(q.Last, 0) || math.IsNaN(a.Value) || math.IsInf(a.Value, 0) {
 		return false
 	}
 	switch a.Kind {
@@ -102,13 +101,12 @@ func (as *alerts) load(dir string, logf func(string, ...any)) {
 // saveLocked writes next and makes it the list once written, so a failed write leaves the list as it was; as.mu
 // held.
 func (as *alerts) saveLocked(next []Alert) error {
+	raw, err := json.MarshalIndent(next, "", "  ")
+	if err != nil {
+		return fmt.Errorf("存不下提醒：%w", err)
+	}
 	if as.path != "" {
-		raw, _ := json.MarshalIndent(next, "", "  ")
-		tmp := as.path + ".tmp"
-		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-			return fmt.Errorf("存不下提醒：%w", err)
-		}
-		if err := os.Rename(tmp, as.path); err != nil {
+		if err := writeAtomic(as.path, raw); err != nil {
 			return fmt.Errorf("存不下提醒：%w", err)
 		}
 	}
@@ -133,6 +131,9 @@ func (as *alerts) of(r Ref) []Alert {
 }
 
 func (as *alerts) add(a Alert) error {
+	if math.IsNaN(a.Value) || math.IsInf(a.Value, 0) || a.Value <= 0 {
+		return errors.New("写一个大于 0 的数")
+	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if len(as.list) >= alertsMost {
@@ -169,7 +170,7 @@ func (p *plugin) newAlert(ctx context.Context, r Ref, kind, value string) (Alert
 		return Alert{}, errors.New("选一种提醒：涨到、跌到或涨跌幅超")
 	}
 	v, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(value), "%"), 64)
-	if err != nil || v <= 0 || math.IsInf(v, 0) {
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
 		return Alert{}, errors.New("写一个大于 0 的数")
 	}
 	if kind == "move" && v > 100 {
@@ -285,8 +286,8 @@ func (p *plugin) alertThing(a Alert) pluginkit.InboxThing[pluginkit.ThingExtra] 
 }
 
 func (p *plugin) zone() *time.Location {
-	if p.loc != nil {
-		return p.loc
+	if _, loc, _ := p.configSnap(); loc != nil {
+		return loc
 	}
 	return time.Local
 }
@@ -299,6 +300,7 @@ func (p *plugin) cInboxCollect(context.Context, *pluginkit.Hub, json.RawMessage)
 			things = append(things, p.alertThing(a))
 		}
 	}
-	pluginkit.StampRules(things, p.rules)
+	_, _, rules := p.configSnap()
+	pluginkit.StampRules(things, rules)
 	return map[string]any{"things": things}, nil
 }

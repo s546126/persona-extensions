@@ -206,6 +206,8 @@ func (r *Runner) Reconcile(ctx context.Context, st *store.State, s *State, run *
 	}
 
 	// 2. Opposing tension resolution into one structured pattern with Poles.
+	// Supports both collapsing 2+ competing patterns (including cross-kind principle+contract pairs) and upgrading a
+	// single principle that already carries a significant two-pole tension or one-sided exception into structured Poles.
 	for _, g := range out.Tensions {
 		keep := local[g.Keep]
 		if keep == nil || keep.Lifecycle == Retired {
@@ -215,17 +217,12 @@ func (r *Runner) Reconcile(ctx context.Context, st *store.State, s *State, run *
 		if len(poles) < 2 {
 			continue
 		}
-		n := 0
 		for _, mid := range g.Merge {
 			x := local[mid]
 			if x == nil || x == keep || x.Lifecycle == Retired {
 				continue
 			}
 			mergeInto(keep, x, "reconciled: tension resolved into "+keep.ID)
-			n++
-		}
-		if n == 0 {
-			continue
 		}
 		if t := strings.TrimSpace(g.Text); t != "" {
 			keep.Text = t

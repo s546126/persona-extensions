@@ -107,9 +107,14 @@ func (c *client) get(ctx context.Context, k Keys, path string, q url.Values, out
 		return scrubbed(err, k)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	const maxAPIResponseBytes = 16 << 20
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
 	if err != nil {
 		return scrubbed(err, k)
+	}
+	if len(body) > maxAPIResponseBytes {
+		return &apiError{Status: resp.StatusCode, Detail: "oversized response"}
 	}
 	c.note(ep, resp.Header)
 	switch {

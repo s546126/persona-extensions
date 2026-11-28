@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -95,7 +96,9 @@ func runMCP(args []string, in io.Reader, out io.Writer) error {
 
 // extension holds the app that Init creates. Requests are handled concurrently, so the pointer is atomic.
 type extension struct {
-	app atomic.Pointer[ui.App]
+	app       atomic.Pointer[ui.App]
+	watchMu   sync.Mutex
+	stopWatch context.CancelFunc
 }
 
 // current returns the app, or an error when Init has not run.
@@ -119,9 +122,21 @@ func program() ext.Program {
 			st := store.Open(dir)
 			store.Remember(dir)
 			a := ui.New(st)
-			a.SetHub(hub)
+			if hub != nil {
+				a.SetHub(hub)
+			}
 			x.app.Store(a)
-			go watch(ctx, st, hub, watchEvery)
+			x.watchMu.Lock()
+			if x.stopWatch != nil {
+				x.stopWatch()
+				x.stopWatch = nil
+			}
+			if hub != nil {
+				wctx, cancel := context.WithCancel(ctx)
+				x.stopWatch = cancel
+				go watch(wctx, st, hub, watchEvery)
+			}
+			x.watchMu.Unlock()
 			return nil, nil
 		},
 		UI: map[string]ext.Page{
@@ -164,7 +179,7 @@ func watch(ctx context.Context, st kernel.Storage, hub ui.Notifier, every time.D
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if st.Changed() {
+			if st.Changed() && hub != nil {
 				_ = hub.Invalidate("")
 			}
 		}

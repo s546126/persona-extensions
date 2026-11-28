@@ -140,3 +140,36 @@ test("internal request, page and tool timeouts surface ReadError(slow) and allow
   const toolService = make(toolFixture, { limits: { gap: 0, request: 500, tool: 20 } });
   await assert.rejects(callTool(toolService, "foodfacts_product", { code: "3017620422003" }), (error: unknown) => error instanceof ReadError && error.code === "slow");
 });
+
+test("non-200 HTTP errors with null or oversized bodies preserve status classification", async () => {
+  const null429 = new FoodFacts(async () => new Response(null, { status: 429 }), {}, { limits: { gap: 0 } });
+  await assert.rejects(null429.search("chocolate"), (error: unknown) => error instanceof ReadError && error.code === "rate_limited");
+  assert.equal(null429.status().state, "rate_limited");
+
+  const huge503 = new FoodFacts(async () => new Response("x".repeat((1 << 20) + 128), { status: 503 }), {}, { limits: { gap: 0 } });
+  await assert.rejects(huge503.search("chocolate"), (error: unknown) => error instanceof ReadError && error.code === "http" && error.status === 503);
+});
+
+test("cache separates LRU recency from TTL freshness", async () => {
+  const fixture = new Fixture();
+  const oatPath = searchPath.replace("chocolate", "oat");
+  const milkPath = searchPath.replace("chocolate", "milk");
+  fixture.put(oatPath, searchResponse);
+  fixture.put(milkPath, searchResponse);
+  const service = make(fixture, { limits: { gap: 0, cache: 2, fresh: 1000 } });
+
+  await service.search("chocolate"); // cached at t=0
+  fixture.clock += 200;
+  await service.search("oat"); // cached at t=200
+  fixture.clock += 200;
+  await service.search("chocolate"); // cache hit at t=400 -> promotes chocolate as MRU, keeps TTL anchored at t=0
+  assert.equal(fixture.hits.get(searchPath), 1);
+
+  await service.search("milk"); // capacity 2 -> must evict cold "oat", NOT hot "chocolate"
+  await service.search("chocolate"); // still cached at t=400 < 1000
+  assert.equal(fixture.hits.get(searchPath), 1, "hot entry must not be evicted before colder entry");
+
+  fixture.clock += 700; // t=1100 > savedAt(0) + fresh(1000) -> TTL must expire even though hit happened at t=400
+  await service.search("chocolate");
+  assert.equal(fixture.hits.get(searchPath), 2, "LRU read must not extend TTL beyond fresh window");
+});

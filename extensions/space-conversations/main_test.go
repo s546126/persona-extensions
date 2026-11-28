@@ -345,8 +345,11 @@ func TestRenderedViewsPassWireValidationAndPreserveState(t *testing.T) {
 
 func spacesHub(t *testing.T, calls *[]string) *httptest.Server {
 	t.Helper()
+	var mu sync.Mutex
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		*calls = append(*calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/assistant/tracks" && r.Method == http.MethodGet:

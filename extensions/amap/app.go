@@ -35,10 +35,11 @@ var keyGuide = []string{
 
 // app is the running extension.
 type app struct {
-	logf   func(string, ...any)
-	client *client
-	probe  bool          // check the key once at start (off in tests that count requests)
-	tune   func(*client) // tests: point the client at a fake, change its clock
+	logf     func(string, ...any)
+	clientMu sync.RWMutex
+	client   *client
+	probe    bool          // check the key once at start (off in tests that count requests)
+	tune     func(*client) // tests: point the client at a fake, change its clock
 
 	refMu sync.Mutex
 	refs  *mapRefStore // static map refs served through ui.image
@@ -52,6 +53,12 @@ type app struct {
 
 func newApp() *app {
 	return &app{logf: log.Printf, client: newClient("", "", log.Printf), probe: true}
+}
+
+func (a *app) currentClient() *client {
+	a.clientMu.RLock()
+	defer a.clientMu.RUnlock()
+	return a.client
 }
 
 func (a *app) mapRefs() *mapRefStore {
@@ -69,10 +76,13 @@ func (a *app) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]an
 	if dir == "" {
 		dir = os.Getenv("PERSONA_EXTENSION_DATA")
 	}
-	a.client = newClient(key, dir, a.logf)
+	cl := newClient(key, dir, a.logf)
 	if a.tune != nil {
-		a.tune(a.client)
+		a.tune(cl)
 	}
+	a.clientMu.Lock()
+	a.client = cl
+	a.clientMu.Unlock()
 	var cfg placeConfig
 	if err := in.Config(&cfg); err != nil {
 		a.logf("amap: config unread: %v", err)
@@ -92,10 +102,11 @@ func (a *app) init(ctx context.Context, in *ext.Init, _ *ext.Hub) (map[string]an
 
 // status answers connector.status from memory.
 func (a *app) status() wire.ConnectorStatus {
-	if a.client.key == "" {
+	cl := a.currentClient()
+	if cl.key == "" {
 		return wire.ConnectorStatus{State: wire.ConnectorStateNotConfigured, Error: "还没填高德 Key", Guide: keyGuide, GuideURL: consoleURL}
 	}
-	keyErr, lastOK, u := a.client.state()
+	keyErr, lastOK, u := cl.state()
 	if keyErr != nil {
 		return wire.ConnectorStatus{State: wire.ConnectorStateError, Error: keyWords[keyErr.code], Guide: keyGuide, GuideURL: consoleURL}
 	}
@@ -181,7 +192,7 @@ func (a *app) settings(ctx context.Context, method string, raw json.RawMessage) 
 	}
 	ctx, cancel := context.WithTimeout(ctx, checkBudget)
 	defer cancel()
-	err := a.client.try(ctx, key)
+	err := a.currentClient().try(ctx, key)
 	if err == nil {
 		return map[string]any{"ok": true}, nil
 	}

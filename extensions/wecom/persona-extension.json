@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "wecom",
   "name": "企业微信",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "企业微信机器人：用你自己组织的智能机器人（API 模式长连接，hub 无需公网地址），在企业微信单聊里和 Persona 对话；填入机器人凭证后发配对码绑定，只转发配对人的消息，支持图片、文件、语音转写和引用。凭证加密保存在 hub。",
   "icon": "assets/icon.png",
   "publisher": "nwverse",

@@ -33,9 +33,14 @@ func TestManifestAndTranslations(t *testing.T) {
 	if m.Contributes == nil || len(m.Contributes.Connectors) != 1 || len(m.Contributes.UI) != 2 {
 		t.Fatal("missing contribution declarations")
 	}
+	if sources := m.Contributes.MemorySources; len(sources) != 1 || sources[0].ID != memorySourceID || sources[0].Name == "" {
+		t.Fatalf("invalid memory source contribution: %+v", sources)
+	}
 	c := m.Contributes.Connectors[0]
-	if c.ID != extensionID || !slices.Equal(c.Capabilities, []string{"status", "tools"}) ||
-		!slices.Equal(c.Hosts, []string{storeHost, "steamcommunity.com"}) || !slices.Equal(c.AgentTools, []string{"steam_*"}) {
+	if c.ID != extensionID || !slices.Equal(c.Capabilities, []string{"status", "tools", "events", "inbox", "fallback"}) ||
+		!slices.Equal(c.Hosts, []string{storeHost, "steamcommunity.com"}) || !slices.Equal(c.AgentTools, []string{"steam_*"}) ||
+		!slices.Equal(c.Kinds, []string{wishlistPriceKind, wishlistGiveawayKind, wishlistReleaseKind, wishlistDemoKind, wishlistRoundupKind}) ||
+		!slices.Equal(m.ActivationEvents, []string{wire.ActivationEventOnStartup}) {
 		t.Fatalf("connector %+v", c)
 	}
 	page, card := m.Contributes.UI[0], m.Contributes.UI[1]
@@ -44,8 +49,21 @@ func TestManifestAndTranslations(t *testing.T) {
 		card.ID != summaryID || card.Placement != wire.PlacementOverviewCard || card.Opens != page.ID {
 		t.Fatal("navigation and card declarations do not match")
 	}
-	if len(m.Secrets) != 1 || m.Secrets[0].Name != keyName || !m.Secrets[0].Required {
-		t.Fatal("the Hub must deliver a required secret")
+	if m.Auth == nil || m.Auth.Title == "" || len(m.Secrets) != 1 || m.Secrets[0].Name != keyName || m.Secrets[0].Required {
+		t.Fatal("the Hub must offer sign-in with an optional API key")
+	}
+	var cfg struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	var mode struct {
+		Type    string          `json:"type"`
+		Enum    []string        `json:"enum"`
+		Default json.RawMessage `json:"default"`
+	}
+	if json.Unmarshal(m.Configuration, &cfg) != nil || json.Unmarshal(cfg.Properties["auth_mode"], &mode) != nil ||
+		len(cfg.Required) != 0 || mode.Type != "string" || !slices.Equal(mode.Enum, []string{modeQR, modeWebAPIKey}) || mode.Default != nil {
+		t.Fatal("mode selection must preserve the runtime default and let both modes start")
 	}
 
 	for _, lang := range []string{"en", "zh-Hans"} {
@@ -68,7 +86,8 @@ func TestManifestAndTranslations(t *testing.T) {
 			translation.UI[card.ID] == "" || translation.Groups[page.Group.ID] == "" {
 			t.Errorf("incomplete %s manifest translations", lang)
 		}
-		for _, key := range []string{"steam_id", "country_code"} {
+		for _, key := range []string{"auth_mode", "steam_id", "country_code", "friends_radar_enabled", "discovery_tools_enabled", "discovery_max_results",
+			"inbox_events_enabled", "inbox_max_events_per_day", "sale_roundup_enabled", "wishlist_event_triggers", "wishlist_discount_threshold", "wishlist_target_prices"} {
 			if f := translation.Configuration[key]; f.Title == "" || f.Description == "" {
 				t.Errorf("missing %s translation for %s", lang, key)
 			}
@@ -85,6 +104,77 @@ func TestSetupAndProtocolConformance(t *testing.T) {
 	exttest.Check(t, manifest, exttest.Serve(t, program(f.http, time.Now)), json.RawMessage(fmt.Sprintf(`{"steam_id":%q}`, fixtureID)))
 	if f.hit(playerPath) != 0 {
 		t.Fatal("missing credentials still triggered a request")
+	}
+}
+
+func TestSteamToolFeatureGateMatrix(t *testing.T) {
+	for _, tc := range []struct{ discovery, friends bool }{
+		{false, false}, {false, true}, {true, false}, {true, true},
+	} {
+		t.Run(fmt.Sprintf("discovery=%t/friends=%t", tc.discovery, tc.friends), func(t *testing.T) {
+			f := newFakeSteam(t, time.Second)
+			dir := t.TempDir()
+			settings := fmt.Sprintf(`"discovery_tools_enabled":%t,"friends_radar_enabled":%t,"inbox_events_enabled":false`, tc.discovery, tc.friends)
+			h := startInboxTestHost(t, f, &app{}, time.Now, dir, "en", settings)
+			h.Answer("model.complete", func(json.RawMessage) (any, error) {
+				t.Error("listing tools or invoking gated features called a model")
+				return nil, ext.Unsupported("The test hub has no model.")
+			})
+
+			p := wire.ConnectorParams{Contribution: extensionID}
+			var list wire.ConnectorTools
+			if err := h.Call("connector.tools.list", p, &list); err != nil {
+				t.Fatal(err)
+			}
+			listed := make(map[string]bool, len(list.Tools))
+			for _, tool := range list.Tools {
+				if listed[tool.Name] {
+					t.Fatalf("duplicate tool %s", tool.Name)
+				}
+				listed[tool.Name] = true
+			}
+			if !listed[wishlistDealsName] || !listed[playtimeRecapName] {
+				t.Fatal("the on-demand wishlist deals and recap tools should always be listed")
+			}
+			for _, group := range []struct {
+				names    []string
+				enabled  bool
+				disabled problem
+			}{
+				{[]string{storeTagsTool, storeSearchTool, gameDetailsTool}, tc.discovery, problemDiscoveryDisabled},
+				{[]string{friendsRadarTool, coopOverlapTool}, tc.friends, problemFriendsDisabled},
+			} {
+				for _, name := range group.names {
+					if listed[name] != group.enabled {
+						t.Fatalf("%s listed = %t, want %t", name, listed[name], group.enabled)
+					}
+					if group.enabled {
+						continue
+					}
+					var out wire.ConnectorCallResult
+					err := h.Call("connector.tools.call", wire.ConnectorCallParams{
+						Contribution: extensionID, Name: name, Args: json.RawMessage(`{}`),
+					}, &out)
+					var refusal *ext.Error
+					if !errors.As(err, &refusal) || refusal.Code != string(group.disabled) || out.Text != "" {
+						t.Fatalf("disabled %s returned %q and %v", name, out.Text, err)
+					}
+				}
+			}
+			skillPath := filepath.Join(dir, discoverySkillDir, discoverySkillID, "SKILL.md")
+			_, skillErr := os.Stat(skillPath)
+			if tc.discovery && skillErr != nil || !tc.discovery && !os.IsNotExist(skillErr) {
+				t.Fatalf("discovery skill visibility should follow the setting, got %v", skillErr)
+			}
+			if got := collectWishlistInbox(t, h); len(got) != 0 || hasEvent(h, "connector.changed") {
+				t.Fatal("disabled Inbox produced an event")
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if len(f.hits) != 0 {
+				t.Fatalf("listing tools or calling disabled features contacted Steam: %v", f.hits)
+			}
+		})
 	}
 }
 
@@ -165,7 +255,10 @@ func TestProtocolTools(t *testing.T) {
 	if err := h.Call("connector.tools.list", wire.ConnectorParams{Contribution: extensionID}, &list); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"steam_profile", "steam_recent_games", "steam_library", "steam_achievements", "steam_wishlist"}
+	want := []string{"steam_profile", "steam_recent_games", "steam_library", "steam_achievements", "steam_wishlist",
+		"steam_achievement_hunter", "steam_game_news", wishlistDealsName, playtimeRecapName,
+		"steam_backlog_summary", "steam_backlog_mark", "steam_tonight_pick",
+		"steam_store_tags", "steam_store_search", "steam_game_details"}
 	var names []string
 	for _, tool := range list.Tools {
 		names = append(names, tool.Name)
@@ -174,7 +267,7 @@ func TestProtocolTools(t *testing.T) {
 		}
 	}
 	if !slices.Equal(names, want) {
-		t.Fatalf("read tools %v, want %v", names, want)
+		t.Fatalf("Steam tools %v, want %v", names, want)
 	}
 
 	contains(t, toolAnswer(t, h, "steam_profile", "{}"), `"owned_game_count":3`, `"state":"online"`, `"playing":"Synthetic Adventure"`)
@@ -197,6 +290,13 @@ func TestProtocolTools(t *testing.T) {
 		{"steam_wishlist", `{"country_code":"JP"}`},
 		{"steam_achievements", `{"appid":0}`},
 		{"steam_achievements", `{"appid":4294967296}`},
+		{achievementHunterName, fmt.Sprintf(`{"appid":%d,"limit":51}`, firstApp)},
+		{gameNewsName, `{"appid":0}`},
+		{gameNewsName, `{"limit":21}`},
+		{gameNewsName, `{"games_limit":6}`},
+		{gameNewsName, `{"summary_enabled":true}`},
+		{wishlistDealsName, `{"limit":51}`},
+		{wishlistDealsName, `{"steam_id":"another_account"}`},
 	} {
 		var e *ext.Error
 		err := h.Call("connector.tools.call", wire.ConnectorCallParams{Contribution: extensionID, Name: tc.name, Args: json.RawMessage(tc.args)}, nil)
@@ -219,7 +319,8 @@ func TestDeclarativeViews(t *testing.T) {
 	v := viewAnswer(t, h, nav)
 	raw, _ := json.Marshal(v)
 	contains(t, string(raw), "Playing Synthetic Adventure", "2 h 10 min", "Fixture Pilot", "40% off", "$3.99")
-	if len(v.Sections) != 4 || v.Search == nil || v.Filter == nil || v.Sections[0].Items[1].Stats[1].Value != "3" {
+	if len(v.Sections) != 5 || v.Sections[4].Title != english.backlog.title ||
+		v.Search == nil || v.Filter == nil || v.Sections[0].Items[1].Stats[1].Value != "3" {
 		t.Fatal("navigation is missing a section or a display control")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "steam-cache-v1", "profile.json")); err != nil {
@@ -403,7 +504,7 @@ func TestInvalidSteamConfiguration(t *testing.T) {
 		{fixtureID, "ZZ", problemCountry},
 		{fixtureID, "gb", ""},
 	} {
-		c, issue := (config{SteamID: test.id, CountryCode: test.country}).normalized()
+		c, issue := (config{AuthMode: modeWebAPIKey, SteamID: test.id, CountryCode: test.country}).normalized("synthetic-key")
 		if issue != test.issue || (issue == "" && c.CountryCode != "GB") {
 			t.Errorf("configuration issue=%q country=%q, expected issue %q", issue, c.CountryCode, test.issue)
 		}

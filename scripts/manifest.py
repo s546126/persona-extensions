@@ -6,8 +6,8 @@
   scripts/manifest.py packaged <id>   the runtime manifest: without source-only "tags" and "replaces"
   scripts/manifest.py ids             every extension in extensions/
   scripts/manifest.py check           every manifest is sound (what CI runs): id, version, tags, no retired files,
-                                      its files and pack members are here, and its planned market release fits
-                                      the Hub schema
+                                      its files and pack members are here, no reserved module feature names, and
+                                      its planned market release fits the Hub schema
   scripts/manifest.py changed <ref>   the extensions whose version is not what it was at <ref> (new ones too)
   scripts/manifest.py last-released   the commit CI last released for (its newest "market: index after" commit)
   scripts/manifest.py base <ref>…     the first ref HEAD descends from: where a push's release diffs from
@@ -31,6 +31,9 @@ PACKAGED_DIRS = ("skills", "assistant", "looks", "assets")
 # names from the tar; failing here names the file to remove before a package is ever built.
 JUNK_NAMES = (".DS_Store", "__pycache__")
 JUNK_PREFIXES = ("._",)
+# Feature names only the hub announces (nwverse/persona#16254): the "modules" marker and each module's flag
+# "module.<id>". A hub drops them from an extension's api.features; a manifest declaring one is refused here.
+RESERVED_FEATURE, RESERVED_FEATURE_PREFIX = "modules", "module."
 
 
 def ids():
@@ -232,6 +235,36 @@ def check_files(id, m):
     return bad
 
 
+def reserved_feature(f):
+    return isinstance(f, str) and (f == RESERVED_FEATURE or f.startswith(RESERVED_FEATURE_PREFIX))
+
+
+def check_features(id, m):
+    """No feature flag a manifest declares is a reserved module name: not in contributes.api[].features, nor in a
+    "features" list of any other contribution, nor in a top-level "features" or "api". Only the hub says which
+    modules are present (from its own build or an approved installed provider); an extension cannot claim one."""
+    bad = []
+
+    def scan(where, value):
+        if isinstance(value, list):
+            for f in value:
+                if reserved_feature(f):
+                    bad.append("extensions/%s: %s declares the reserved feature %r; only the hub announces "
+                               "%r and %s<id> flags" % (id, where, f, RESERVED_FEATURE, RESERVED_FEATURE_PREFIX))
+
+    scan("features", m.get("features"))
+    api = m.get("api")
+    if isinstance(api, dict):
+        scan("api.features", api.get("features"))
+    contributes = m.get("contributes")
+    if isinstance(contributes, dict):
+        for point, items in sorted(contributes.items()):
+            for item in items if isinstance(items, list) else [items]:
+                if isinstance(item, dict):
+                    scan("contributes.%s %s: features" % (point, item.get("id")), item.get("features"))
+    return bad
+
+
 def check_pack(id, m):
     """A pack's members from its own market (no "market" of their own) are extensions of this repository."""
     bad, here = [], ids()
@@ -311,7 +344,7 @@ def check():
         for gone in (OLD, "market.json"):
             if os.path.exists(os.path.join(ROOT, "extensions", id, gone)):
                 bad.append("extensions/%s: no %s (one manifest: %s; see docs/reference.md)" % (id, gone, NEW))
-        bad += check_files(id, m) + check_pack(id, m) + check_junk(id)
+        bad += check_files(id, m) + check_pack(id, m) + check_junk(id) + check_features(id, m)
     try:
         icons.validate_registry(ROOT, sources)
     except (ValueError, OSError, KeyError, TypeError) as e:

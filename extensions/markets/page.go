@@ -80,7 +80,8 @@ type draw struct {
 }
 
 func (p *plugin) drawFor(r pluginkit.UIRequest) draw {
-	d := draw{loc: p.loc, v2: r.Draws(2), v3: r.Draws(3)}
+	_, loc, _ := p.configSnap()
+	d := draw{loc: loc, v2: r.Draws(2), v3: r.Draws(3)}
 	if d.loc == nil { // the extension's own setting wins; else the user's, as the hub says it
 		d.loc = r.Location()
 	}
@@ -855,10 +856,35 @@ func (p *plugin) instPage(ctx context.Context, d draw, st pageState, r Ref) plug
 	return v
 }
 
+// chartPointsMost is the most points a chart series may carry (wire.PointsMost).
+const chartPointsMost = 120
+
+func finiteCandle(c Candle) bool {
+	for _, v := range []float64{c.Open, c.High, c.Low, c.Close, c.Vol} {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // klineItems are the period's figures, its closing prices as a line and its volume as bars; an app before UI
 // version 2 gets the figures only (the hub drops charts for it anyway).
 // Prices are written with q's decimals and changes toned by tone.
 func klineItems(cs []Candle, bar string, loc *time.Location, v2 bool, q Quote, tone func(float64) string) []pluginkit.Item {
+	clean := make([]Candle, 0, len(cs))
+	for _, c := range cs {
+		if finiteCandle(c) {
+			clean = append(clean, c)
+		}
+	}
+	if len(clean) == 0 {
+		return []pluginkit.Item{{Type: "text", Text: "暂无可用的 K 线数据", Style: "secondary"}}
+	}
+	if len(clean) > chartPointsMost {
+		clean = clean[len(clean)-chartPointsMost:]
+	}
+	cs = clean
 	first, last := cs[0], cs[len(cs)-1]
 	hi, lo := first.High, first.Low
 	for _, c := range cs {

@@ -515,7 +515,7 @@ func (a *app) logPage(ctx context.Context, r *ext.UIRequest, hm *home, reg *Regi
 	to := time.Now()
 	entries, err := h.Logbook(ctx, to.Add(-logHours*time.Hour), to, "")
 	if err != nil {
-		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{{Type: "text", Text: "读不到日志：" + err.Error(), Style: "secondary"}}}, footer())
+		v.Sections = append(v.Sections, wire.Section{Items: []wire.Component{{Type: "text", Text: clip("读不到日志："+err.Error(), 1900), Style: "secondary"}}}, footer())
 		return
 	}
 	if !st.LogAll {
@@ -756,13 +756,13 @@ func (a *app) autoRow(s State, loc *time.Location) wire.Component {
 	switch {
 	case s.Domain() == "scene":
 		row.Action = rowDo(s.EntityID, "turn_on")
-		row.Action.Confirm = "执行场景「" + s.Name() + "」？"
+		row.Action.Confirm = clip("执行场景「"+s.Name()+"」？", 200)
 	case s.State == "on":
 		row.Action = rowDo(s.EntityID, "turn_off")
-		row.Action.Confirm = "停下脚本「" + s.Name() + "」？"
+		row.Action.Confirm = clip("停下脚本「"+s.Name()+"」？", 200)
 	default:
 		row.Action = rowDo(s.EntityID, "turn_on")
-		row.Action.Confirm = "运行脚本「" + s.Name() + "」？"
+		row.Action.Confirm = clip("运行脚本「"+s.Name()+"」？", 200)
 	}
 	return row
 }

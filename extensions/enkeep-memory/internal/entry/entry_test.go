@@ -42,6 +42,8 @@ func TestClassifyOpsRunbook(t *testing.T) {
 		{"vps_deployment", &Entry{Facet: Workflow, Text: "把 email-relay 服务部署到 VPS 上"}},
 		{"cloudflare_key", &Entry{Facet: Interaction, Text: "在 Cloudflare 后台不要点击轮换密钥"}},
 		{"cli_git_pr", &Entry{Facet: Workflow, Text: "推分支后用 gh pr merge --squash 合入 origin/main"}},
+		{"draft_pr_merge_script", &Entry{Facet: Workflow, Text: "提 PR 先开草稿 PR，门禁通过后转正式并用合并脚本合并"}},
+		{"draft_pr_squash_en", &Entry{Facet: Interaction, Text: "Always open a draft PR first and finish with squash merge"}},
 		{"quota_routing", &Entry{Facet: Interaction, Text: "API 限流或额度超过 90% 时自动分流"}},
 	}
 	for _, tc := range opsCases {

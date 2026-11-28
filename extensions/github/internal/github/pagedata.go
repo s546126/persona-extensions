@@ -129,10 +129,12 @@ func (c *Connector) List(ctx context.Context, tab string, fresh bool) (entries [
 	}
 	c.lists.reading[tab] = r
 	c.lists.mu.Unlock()
+	gen := c.authGeneration()
 	entries, err = c.readList(ctx, tab)
 	now := time.Now()
+	sameAuth := c.authGeneration() == gen
 	c.lists.mu.Lock()
-	if err == nil {
+	if err == nil && sameAuth {
 		if c.lists.tabs == nil {
 			c.lists.tabs = map[string]pageList{}
 		}

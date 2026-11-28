@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/nwverse/persona/sdk/go/ext"
@@ -131,7 +133,8 @@ func (p *program) channel(ctx context.Context, method string, params json.RawMes
 		if sp.Ref == "" {
 			return nil, errors.New("channel.send without a ref")
 		}
-		res, err := p.sent.do(sp.Ref, func() (wire.ChannelSendResult, error) { return b.Send(ctx, sp) })
+		gen := b.sendGeneration()
+		res, err := p.sent.do(ctx, sp.Ref, strconv.FormatUint(gen, 10), func() (wire.ChannelSendResult, error) { return b.Send(ctx, sp) })
 		if errors.Is(err, errCannotSend) {
 			return nil, ext.CannotSend(err.Error())
 		}
@@ -170,34 +173,62 @@ type sentRefs struct {
 }
 
 type sentRef struct {
+	key  string
 	done chan struct{}
 	res  wire.ChannelSendResult
 	err  error
 }
 
-func (r *sentRefs) do(ref string, send func() (wire.ChannelSendResult, error)) (wire.ChannelSendResult, error) {
+func (r *sentRefs) do(ctx context.Context, ref, key string, send func() (wire.ChannelSendResult, error)) (wire.ChannelSendResult, error) {
 	r.mu.Lock()
-	if prev, ok := r.sent[ref]; ok {
+	for {
+		prev, ok := r.sent[ref]
+		if !ok {
+			break
+		}
+		select {
+		case <-prev.done:
+			if prev.key == key {
+				r.mu.Unlock()
+				return prev.res, prev.err
+			}
+			delete(r.sent, ref)
+			r.order = slices.DeleteFunc(r.order, func(o string) bool { return o == ref })
+			continue
+		default:
+		}
 		r.mu.Unlock()
-		<-prev.done
-		return prev.res, prev.err
+		select {
+		case <-prev.done:
+		case <-ctx.Done():
+			return wire.ChannelSendResult{}, ctx.Err()
+		}
+		if prev.key == key {
+			return prev.res, prev.err
+		}
+		r.mu.Lock()
 	}
 	if r.sent == nil {
 		r.sent = map[string]*sentRef{}
 	}
-	cur := &sentRef{done: make(chan struct{})}
+	cur := &sentRef{key: key, done: make(chan struct{})}
 	r.sent[ref] = cur
 	r.mu.Unlock()
 	cur.res, cur.err = send()
 	r.mu.Lock()
 	var k kept
 	if cur.err != nil && !errors.As(cur.err, &k) {
-		delete(r.sent, ref) // forget a failed send before waking its waiters, so the ref may be sent again
+		if r.sent[ref] == cur {
+			delete(r.sent, ref) // forget a failed send before waking its waiters, so the ref may be sent again
+		}
 	} else {
 		r.order = append(r.order, ref)
 		if len(r.order) > doneMost {
-			delete(r.sent, r.order[0])
+			old := r.order[0]
 			r.order = r.order[1:]
+			if old != ref || r.sent[old] != cur {
+				delete(r.sent, old)
+			}
 		}
 	}
 	r.mu.Unlock()

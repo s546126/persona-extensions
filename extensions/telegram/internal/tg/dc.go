@@ -30,8 +30,9 @@ type dcPools struct {
 	open func(ctx context.Context, dc int) (tg.Invoker, error)
 	gate *gate
 
-	mu    sync.Mutex
-	pools map[int]*dcPool
+	mu     sync.Mutex
+	closed bool
+	pools  map[int]*dcPool
 }
 
 type dcPool struct {
@@ -47,6 +48,10 @@ func (d *dcPools) get(ctx context.Context, dc int) (tg.Invoker, error) {
 		return nil, heldError{left}
 	}
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, errNotConnected
+	}
 	p, ok := d.pools[dc]
 	if !ok {
 		if d.pools == nil {
@@ -64,12 +69,26 @@ func (d *dcPools) get(ctx context.Context, dc int) (tg.Invoker, error) {
 		}
 	} else {
 		start := time.Now()
-		p.inv, p.err = d.open(ctx, dc)
+		inv, err := d.open(ctx, dc)
 		traceOf(ctx).update(func(t *fetchTrace) { t.connect += time.Since(start) })
-		if p.err != nil {
-			d.mu.Lock()
-			delete(d.pools, dc)
-			d.mu.Unlock()
+		d.mu.Lock()
+		closed := d.closed
+		if closed {
+			if d.pools[dc] == p {
+				delete(d.pools, dc)
+			}
+			p.inv, p.err = nil, errNotConnected
+		} else {
+			p.inv, p.err = inv, err
+			if err != nil && d.pools[dc] == p {
+				delete(d.pools, dc)
+			}
+		}
+		d.mu.Unlock()
+		if closed && inv != nil {
+			if c, ok := inv.(io.Closer); ok {
+				_ = c.Close()
+			}
 		}
 		close(p.ready)
 	}
@@ -82,16 +101,21 @@ func (d *dcPools) get(ctx context.Context, dc int) (tg.Invoker, error) {
 // close closes the connections made (when the client stops).
 func (d *dcPools) close() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.closed = true
+	var closers []io.Closer
 	for dc, p := range d.pools {
 		select {
 		case <-p.ready:
 			if c, ok := p.inv.(io.Closer); ok {
-				_ = c.Close()
+				closers = append(closers, c)
 			}
-		default: // still connecting: its client is going away with it
+		default: // still connecting: get will close it once open returns
 		}
 		delete(d.pools, dc)
+	}
+	d.mu.Unlock()
+	for _, c := range closers {
+		_ = c.Close()
 	}
 }
 
